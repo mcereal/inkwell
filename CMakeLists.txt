@@ -76,6 +76,7 @@ add_library(inkwell STATIC
     # net: one hostname, one socket, one session - all of it on the loop, none of it blocking
     src/net/reason.c
     src/net/resolve.c
+    src/net/stream.c
 )
 
 # Wuffs, for codec/png.c and codec/inflate.c. See third_party/wuffs/README.md for what it is and

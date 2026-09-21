@@ -25,6 +25,7 @@ set(INKWELL_TEST_SUITES
     suites/codec_zip.c
     suites/net_reason.c
     suites/net_resolve.c
+    suites/net_stream.c
     suites/runtime_crash.c
     suites/runtime_loop.c
 )
