@@ -1,0 +1,795 @@
+/*
+ * The crash handler. Read include/inkwell/runtime/crash.h first - the rules this file follows
+ * are stated there, and most of what looks roundabout below is one of them.
+ *
+ * _GNU_SOURCE rather than the _POSIX_C_SOURCE the rest of inkwell asks for: the register names
+ * on x86-64 (REG_RIP) and pipe2() are both behind it, and musl and glibc agree about that
+ * much.
+ */
+#define _GNU_SOURCE
+
+#include "inkwell/runtime/crash.h"
+
+#include "inkwell/base/text.h"
+#include "inkwell/base/time.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <ucontext.h>
+#include <unistd.h>
+
+/* ---- what the handler is allowed to have ----------------------------------------------------
+ *
+ * Everything in this block is written from ordinary context and only ever read from the signal
+ * handler. `sig_atomic_t` where the handler and the rest of the process both touch it; plain
+ * arrays where the handler only reads and a torn read costs a garbled line rather than a fault.
+ */
+
+/* The report's path, built once by inkwell_crash_install(). The handler opens this and nothing
+   else, because building a path is string work and string work is what it may not do. */
+static char g_report_path[INKWELL_CRASH_PATH_MAX];
+static bool g_installed;
+static bool g_report_waiting;
+
+/* Where this image is mapped, already formatted as "0x...". Read out of /proc/self/maps at
+   install time, because the whole point of the number is to be subtracted from the addresses
+   below and a PIE build's are meaningless without it. Empty when it could not be read, in which
+   case the report says so rather than printing a zero that looks like an answer. */
+static char g_load_base[32];
+
+/* The probe pipe. Writing an address to it reports EFAULT instead of faulting, which is what
+   makes walking a broken stack survivable. Both ends non-blocking so a probe can never wait. */
+static int g_probe_fd[2] = {-1, -1};
+
+/*
+ * One byte longer than anything that is ever written into them, and the spare byte is never
+ * touched after startup.
+ *
+ * A note is copied in from ordinary context - byte by byte, with the NUL written last - while a
+ * fault may land at any point in the middle of it. For the window between the first byte and
+ * that NUL the buffer holds no terminator at all, so the handler's strlen() would run off the
+ * end of the array and print whatever static happened to follow. It is a narrow window and the
+ * consequence is only a garbled line, but a crash handler is the last place to leave a read
+ * that is unbounded in principle, and a permanent zero at the end costs three bytes.
+ */
+/*
+ * The stack the handler runs on.
+ *
+ * Without this a SIGSEGV raised by *exhausting* the stack cannot be reported at all: the kernel
+ * builds the signal frame on the stack that has just run out, fails, and kills the process
+ * without ever entering the handler - so the one class of crash where a backtrace is most
+ * valuable is the class that silently produced no file. `sigaltstack()` hands the kernel
+ * somewhere else to put that frame, and SA_ONSTACK is what asks for it.
+ *
+ * Sized as a constant rather than from SIGSTKSZ, which stopped being a compile-time constant in
+ * glibc 2.34 (it reads sysconf(_SC_SIGSTKSZ) now) and so cannot size a static array. 64 KiB is
+ * far more than this handler needs - its deepest frame holds a 64-byte probe sink and a 32-byte
+ * digit buffer - and being generous here costs bss on a device with a gigabyte of it.
+ */
+#define INKWELL_CRASH_SIGSTACK_SIZE (64U * 1024U)
+static char g_sig_stack[INKWELL_CRASH_SIGSTACK_SIZE];
+
+static char g_notes[INKWELL_CRASH_NOTE_SLOTS][INKWELL_CRASH_NOTE_MAX + 1U];
+
+/*
+ * The caller's note labels, padded to INKWELL_CRASH_NOTE_COLUMN at install time.
+ *
+ * Padded there rather than printed with a width here for the reason everything else in this
+ * block is prepared in advance: the handler may not format. A caller passes "version" and what
+ * lands in this array is "version      ", ready to be written straight out.
+ */
+static char g_note_labels[INKWELL_CRASH_NOTE_SLOTS][INKWELL_CRASH_NOTE_COLUMN + 1U];
+static unsigned g_note_count;
+
+/*
+ * The report's own prose, assembled at install from what the application said it is.
+ *
+ * None of this is knowable here - see struct inkwell_crash_config - and all of it appears in a
+ * file written by a handler, so all of it is built in ordinary context and only read from the
+ * handler. That is also what lets a caller pass a string it then frees.
+ */
+static char g_title[128]; /* "<product> crash report" and its rule */
+static char g_intro[512]; /* the two paragraphs above the warning */
+static char g_warning[INKWELL_CRASH_WARNING_MAX + 1U];
+static char g_issues[320];    /* "Issues: <url>\n", or empty */
+static char g_addr2line[256]; /* the line that names the binary to resolve against */
+static char g_empty_log[160]; /* what stands in for a log that has nothing in it */
+
+/*
+ * The log ring.
+ *
+ * `g_log_next` is where the next line goes, so the oldest line is the one it is pointing at once
+ * the ring has wrapped. It is `sig_atomic_t` because the handler reads it while ordinary code
+ * may be part way through a line: the worst that costs is one torn line at the end of the
+ * report, which is also the line that matters least - if the process was mid-log when it faulted
+ * the fault is what happened next.
+ */
+static char g_log[INKWELL_CRASH_LOG_LINES][INKWELL_CRASH_LOG_LINE_MAX + 1U];
+static volatile sig_atomic_t g_log_next;
+static volatile sig_atomic_t g_log_filled;
+
+/* The signals worth catching: the four faults and the abort that an assert or a libc check
+   raises. SIGQUIT and the rest are ways of being asked to stop, which is not a crash. */
+static const int k_signals[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
+
+/* ---- writing without libc -------------------------------------------------------------------- */
+
+/* write(2) until it is done or refuses. A short write on a regular file is possible (a full
+   card, a signal) and a report that stopped half way is still worth having, so a refusal ends
+   the line rather than the report. */
+static void crash_write(int fd, const char *data, size_t len) {
+    while (len > 0U) {
+        const ssize_t written = write(fd, data, len);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return;
+        }
+        if (written == 0) {
+            return;
+        }
+        data += (size_t)written;
+        len -= (size_t)written;
+    }
+}
+
+static void crash_puts(int fd, const char *text) {
+    if (text != NULL) {
+        crash_write(fd, text, strlen(text));
+    }
+}
+
+/*
+ * An unsigned integer, in `base`, into `out`. Returns the length.
+ *
+ * Here because snprintf is not on POSIX's async-signal-safe list, and the reason it is not is
+ * exactly the reason it matters here: a locale-aware formatter takes locks. `out` is written
+ * backwards and reversed, which is the shortest correct way to do this without a division table.
+ */
+static size_t crash_format_unsigned(char *out, size_t out_len, uint64_t value, unsigned base,
+                                    size_t pad) {
+    static const char k_digits[] = "0123456789abcdef";
+    char scratch[32];
+    size_t len = 0U;
+
+    do {
+        scratch[len++] = k_digits[value % base];
+        value /= base;
+    } while (value != 0U && len < sizeof scratch);
+    while (len < pad && len < sizeof scratch) {
+        scratch[len++] = '0';
+    }
+
+    if (len >= out_len) {
+        len = out_len > 0U ? out_len - 1U : 0U;
+    }
+    for (size_t i = 0U; i < len; ++i) {
+        out[i] = scratch[len - 1U - i];
+    }
+    if (out_len > 0U) {
+        out[len] = '\0';
+    }
+    return len;
+}
+
+/*
+ * A signed integer, for the one field that is one.
+ *
+ * `si_code` is an int and is routinely negative - SI_TKILL is -6, which a raise() produces - so
+ * casting it to uint64_t printed 18446744073709551610 where a reader wanted -6. It is the only
+ * signed number in the report, which is why this is a wrapper rather than the general case.
+ */
+static void crash_write_signed(int fd, int64_t value) {
+    uint64_t magnitude;
+    if (value < 0) {
+        crash_puts(fd, "-");
+        /* Negated through the unsigned type, because -INT64_MIN is not representable. */
+        magnitude = (uint64_t)(-(value + 1)) + 1U;
+    } else {
+        magnitude = (uint64_t)value;
+    }
+    char buffer[32];
+    const size_t len = crash_format_unsigned(buffer, sizeof buffer, magnitude, 10U, 0U);
+    crash_write(fd, buffer, len);
+}
+
+static void crash_write_unsigned(int fd, uint64_t value) {
+    char buffer[32];
+    const size_t len = crash_format_unsigned(buffer, sizeof buffer, value, 10U, 0U);
+    crash_write(fd, buffer, len);
+}
+
+/* An address, as a fixed sixteen digits so a column of them lines up and a short one is
+   obviously an address rather than a count. */
+static void crash_write_address(int fd, uint64_t value) {
+    char buffer[32];
+    crash_puts(fd, "0x");
+    const size_t len = crash_format_unsigned(buffer, sizeof buffer, value, 16U, 16U);
+    crash_write(fd, buffer, len);
+}
+
+/* ---- probing memory -------------------------------------------------------------------------
+ *
+ * The trick this module turns on. write(2) validates its buffer in the kernel and answers
+ * EFAULT for a page that is not there, so asking the pipe whether an address is readable costs
+ * a syscall and cannot fault - where the obvious `*(uint64_t *)fp` costs a second SIGSEGV
+ * inside the handler for the first one.
+ *
+ * Whatever is written has to come straight back out or the pipe fills and the next probe blocks
+ * - hence the drain, and hence the non-blocking ends as the belt to that brace.
+ */
+static bool crash_readable(const void *address, size_t len) {
+    if (g_probe_fd[0] < 0 || g_probe_fd[1] < 0 || address == NULL) {
+        return false;
+    }
+    const ssize_t written = write(g_probe_fd[1], address, len);
+    if (written < 0) {
+        return false;
+    }
+    char sink[64];
+    size_t drained = 0U;
+    while (drained < (size_t)written) {
+        const ssize_t got = read(g_probe_fd[0], sink, sizeof sink);
+        if (got <= 0) {
+            break;
+        }
+        drained += (size_t)got;
+    }
+    return (size_t)written == len;
+}
+
+/* ---- the fault itself ------------------------------------------------------------------------ */
+
+static const char *crash_signal_name(int signal_number) {
+    switch (signal_number) {
+    case SIGSEGV:
+        return "SIGSEGV";
+    case SIGBUS:
+        return "SIGBUS";
+    case SIGILL:
+        return "SIGILL";
+    case SIGFPE:
+        return "SIGFPE";
+    case SIGABRT:
+        return "SIGABRT";
+    default:
+        return "signal";
+    }
+}
+
+/*
+ * The program counter and frame pointer out of the interrupted context.
+ *
+ * Two architectures because those are the two this project builds for - aarch64 is the Brick and
+ * x86-64 is every test run and every container build - and anything else gets a report with no
+ * stack rather than a build failure. That is the right trade: the notes and the log tail are
+ * most of the value, and they are portable.
+ */
+static bool crash_registers(void *ucontext, uint64_t *pc, uint64_t *fp) {
+    if (ucontext == NULL) {
+        return false;
+    }
+    const ucontext_t *uc = (const ucontext_t *)ucontext;
+#if defined(__aarch64__)
+    *pc = (uint64_t)uc->uc_mcontext.pc;
+    /* x29 is the frame pointer under AAPCS64. */
+    *fp = (uint64_t)uc->uc_mcontext.regs[29];
+    return true;
+#elif defined(__x86_64__)
+    *pc = (uint64_t)uc->uc_mcontext.gregs[REG_RIP];
+    *fp = (uint64_t)uc->uc_mcontext.gregs[REG_RBP];
+    return true;
+#else
+    (void)uc;
+    (void)pc;
+    (void)fp;
+    return false;
+#endif
+}
+
+/*
+ * Walk the frame pointers.
+ *
+ * Both supported architectures lay a frame out the same way once a frame pointer is kept: the
+ * saved pointer to the caller's frame first, the return address next. The chain is trusted only
+ * as far as it stays plausible - readable, aligned, and climbing - because a corrupted stack is
+ * the ordinary case here rather than the exception, and a walk that believed it would print
+ * whatever happened to be in memory as though it were a call chain.
+ *
+ * What makes the whole thing safe is the probe rather than the checks: the checks stop nonsense
+ * being printed, the probe stops the handler dying.
+ */
+static void crash_write_frames(int fd, uint64_t fp) {
+    uint64_t previous = 0U;
+    for (unsigned depth = 0U; depth < 32U; ++depth) {
+        /*
+         * Eight, not sixteen. AAPCS64 really does keep the stack sixteen-aligned throughout, so
+         * an aarch64 x29 is always 0 mod 16 and the tighter test looks like the safer one - but
+         * x86-64 only promises that alignment at a call boundary, and a frame there is as often
+         * 8 mod 16 as not. Asked for sixteen, the walk ended after a single frame on every host
+         * build: one plausible address, printed without complaint, where a chain was expected.
+         * A frame pointer cannot be less than pointer-aligned, and that is the whole of what is
+         * knowable here.
+         */
+        if (fp == 0U || (fp & (uint64_t)(sizeof(uint64_t) - 1U)) != 0U || fp <= previous) {
+            return;
+        }
+        if (!crash_readable((const void *)(uintptr_t)fp, 2U * sizeof(uint64_t))) {
+            return;
+        }
+        const uint64_t *frame = (const uint64_t *)(uintptr_t)fp;
+        const uint64_t next = frame[0];
+        const uint64_t return_address = frame[1];
+        if (return_address == 0U) {
+            return;
+        }
+        crash_puts(fd, " #");
+        char index[8];
+        const size_t len = crash_format_unsigned(index, sizeof index, depth, 10U, 2U);
+        crash_write(fd, index, len);
+        crash_puts(fd, " ");
+        crash_write_address(fd, return_address);
+        crash_puts(fd, "\n");
+        previous = fp;
+        fp = next;
+    }
+}
+
+/* ---- the report ------------------------------------------------------------------------------ */
+
+static void crash_write_notes(int fd) {
+    for (unsigned slot = 0U; slot < g_note_count; ++slot) {
+        if (g_notes[slot][0] == '\0') {
+            continue;
+        }
+        crash_puts(fd, g_note_labels[slot]);
+        crash_puts(fd, g_notes[slot]);
+        crash_puts(fd, "\n");
+    }
+}
+
+/*
+ * The log tail, oldest first.
+ *
+ * `g_log_filled` is what tells a ring that has wrapped from one that has not, which decides
+ * where "oldest" is. Reading both while the writer may be running is why a line can be torn; see
+ * the declaration for why that is the right thing to accept.
+ */
+static void crash_write_log(int fd) {
+    const unsigned filled = (unsigned)g_log_filled;
+    const unsigned next = (unsigned)g_log_next;
+    if (filled == 0U) {
+        crash_puts(fd, g_empty_log);
+        return;
+    }
+    const unsigned count = filled < INKWELL_CRASH_LOG_LINES ? filled : INKWELL_CRASH_LOG_LINES;
+    const unsigned first = filled < INKWELL_CRASH_LOG_LINES ? 0U : next;
+    for (unsigned i = 0U; i < count; ++i) {
+        const unsigned index = (first + i) % INKWELL_CRASH_LOG_LINES;
+        crash_puts(fd, g_log[index]);
+        crash_puts(fd, "\n");
+    }
+}
+
+/*
+ * The whole file, in the order it has to be written.
+ *
+ * The ordering is a safety property rather than a matter of taste. Everything that cannot fault
+ * - the headings, the notes, the log - goes down first, and the stack walk goes last, so a
+ * handler that dies part way through has already put the useful half on disk. write() has handed
+ * the data to the kernel by the time it returns, so a process killed a moment later does not
+ * take those pages with it.
+ */
+static void crash_report(int fd, int signal_number, const siginfo_t *info, void *ucontext) {
+    /*
+     * What this says is a promise, so it says only what is true - and most of it is not this
+     * layer's to promise, which is why it is printed rather than written.
+     *
+     * The version of this that lived in an application opened by claiming the file held "no
+     * message text, no node names, no coordinates and no channel keys". Three quarters of that
+     * was wrong, and wrong in the direction that matters: the log tail below is the
+     * application's ordinary log, and that log said `Sent "%s" to %s`, named places, and
+     * printed a position as the two numbers the user typed. A reader who attached the file
+     * *because the file told them it was safe* would have published exactly what it promised
+     * was absent.
+     *
+     * So there is no blanket assurance here at all. The warning is the application's own
+     * sentence, specific enough to act on, and everything around it is either a fact about this
+     * file's layout or the application's name. A user can act on "it may quote a message you
+     * sent" - the log is thirty-two lines of plain text at the end of a short file, and they
+     * can look. They cannot act on an assurance that turns out to be false.
+     */
+    crash_puts(fd, g_title);
+    crash_puts(fd, g_intro);
+    crash_puts(fd, g_warning);
+    crash_puts(fd, "\n");
+    crash_puts(fd, g_issues);
+    crash_puts(fd, "\n");
+
+    crash_puts(fd, "signal       ");
+    crash_write_unsigned(fd, (uint64_t)signal_number);
+    crash_puts(fd, " (");
+    crash_puts(fd, crash_signal_name(signal_number));
+    crash_puts(fd, ")\n");
+
+    if (info != NULL) {
+        crash_puts(fd, "code         ");
+        crash_write_signed(fd, (int64_t)info->si_code);
+        crash_puts(fd, "\nfault addr   ");
+        crash_write_address(fd, (uint64_t)(uintptr_t)info->si_addr);
+        crash_puts(fd, "\n");
+    }
+
+    /* Monotonic, so it is how long this run lasted rather than what the clock claims. On a Brick
+       it is the only one of the two that means anything: there is no RTC battery, so a device
+       that has not reached a network boots into 1970 and says so below. */
+    crash_puts(fd, "uptime ms    ");
+    crash_write_unsigned(fd, (uint64_t)inkwell_time_monotonic_ms());
+    crash_puts(fd, "\nwall clock   ");
+    crash_write_unsigned(fd, (uint64_t)time(NULL));
+    crash_puts(fd, " (seconds since 1970; a device with no RTC reads small here)\n");
+
+    if (g_load_base[0] != '\0') {
+        crash_puts(fd, "load base    ");
+        crash_puts(fd, g_load_base);
+        crash_puts(fd, "\n");
+    }
+    crash_write_notes(fd);
+
+    uint64_t pc = 0U;
+    uint64_t fp = 0U;
+    const bool have_registers = crash_registers(ucontext, &pc, &fp);
+
+    crash_puts(fd, "\n--- where ---------------------------------------------------------------\n");
+    if (have_registers) {
+        crash_puts(fd, "pc           ");
+        crash_write_address(fd, pc);
+        crash_puts(fd, "\n");
+    } else {
+        crash_puts(fd, "(no registers for this build's architecture)\n");
+    }
+    crash_puts(fd, g_addr2line);
+
+    crash_puts(fd, "\n--- log -----------------------------------------------------------------\n");
+    crash_write_log(fd);
+
+    /*
+     * Last, and alone down here, because it is the only part that reads memory the fault has
+     * already proved untrustworthy.
+     */
+    if (have_registers) {
+        crash_puts(fd,
+                   "\n--- stack ---------------------------------------------------------------\n");
+        crash_write_frames(fd, fp);
+    }
+    crash_puts(fd, "\n--- end -----------------------------------------------------------------\n");
+}
+
+void inkwell_crash_write_report(int fd, int signal_number) {
+    crash_report(fd, signal_number, NULL, NULL);
+}
+
+/* ---- the handler ----------------------------------------------------------------------------- */
+
+static void crash_handler(int signal_number, siginfo_t *info, void *ucontext) {
+    /*
+     * Stand every handler down before doing anything else.
+     *
+     * Two things come out of it. A fault *inside* this function then kills the process the
+     * ordinary way instead of re-entering here forever, which is the failure mode a crash
+     * handler is most likely to have. And the re-raise at the bottom reaches the default
+     * disposition, so the process dies of the signal it was actually given - which is what keeps
+     * the exit status honest for whatever started us.
+     */
+    for (size_t i = 0U; i < sizeof k_signals / sizeof k_signals[0]; ++i) {
+        signal(k_signals[i], SIG_DFL);
+    }
+
+    if (g_report_path[0] != '\0') {
+        const int fd = open(g_report_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (fd >= 0) {
+            crash_report(fd, signal_number, info, ucontext);
+            /* The Brick's card is mounted `sync`, so this is close to free there - and on
+               anything else it is what makes the report survive a device that loses power
+               between the fault and the next clean unmount. */
+            (void)fsync(fd);
+            (void)close(fd);
+        }
+    }
+
+    raise(signal_number);
+}
+
+/* ---- install --------------------------------------------------------------------------------- */
+
+/*
+ * The first mapping of this process, as text.
+ *
+ * /proc/self/maps opens with the executable's own first segment, so its start address is the
+ * load base every address in the report has to be measured from. Read here, in ordinary context,
+ * because parsing is exactly what the handler may not do - by the time it runs this is a string
+ * to be written out and nothing more.
+ */
+static void crash_capture_load_base(void) {
+    g_load_base[0] = '\0';
+    FILE *maps = fopen("/proc/self/maps", "re");
+    if (maps == NULL) {
+        return;
+    }
+    char line[256];
+    if (fgets(line, sizeof line, maps) != NULL) {
+        /*
+         * The field is the hex digits up to the first dash, and it is checked rather than
+         * trusted. An address is sixteen digits at the very most, so anything longer - or
+         * carrying anything that is not a digit - is a /proc that does not look like the one
+         * this expects, and an unset base prints an honest "no base" where a copied prefix
+         * would print a number the reader would go on to subtract.
+         */
+        size_t len = 0U;
+        while (len < sizeof g_load_base - 3U && line[len] != '\0' && line[len] != '-') {
+            const char c = line[len];
+            const bool hex =
+                (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (!hex) {
+                len = 0U;
+                break;
+            }
+            ++len;
+        }
+        if (len > 0U && line[len] == '-') {
+            g_load_base[0] = '0';
+            g_load_base[1] = 'x';
+            memcpy(g_load_base + 2, line, len);
+            g_load_base[len + 2U] = '\0';
+        }
+    }
+    (void)fclose(maps);
+}
+
+/*
+ * Everything the handler will need to say, in two passes: check, then write.
+ *
+ * The two passes are the point, and they are here because one pass was wrong. A second install
+ * carrying a bad label used to fail *after* replacing the title, the intro, the warning and the
+ * addr2line line, and after clearing the note labels - so a process whose reconfiguration had
+ * been refused went on running the handler it already had, and the report it would then write
+ * carried the rejected config's name and, worse, the rejected config's privacy warning, with
+ * every live note dropped. A module whose whole job is to be trustworthy when everything else
+ * has failed does not get to half-apply a configuration it rejected.
+ *
+ * So crash_config_is_usable() touches nothing, and crash_publish_prose() cannot fail. The two
+ * inputs that can be refused are a product name too long to fit its own heading and a label too
+ * long to pad - the latter is the one input that cannot be truncated into something honest,
+ * because a label cut short would line up with the wrong column and read as a different fact.
+ * Every other field is copied bounded and simply stops.
+ */
+
+/* The title is the product name plus " crash report", the rule under it is the same length
+   again, and there are two newlines and a terminator. Nothing writes to g_title until this
+   has agreed it fits. */
+_Static_assert(2U * INKWELL_CRASH_PRODUCT_MAX + 2U * sizeof " crash report" + 2U <= sizeof g_title,
+               "g_title must hold the longest permitted title and its rule");
+
+static bool crash_config_is_usable(const struct inkwell_crash_config *config) {
+    if (strlen(config->product) > INKWELL_CRASH_PRODUCT_MAX) {
+        return false;
+    }
+    for (unsigned slot = 0U; slot < config->note_count; ++slot) {
+        const char *const label = config->note_labels[slot];
+        if (label == NULL || strlen(label) > INKWELL_CRASH_NOTE_LABEL_MAX) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void crash_publish_prose(const struct inkwell_crash_config *config) {
+    const char *const product = config->product;
+    const char *const binary =
+        config->binary != NULL && config->binary[0] != '\0' ? config->binary : product;
+
+    /* The rule under the title has to be the title's own length - a fixed rule under a name
+       nobody here chose is either short or ragged. Both fit: see the assertion above. */
+    const size_t title_len = strlen(product) + strlen(" crash report");
+    int at = snprintf(g_title, sizeof g_title, "%s crash report\n", product);
+    for (size_t i = 0U; i < title_len; ++i) {
+        g_title[at++] = '=';
+    }
+    g_title[at++] = '\n';
+    g_title[at] = '\0';
+
+    (void)snprintf(g_intro, sizeof g_intro,
+                   "\n%s wrote this file when it stopped unexpectedly. Nothing was sent\n"
+                   "anywhere - it is on your device, and it is yours.\n"
+                   "\n"
+                   "Please read it before attaching it to a bug report. Everything above the log\n"
+                   "is addresses and counters. The lines at the end are %s's ordinary log:\n",
+                   product, product);
+    inkwell_str_copy(g_warning, sizeof g_warning, config->log_warning);
+
+    g_issues[0] = '\0';
+    if (config->issues_url != NULL && config->issues_url[0] != '\0') {
+        (void)snprintf(g_issues, sizeof g_issues, "\nIssues: %s\n", config->issues_url);
+    }
+    (void)snprintf(g_addr2line, sizeof g_addr2line,
+                   "Resolve an address with:  addr2line -fpe %s <address - load base>\n", binary);
+    (void)snprintf(g_empty_log, sizeof g_empty_log, "(%s logged nothing before it stopped)\n",
+                   product);
+
+    /* The labels, padded to the column the values line up in. */
+    memset(g_note_labels, 0, sizeof g_note_labels);
+    for (unsigned slot = 0U; slot < config->note_count; ++slot) {
+        const char *const label = config->note_labels[slot];
+        const size_t len = strlen(label);
+        memcpy(g_note_labels[slot], label, len);
+        for (size_t i = len; i < INKWELL_CRASH_NOTE_COLUMN; ++i) {
+            g_note_labels[slot][i] = ' ';
+        }
+        g_note_labels[slot][INKWELL_CRASH_NOTE_COLUMN] = '\0';
+    }
+    g_note_count = config->note_count;
+}
+
+int inkwell_crash_install(const struct inkwell_crash_config *config) {
+    if (config == NULL || config->dir == NULL || config->dir[0] == '\0' ||
+        config->product == NULL || config->product[0] == '\0' || config->log_warning == NULL ||
+        config->log_warning[0] == '\0' || config->note_count > INKWELL_CRASH_NOTE_SLOTS ||
+        (config->note_count > 0U && config->note_labels == NULL)) {
+        return -EINVAL;
+    }
+    const char *const dir = config->dir;
+
+    /*
+     * Re-entering this re-aims the report and leaves the handlers alone.
+     *
+     * The obvious shape - return early once installed - looked right and was wrong in a way
+     * worth recording. A signal disposition really is once per process, so *installing* twice is
+     * a mistake; but the path is not the disposition, and a second call carrying a different
+     * directory then kept the first one silently, which is a function that ignores its own
+     * argument and says it succeeded. It showed up first in a forked test inheriting an install
+     * from its parent, which is exactly the case a caller would never think to check.
+     *
+     * `g_report_waiting` is re-read here for the same reason, and so is the identity: the
+     * rule the first exists for is that a process does not learn *mid-run* that it has crashed,
+     * and an install is the defined moment for asking. A second install is another one.
+     */
+    if (!crash_config_is_usable(config)) {
+        return -EINVAL;
+    }
+
+    /*
+     * The path is built into a local and checked before anything is published, for the reason
+     * crash_publish_prose() is split in two: a refused install must leave the last accepted one
+     * exactly as it was. A directory too long to hold a report used to clear g_report_path on
+     * its way out, which disarmed a handler that was working a moment earlier.
+     */
+    char path[INKWELL_CRASH_PATH_MAX];
+    const int written = snprintf(path, sizeof path, "%s/%s", dir, INKWELL_CRASH_REPORT_NAME);
+    if (written < 0 || (size_t)written >= sizeof path) {
+        return -ENAMETOOLONG;
+    }
+
+    /* Past here nothing fails, so the new configuration lands whole. */
+    crash_publish_prose(config);
+    memcpy(g_report_path, path, (size_t)written + 1U);
+
+    /*
+     * Answered once, here, rather than by a stat() whenever somebody asks.
+     *
+     * The difference shows the moment this run writes its own report: a client that looked at
+     * the disk on demand would start telling the user it had already crashed while they were
+     * still using it, on a screen that is meant to be reporting the *previous* run.
+     */
+    g_report_waiting = access(g_report_path, F_OK) == 0;
+
+    /* The probe pipe and the load base are properties of the process rather than of the
+       directory, so they are taken once however many times this is called - otherwise a second
+       install would leak a pair of descriptors for nothing. */
+    if (g_probe_fd[0] < 0 && pipe2(g_probe_fd, O_CLOEXEC | O_NONBLOCK) != 0) {
+        /* No probe means no safe stack walk. Everything else in a report still works, so this
+           is not a reason to refuse the install - crash_readable() simply always says no. */
+        g_probe_fd[0] = -1;
+        g_probe_fd[1] = -1;
+    }
+    if (!g_installed) {
+        crash_capture_load_base();
+    }
+
+    if (g_installed) {
+        return 0;
+    }
+
+    /*
+     * Before the handlers, because SA_ONSTACK below is a reference to it. A failure is not fatal
+     * to the install: the handler then runs on the ordinary stack, which is what it did before
+     * this existed and is right for every crash except the overflow.
+     */
+    stack_t alt;
+    memset(&alt, 0, sizeof alt);
+    alt.ss_sp = g_sig_stack;
+    alt.ss_size = sizeof g_sig_stack;
+    alt.ss_flags = 0;
+    const bool have_alt_stack = sigaltstack(&alt, NULL) == 0;
+
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_sigaction = crash_handler;
+    action.sa_flags = SA_SIGINFO | SA_RESTART | (have_alt_stack ? SA_ONSTACK : 0);
+    /* Block the other fault signals while one is being reported, so two arriving together are
+       one report rather than two interleaved into the same file. */
+    sigemptyset(&action.sa_mask);
+    for (size_t i = 0U; i < sizeof k_signals / sizeof k_signals[0]; ++i) {
+        sigaddset(&action.sa_mask, k_signals[i]);
+    }
+
+    for (size_t i = 0U; i < sizeof k_signals / sizeof k_signals[0]; ++i) {
+        if (sigaction(k_signals[i], &action, NULL) != 0) {
+            return -errno;
+        }
+    }
+
+    g_installed = true;
+    return 0;
+}
+
+bool inkwell_crash_report_path(char *out, size_t out_len) {
+    if (out == NULL || out_len == 0U) {
+        return false;
+    }
+    out[0] = '\0';
+    if (g_report_path[0] == '\0') {
+        return false;
+    }
+    inkwell_str_copy(out, out_len, g_report_path);
+    return true;
+}
+
+bool inkwell_crash_report_waiting(void) {
+    return g_report_waiting;
+}
+
+int inkwell_crash_discard(void) {
+    if (g_report_path[0] == '\0') {
+        return -EINVAL;
+    }
+    if (unlink(g_report_path) != 0 && errno != ENOENT) {
+        return -errno;
+    }
+    g_report_waiting = false;
+    return 0;
+}
+
+void inkwell_crash_note(unsigned slot, const char *value) {
+    /* Bounded by the array rather than by how many labels are declared, so a note set before
+       the install survives it. A slot with no label is simply not written out - see
+       crash_write_notes() - which is what makes an early note free rather than an ordering
+       rule a caller has to know. */
+    if (slot >= INKWELL_CRASH_NOTE_SLOTS) {
+        return;
+    }
+    if (value == NULL) {
+        g_notes[slot][0] = '\0';
+        return;
+    }
+    /* INKWELL_CRASH_NOTE_MAX rather than sizeof, so the sentinel byte at the end stays zero. */
+    inkwell_str_copy(g_notes[slot], INKWELL_CRASH_NOTE_MAX, value);
+}
+
+void inkwell_crash_log_line(const char *line) {
+    if (line == NULL || line[0] == '\0') {
+        return;
+    }
+    const unsigned index = (unsigned)g_log_next;
+    /* INKWELL_CRASH_LOG_LINE_MAX rather than sizeof, for the sentinel; see g_notes above. */
+    inkwell_str_copy(g_log[index], INKWELL_CRASH_LOG_LINE_MAX, line);
+    g_log_next = (sig_atomic_t)((index + 1U) % INKWELL_CRASH_LOG_LINES);
+    if ((unsigned)g_log_filled < INKWELL_CRASH_LOG_LINES) {
+        g_log_filled = (sig_atomic_t)((unsigned)g_log_filled + 1U);
+    }
+}

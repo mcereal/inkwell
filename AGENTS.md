@@ -6,20 +6,23 @@ says how to work in it.
 ## The one-paragraph version
 
 inkwell is the systems layer under [inkcell](https://github.com/mcereal/inkcell). C17, Linux
-only, no threads, one epoll loop. Three areas: `base/` (the leaves), `runtime/` (the loop and
-signals), `codec/` (bytes in, bytes out). Arrows point down and `scripts/check-layers.py` holds
-them there. `make test` before every push.
+only, no threads, one epoll loop. Four areas: `base/` (the leaves), `runtime/` (the loop, the
+signals, the crash report), `codec/` (bytes in, bytes out), `net/` (one hostname, one socket).
+Arrows point down and `scripts/check-layers.py` holds them there. `make test` before every
+push.
 
 ## Layout
 
 ```
 include/inkwell/<area>/   the public surface of an area, flat
 src/<area>/               the sources; a header and its source always share a filename
+third_party/              somebody else's code, and our configuration of it
 tests/framework/          the self-registering case runner
 tests/suites/<area>_*.c   one file per subject
 tests/support/            fixtures a second suite needed
 tests/data/               captured bytes a codec is tested against
 scripts/check-layers.py   the layering rule the compiler cannot see
+scripts/check-vendor.py   the digest rule a vendored file is held to
 ```
 
 `include/inkwell/<area>/` is flat and is the interface. How a source is filed under `src/<area>/`
@@ -49,8 +52,17 @@ header's source by *filename*, never by path.
   one is a decision about the shape of the stack.
 - **`#include <inkcell/...>` and `#include <mesh/...>` are build failures.** inkwell is the
   bottom; there is nothing below it but Linux. The layer check fails on both spellings.
+- **A vendored file is upstream's.** `third_party/` is excluded from `make format` and its
+  digest is checked against its own README by `scripts/check-vendor.py`, which `make test` runs.
+  A fix goes upstream and comes back as a new revision; an edit in place is invisible in review
+  and fails the check. The exclusion is not tidiness - clang-format over 3.6 MB of generated C
+  is both an unreadable diff and a digest mismatch, and it happened once.
 
 ## Extracting something from mesh-client
+
+[`docs/extraction.md`](docs/extraction.md) is the running map: what has already come down, what
+is next, the evidence for each candidate, and the two questions - error vocabulary, and where
+inkcell ends - that block several rows at once. Read it before picking something up.
 
 Most of what lands here arrives the same way, and the order matters:
 
