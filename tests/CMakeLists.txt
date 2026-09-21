@@ -17,8 +17,10 @@ set(INKWELL_TEST_SUITES
     suites/base_version.c
     suites/codec_base64.c
     suites/codec_http.c
+    suites/codec_inflate.c
     suites/codec_json.c
     suites/codec_mqtt.c
+    suites/codec_png.c
     suites/codec_sha256.c
     suites/codec_zip.c
     suites/net_resolve.c
@@ -48,4 +50,13 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME inkwell_layers
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/check-layers.py)
     set_tests_properties(inkwell_layers PROPERTIES LABELS lint)
+
+    # A vendored third-party file is upstream's, not ours. third_party/wuffs/wuffs-v0.4.c is
+    # 3.6 MB of generated C that no review will ever read, so an edit in place is invisible -
+    # and a fix that lives only here is a fix nobody upstream knows about. check-vendor.py
+    # re-checks it against the digest its own README states, which is also the copy a human
+    # reads.
+    add_test(NAME inkwell_vendored_files
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../scripts/check-vendor.py)
+    set_tests_properties(inkwell_vendored_files PROPERTIES LABELS lint)
 endif()

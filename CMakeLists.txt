@@ -65,13 +65,30 @@ add_library(inkwell STATIC
     # codec: bytes in, bytes out. They parse; they do not know what the bytes are for.
     src/codec/base64.c
     src/codec/http.c
+    src/codec/inflate.c
     src/codec/json.c
     src/codec/mqtt.c
+    src/codec/png.c
+    src/codec/wuffs.c
     src/codec/sha256.c
     src/codec/zip.c
     # net: one hostname, one socket, one session - all of it on the loop, none of it blocking
     src/net/resolve.c
 )
+
+# Wuffs, for codec/png.c and codec/inflate.c. See third_party/wuffs/README.md for what it is and
+# why it is a vendored file rather than a submodule; third_party/wuffs-config/inkwell_wuffs.h is
+# what keeps the thirty codecs inkwell does not use out of the binary.
+#
+# PRIVATE: a consumer includes inkwell/codec/png.h, which says nothing in Wuffs' vocabulary, and
+# must not be able to reach the vendored header by accident. Only src/codec/wuffs.c compiles the
+# implementation, and it is the one source here built without this project's warning flags -
+# a generated 3.6 MB file is not ours to make -Wconversion-clean, and a local edit to silence one
+# is exactly what check-vendor.py exists to catch.
+target_include_directories(inkwell PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/wuffs
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/wuffs-config)
+set_source_files_properties(src/codec/wuffs.c PROPERTIES COMPILE_OPTIONS "-w")
 
 target_include_directories(inkwell PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

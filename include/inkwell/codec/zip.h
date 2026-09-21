@@ -68,7 +68,14 @@ extern "C" {
 /* General purpose bit 3: the sizes and CRC in the local header are 0 and follow the data. */
 #define INKWELL_ZIP_FLAG_DATA_DESCRIPTOR 0x0008U
 
-/* Compression methods. Only these two appear; anything else is a member we cannot inflate. */
+/*
+ * Compression methods. Only these two appear; anything else is a member we cannot inflate.
+ *
+ * This header reports the method and stops there - it reads a directory, it does not
+ * decompress. A DEFLATE member is turned back into its bytes with inkwell/codec/inflate.h, and
+ * checked against the `crc32` and `uncompressed_size` this reports, which is the pairing that
+ * keeps a reader honest about a file it did not write.
+ */
 #define INKWELL_ZIP_METHOD_STORE 0U
 #define INKWELL_ZIP_METHOD_DEFLATE 8U
 

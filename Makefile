@@ -16,8 +16,13 @@ debug:
 test: debug
 	ctest --test-dir $(BUILD) --output-on-failure
 
+# third_party/ is excluded and that is not tidiness: a vendored file is upstream's, and
+# reformatting one rewrites every line of a 3.6 MB generated source into a diff nobody can read
+# - which is also what scripts/check-vendor.py then refuses, because the digest no longer
+# matches the README that vouches for it. Submodules were never reachable here (git ls-files
+# does not descend into one); the vendored file is.
 format:
-	clang-format -i $$(git ls-files '*.c' '*.h')
+	clang-format -i $$(git ls-files '*.c' '*.h' ':!:third_party/*')
 
 clean:
 	rm -rf $(BUILD)
