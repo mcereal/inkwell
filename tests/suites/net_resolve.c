@@ -30,6 +30,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 struct resolve_probe {
@@ -185,6 +186,36 @@ cleanup:
 }
 
 /*
+ * A label for the gate below that has never been asked before.
+ *
+ * getpid() is not enough, which is worth saying because it looks as though it should be: inside
+ * a PID namespace - every container, and that is where this suite runs - the first process is
+ * pid 1 every time, so the name would be byte-identical run to run. Negative answers are cached
+ * too (RFC 2308), so a run that warmed NXDOMAIN for this name can hand the next one a NOT_FOUND
+ * out of a cache whose upstream has since died. The gate would open on a machine that cannot
+ * resolve anything - the same failure one more step out.
+ *
+ * So: 64 bits from /dev/urandom, and the clock mixed with the pid if that cannot be read.
+ */
+static void gate_name(char *out, size_t cap) {
+    unsigned long long seed = 0U;
+    FILE *const urandom = fopen("/dev/urandom", "rb");
+    if (urandom != NULL) {
+        if (fread(&seed, sizeof seed, 1U, urandom) != 1U) {
+            seed = 0U;
+        }
+        (void)fclose(urandom);
+    }
+    if (seed == 0U) {
+        struct timespec now;
+        (void)clock_gettime(CLOCK_REALTIME, &now);
+        seed = ((unsigned long long)now.tv_sec << 20U) ^ (unsigned long long)now.tv_nsec ^
+               ((unsigned long long)getpid() << 44U);
+    }
+    (void)snprintf(out, cap, "inkwell-no-such-name-%016llx.com", seed);
+}
+
+/*
  * A name that cannot exist is NOT_FOUND, not FAILED.
  *
  * The distinction is the whole reason the outcomes are not one error: the TCP link says "no such
@@ -211,9 +242,9 @@ cleanup:
  *
  * So the gate is a name that has to cross the network and must not be there when it arrives.
  * Only a reachable nameserver says NXDOMAIN about it: /etc/hosts has no wildcards, and nothing
- * caches a name it has never been asked. The label carries the pid so that no pinned entry can
- * anticipate it. Saying no to this lookup is the exact capability the assertion below depends
- * on:
+ * caches a name it has never been asked. The label is random per run - see gate_name() above for
+ * why a pid is not enough. Saying no to this lookup is the exact capability the assertion below
+ * depends on:
  *
  *     a reachable nameserver    -> NXDOMAIN   -> NOT_FOUND -> the gate opens
  *     no resolver at all        -> EAI_AGAIN  -> FAILED    -> the gate stays shut
@@ -237,9 +268,9 @@ INKWELL_TEST_CASE(resolve_reports_an_unknown_name, unit) {
     struct inkwell_resolve resolve;
     (void)inkwell_resolve_init(&resolve, &loop);
 
-    /* Per-run, so that neither a cache nor a pinned /etc/hosts line can answer it. */
+    /* Unpredictable, so that neither a cache nor a pinned /etc/hosts line can answer it. */
     char gate[64];
-    (void)snprintf(gate, sizeof gate, "inkwell-no-such-name-%ld.com", (long)getpid());
+    gate_name(gate, sizeof gate);
 
     struct resolve_probe working;
     memset(&working, 0, sizeof working);
