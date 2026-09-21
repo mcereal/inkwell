@@ -30,8 +30,6 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
-#include <unistd.h>
 
 struct resolve_probe {
     unsigned calls;
@@ -186,33 +184,33 @@ cleanup:
 }
 
 /*
- * A label for the gate below that has never been asked before.
+ * A label for the gate below that no previous run can have asked for - or nothing at all.
  *
- * getpid() is not enough, which is worth saying because it looks as though it should be: inside
- * a PID namespace - every container, and that is where this suite runs - the first process is
- * pid 1 every time, so the name would be byte-identical run to run. Negative answers are cached
- * too (RFC 2308), so a run that warmed NXDOMAIN for this name can hand the next one a NOT_FOUND
- * out of a cache whose upstream has since died. The gate would open on a machine that cannot
- * resolve anything - the same failure one more step out.
+ * It has to be unpredictable rather than merely per-process. getpid() looks as though it would
+ * do and does not: inside a PID namespace - every container, and that is where this suite runs -
+ * the first process is pid 1 every time, so the name would be byte-identical run to run. That
+ * matters because negative answers are cached too (RFC 2308): a run that warmed NXDOMAIN for
+ * this name can hand the next one a NOT_FOUND out of a cache whose upstream has since died, and
+ * the gate would open on a machine that cannot resolve anything.
  *
- * So: 64 bits from /dev/urandom, and the clock mixed with the pid if that cannot be read.
+ * Returns false when there is no entropy to build a label from, and the caller leaves the gate
+ * shut. That is the only honest answer, and the reason there is no clock-and-pid fallback here:
+ * a label guessed at from repeatable material is exactly the label a previous run already
+ * guessed at, which is the case above. A gate that cannot prove its premise does not open.
  */
-static void gate_name(char *out, size_t cap) {
-    unsigned long long seed = 0U;
+static bool gate_name(char *out, size_t cap) {
     FILE *const urandom = fopen("/dev/urandom", "rb");
-    if (urandom != NULL) {
-        if (fread(&seed, sizeof seed, 1U, urandom) != 1U) {
-            seed = 0U;
-        }
-        (void)fclose(urandom);
+    if (urandom == NULL) {
+        return false;
     }
-    if (seed == 0U) {
-        struct timespec now;
-        (void)clock_gettime(CLOCK_REALTIME, &now);
-        seed = ((unsigned long long)now.tv_sec << 20U) ^ (unsigned long long)now.tv_nsec ^
-               ((unsigned long long)getpid() << 44U);
+    unsigned long long seed = 0U;
+    const size_t got = fread(&seed, sizeof seed, 1U, urandom);
+    (void)fclose(urandom);
+    if (got != 1U) {
+        return false;
     }
     (void)snprintf(out, cap, "inkwell-no-such-name-%016llx.com", seed);
+    return true;
 }
 
 /*
@@ -242,9 +240,9 @@ static void gate_name(char *out, size_t cap) {
  *
  * So the gate is a name that has to cross the network and must not be there when it arrives.
  * Only a reachable nameserver says NXDOMAIN about it: /etc/hosts has no wildcards, and nothing
- * caches a name it has never been asked. The label is random per run - see gate_name() above for
- * why a pid is not enough. Saying no to this lookup is the exact capability the assertion below
- * depends on:
+ * caches a name it has never been asked. The label is unpredictable per run - see gate_name()
+ * above for why a pid is not enough, and why no label at all is better than a guessable one.
+ * Saying no to this lookup is the exact capability the assertion below depends on:
  *
  *     a reachable nameserver    -> NXDOMAIN   -> NOT_FOUND -> the gate opens
  *     no resolver at all        -> EAI_AGAIN  -> FAILED    -> the gate stays shut
@@ -268,19 +266,22 @@ INKWELL_TEST_CASE(resolve_reports_an_unknown_name, unit) {
     struct inkwell_resolve resolve;
     (void)inkwell_resolve_init(&resolve, &loop);
 
-    /* Unpredictable, so that neither a cache nor a pinned /etc/hosts line can answer it. */
+    /*
+     * A *no* about a name that had to come from DNS; see the note above for why not a yes, and
+     * why no entropy means no gate rather than a guessed-at label.
+     */
+    bool dns_answers = false;
     char gate[64];
-    gate_name(gate, sizeof gate);
-
-    struct resolve_probe working;
-    memset(&working, 0, sizeof working);
-    if (inkwell_resolve_start(&resolve, gate, 80U, probe_record, &working, 0U) != 0 ||
-        !pump_until_done(&loop, &resolve, &working)) {
-        record_failure(test_name, "the precondition lookup never reported");
-        goto cleanup;
+    if (gate_name(gate, sizeof gate)) {
+        struct resolve_probe working;
+        memset(&working, 0, sizeof working);
+        if (inkwell_resolve_start(&resolve, gate, 80U, probe_record, &working, 0U) != 0 ||
+            !pump_until_done(&loop, &resolve, &working)) {
+            record_failure(test_name, "the precondition lookup never reported");
+            goto cleanup;
+        }
+        dns_answers = working.outcome == INKWELL_RESOLVE_NOT_FOUND;
     }
-    /* A *no* about a name that had to come from DNS; see the note above for why not a yes. */
-    const bool dns_answers = working.outcome == INKWELL_RESOLVE_NOT_FOUND;
 
     struct resolve_probe probe;
     memset(&probe, 0, sizeof probe);
