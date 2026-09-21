@@ -341,7 +341,7 @@ bool inkwell_json_skip_value(struct inkwell_json *json) {
     }
 
     /* Counted rather than recursed, so a deeply nested document costs a number and not the
-       stack of the one thread this client has. */
+       stack of the one thread there is. */
     size_t depth = 0U;
     while (json->cursor < json->end) {
         const char c = *json->cursor++;

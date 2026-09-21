@@ -15,9 +15,11 @@ set(INKWELL_TEST_SUITES
     suites/base_text.c
     suites/base_time.c
     suites/codec_base64.c
+    suites/codec_http.c
     suites/codec_json.c
     suites/codec_sha256.c
     suites/codec_zip.c
+    suites/net_resolve.c
     suites/runtime_loop.c
 )
 
