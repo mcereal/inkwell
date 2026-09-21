@@ -74,7 +74,7 @@ void record_success(const char *test_name);
  * The same, for a case holding something that has to be released - an event loop, a mock, an
  * open fd. `cleanup` is a statement list run before the case gives up:
  *
- *     INKWELL_TEST_FAIL_IF_CLEANUP(result != 0, mesh_event_loop_shutdown(&loop), "start failed");
+ *     INKWELL_TEST_FAIL_IF_CLEANUP(result != 0, inkwell_loop_shutdown(&loop), "start failed");
  */
 #define INKWELL_TEST_FAIL_IF_CLEANUP(condition, cleanup, message)                                  \
     do {                                                                                           \

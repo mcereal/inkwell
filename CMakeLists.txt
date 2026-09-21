@@ -58,6 +58,7 @@ add_library(inkwell STATIC
     src/base/log.c
     src/base/text.c
     src/base/time.c
+    src/base/version.c
     # runtime: the one epoll loop everything else is driven from, and the signals that stop it
     src/runtime/loop.c
     src/runtime/signals.c
@@ -65,6 +66,7 @@ add_library(inkwell STATIC
     src/codec/base64.c
     src/codec/http.c
     src/codec/json.c
+    src/codec/mqtt.c
     src/codec/sha256.c
     src/codec/zip.c
     # net: one hostname, one socket, one session - all of it on the loop, none of it blocking
