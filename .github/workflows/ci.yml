@@ -16,6 +16,7 @@ jobs:
           - name: debug (gcc)
             cc: gcc
             args: ""
+            submodules: recursive
           # clang as well as gcc, and not for the sanitizers alone: the two disagree about
           # whether a conversion between two enum types, an incompatible function pointer and an
           # implicit declaration are warnings or errors. A consumer building this with clang
@@ -23,11 +24,32 @@ jobs:
           - name: debug (clang)
             cc: clang
             args: ""
+            submodules: recursive
           - name: asan+ubsan (clang)
             cc: clang
             args: "-DINKWELL_ENABLE_ASAN=ON -DINKWELL_ENABLE_UBSAN=ON"
+            submodules: recursive
+          # The same tree with no submodules at all, which is what `git clone` on its own gives
+          # and therefore what somebody evaluating this gets. Mbed TLS is the only optional
+          # dependency here and net/tls.c compiles to a stub without it, so this job holds the
+          # claim that the stub is real: it builds, it links, and every case that is not about
+          # TLS still runs. Without it that claim would be checked by nobody, and the first
+          # person to find out would be the one who cloned.
+          - name: no TLS (gcc)
+            cc: gcc
+            args: ""
+            submodules: ""
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: ${{ matrix.submodules }}
+
+      # Mbed TLS 4.x generates error.c, the SSL debug helpers and the PSA driver wrappers at
+      # build time rather than committing them, and the generator is Python with jinja2. The
+      # no-TLS job does not need it and does not pay for it.
+      - name: Install the Mbed TLS generator's prerequisites
+        if: matrix.submodules == 'recursive'
+        run: python3 -m pip install --user jinja2
 
       # libclang-rt-18-dev is the one that is easy to miss: Ubuntu's clang package does not pull
       # the sanitizer runtimes in, and without them the link fails looking for
