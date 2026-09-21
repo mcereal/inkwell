@@ -71,6 +71,36 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1
         run: ctest --test-dir build --output-on-failure
 
+  # macOS is a development host, not a target: the loop is kqueue there and the suite is the same
+  # suite. It is here because a Linux-only call above runtime/ compiles fine on every other job,
+  # and this is the one that would fail on it.
+  macos:
+    name: debug (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # A venv because Homebrew's Python refuses a --user install (PEP 668), and passed to CMake
+      # by path because the generator otherwise finds that Homebrew Python first.
+      - name: Install build tools
+        run: |
+          brew install ninja
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install jinja2 jsonschema
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DPython3_EXECUTABLE="$RUNNER_TEMP/venv/bin/python3"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
   format:
     name: clang-format
     runs-on: ubuntu-latest

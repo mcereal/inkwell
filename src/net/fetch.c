@@ -2,6 +2,7 @@
 
 #include "inkwell/net/fetch.h"
 
+#include "inkwell/base/fd.h"
 #include "inkwell/base/log.h"
 #include "inkwell/base/text.h"
 
@@ -15,7 +16,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -273,7 +273,7 @@ static void fetch_try_next(struct inkwell_fetch *fetch);
 static void fetch_arm(struct inkwell_fetch *fetch, struct inkwell_fetch_conn *conn, bool write) {
     if (fetch->loop != NULL && conn->fd_registered) {
         (void)inkwell_loop_update_fd(fetch->loop, conn->fd,
-                                     write ? (uint32_t)EPOLLOUT : (uint32_t)EPOLLIN);
+                                     write ? INKWELL_LOOP_OUT : INKWELL_LOOP_IN);
     }
 }
 
@@ -519,8 +519,8 @@ static int fetch_on_fd(int fd, uint32_t events, void *userdata) {
     }
     switch (fetch->conn->phase) {
     case FETCH_CONNECTING:
-        /* EPOLLERR here is the ordinary refusal, and getsockopt() is what names it. */
-        if ((events & (uint32_t)(EPOLLOUT | EPOLLERR | EPOLLHUP)) != 0U) {
+        /* INKWELL_LOOP_ERR here is the ordinary refusal, and getsockopt() is what names it. */
+        if ((events & (uint32_t)(INKWELL_LOOP_OUT | INKWELL_LOOP_ERR | INKWELL_LOOP_HUP)) != 0U) {
             fetch_connected(fetch);
         }
         break;
@@ -544,10 +544,9 @@ static int fetch_on_fd(int fd, uint32_t events, void *userdata) {
    not even begin. */
 static bool fetch_open(struct inkwell_fetch *fetch, const struct inkwell_resolve_address *address) {
     struct inkwell_fetch_conn *const conn = fetch->conn;
-    const int fd =
-        socket(address->address.ss_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    const int fd = inkwell_fd_socket(address->address.ss_family, SOCK_STREAM, 0);
     if (fd < 0) {
-        snprintf(conn->detail, sizeof conn->detail, "socket: %s", strerror(errno));
+        snprintf(conn->detail, sizeof conn->detail, "socket: %s", strerror(-fd));
         return false;
     }
     if (connect(fd, (const struct sockaddr *)&address->address, address->len) < 0 &&
@@ -558,8 +557,8 @@ static bool fetch_open(struct inkwell_fetch *fetch, const struct inkwell_resolve
         return false;
     }
     conn->fd = fd;
-    if (inkwell_loop_add_fd(fetch->loop, fd, (uint32_t)(EPOLLIN | EPOLLOUT), fetch_on_fd, fetch) <
-        0) {
+    if (inkwell_loop_add_fd(fetch->loop, fd, (uint32_t)(INKWELL_LOOP_IN | INKWELL_LOOP_OUT),
+                            fetch_on_fd, fetch) < 0) {
         snprintf(conn->detail, sizeof conn->detail, "no room on the loop for %s", conn->url.host);
         fetch_drop_socket(fetch, conn);
         return false;

@@ -23,7 +23,6 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/epoll.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -368,7 +367,7 @@ static int resolve_on_child_output(int fd, uint32_t events, void *userdata) {
     if (resolve == NULL) {
         return 0;
     }
-    if (resolve_drain(resolve) && (events & (EPOLLHUP | EPOLLERR)) == 0U) {
+    if (resolve_drain(resolve) && (events & (INKWELL_LOOP_HUP | INKWELL_LOOP_ERR)) == 0U) {
         return 0;
     }
     resolve_try_finish(resolve);
@@ -451,8 +450,8 @@ int inkwell_resolve_start(struct inkwell_resolve *resolve, const char *host, uin
     resolve->on_done = on_done;
     resolve->userdata = userdata;
 
-    const int added =
-        inkwell_loop_add_fd(resolve->loop, fds[0], EPOLLIN, resolve_on_child_output, resolve);
+    const int added = inkwell_loop_add_fd(resolve->loop, fds[0], INKWELL_LOOP_IN,
+                                          resolve_on_child_output, resolve);
     if (added != 0) {
         resolve_discard(resolve);
         return added;

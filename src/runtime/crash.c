@@ -3,13 +3,13 @@
  * are stated there, and most of what looks roundabout below is one of them.
  *
  * _GNU_SOURCE rather than the _POSIX_C_SOURCE the rest of inkwell asks for: the register names
- * on x86-64 (REG_RIP) and pipe2() are both behind it, and musl and glibc agree about that
- * much.
+ * on x86-64 (REG_RIP) are behind it, and musl and glibc agree about that much.
  */
 #define _GNU_SOURCE
 
 #include "inkwell/runtime/crash.h"
 
+#include "inkwell/base/fd.h"
 #include "inkwell/base/text.h"
 #include "inkwell/base/time.h"
 
@@ -20,8 +20,16 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
-#include <ucontext.h>
 #include <unistd.h>
+
+/* Darwin keeps ucontext_t in <sys/ucontext.h> and refuses <ucontext.h> without _XOPEN_SOURCE,
+   which would hide half of what the rest of this file includes. */
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <sys/ucontext.h>
+#else
+#include <ucontext.h>
+#endif
 
 /* ---- what the handler is allowed to have ----------------------------------------------------
  *
@@ -276,7 +284,15 @@ static bool crash_registers(void *ucontext, uint64_t *pc, uint64_t *fp) {
         return false;
     }
     const ucontext_t *uc = (const ucontext_t *)ucontext;
-#if defined(__aarch64__)
+#if defined(__APPLE__) && defined(__aarch64__)
+    *pc = (uint64_t)uc->uc_mcontext->__ss.__pc;
+    *fp = (uint64_t)uc->uc_mcontext->__ss.__fp;
+    return true;
+#elif defined(__APPLE__) && defined(__x86_64__)
+    *pc = (uint64_t)uc->uc_mcontext->__ss.__rip;
+    *fp = (uint64_t)uc->uc_mcontext->__ss.__rbp;
+    return true;
+#elif defined(__aarch64__)
     *pc = (uint64_t)uc->uc_mcontext.pc;
     /* x29 is the frame pointer under AAPCS64. */
     *fp = (uint64_t)uc->uc_mcontext.regs[29];
@@ -518,6 +534,11 @@ static void crash_handler(int signal_number, siginfo_t *info, void *ucontext) {
  */
 static void crash_capture_load_base(void) {
     g_load_base[0] = '\0';
+#if defined(__APPLE__)
+    /* No /proc on Darwin. Image 0 is the executable, and its Mach header is where it was
+       mapped. */
+    (void)snprintf(g_load_base, sizeof g_load_base, "%p", (const void *)_dyld_get_image_header(0));
+#else
     FILE *maps = fopen("/proc/self/maps", "re");
     if (maps == NULL) {
         return;
@@ -550,6 +571,7 @@ static void crash_capture_load_base(void) {
         }
     }
     (void)fclose(maps);
+#endif
 }
 
 /*
@@ -691,7 +713,7 @@ int inkwell_crash_install(const struct inkwell_crash_config *config) {
     /* The probe pipe and the load base are properties of the process rather than of the
        directory, so they are taken once however many times this is called - otherwise a second
        install would leak a pair of descriptors for nothing. */
-    if (g_probe_fd[0] < 0 && pipe2(g_probe_fd, O_CLOEXEC | O_NONBLOCK) != 0) {
+    if (g_probe_fd[0] < 0 && inkwell_fd_pipe(g_probe_fd) != 0) {
         /* No probe means no safe stack walk. Everything else in a report still works, so this
            is not a reason to refuse the install - crash_readable() simply always says no. */
         g_probe_fd[0] = -1;
@@ -701,14 +723,15 @@ int inkwell_crash_install(const struct inkwell_crash_config *config) {
         crash_capture_load_base();
     }
 
-    if (g_installed) {
-        return 0;
-    }
-
     /*
      * Before the handlers, because SA_ONSTACK below is a reference to it. A failure is not fatal
      * to the install: the handler then runs on the ordinary stack, which is what it did before
      * this existed and is right for every crash except the overflow.
+     *
+     * On every install rather than the first, unlike the handlers: the alternate stack belongs to
+     * a thread, not to the process, and macOS clears it in a forked child where Linux keeps it.
+     * A child that re-aims its reports with a second install is then covered on both, which is
+     * exactly what the exhausted-stack case does.
      */
     stack_t alt;
     memset(&alt, 0, sizeof alt);
@@ -716,6 +739,10 @@ int inkwell_crash_install(const struct inkwell_crash_config *config) {
     alt.ss_size = sizeof g_sig_stack;
     alt.ss_flags = 0;
     const bool have_alt_stack = sigaltstack(&alt, NULL) == 0;
+
+    if (g_installed) {
+        return 0;
+    }
 
     struct sigaction action;
     memset(&action, 0, sizeof action);

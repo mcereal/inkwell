@@ -5,8 +5,8 @@
  *
  * Every transport that carries a protocol over a stream does the same four things: read what is
  * ready without starving the rest of the loop, hand the bytes up, queue what goes out, and keep
- * EPOLLOUT armed exactly while that queue has a remainder. Underneath that there is no protocol
- * at all - a tty and a socket differ in how a write is made and in nothing else.
+ * INKWELL_LOOP_OUT armed exactly while that queue has a remainder. Underneath that there is no
+ * protocol at all - a tty and a socket differ in how a write is made and in nothing else.
  *
  * This is that half, and only that half. **It knows nothing about framing.** Bytes arrive as
  * bytes and go out as bytes; whatever turns them into messages belongs to whoever owns the
@@ -90,7 +90,7 @@ struct inkwell_stream {
     int fd;
     enum inkwell_stream_kind kind;
     bool fd_registered;
-    bool want_write; /* EPOLLOUT is armed because the queue has a remainder */
+    bool want_write; /* INKWELL_LOOP_OUT is armed because the queue has a remainder */
     struct inkwell_loop *loop;
 
     /* The caller's queue storage. See inkwell_stream_init() for why it is not in here. */

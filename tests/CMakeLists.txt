@@ -32,6 +32,8 @@ set(INKWELL_TEST_SUITES
     suites/net_stream.c
     suites/runtime_crash.c
     suites/runtime_loop.c
+    suites/runtime_timer.c
+    suites/runtime_wake.c
 )
 
 add_executable(inkwell_tests

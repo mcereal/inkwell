@@ -6,7 +6,7 @@ says how to work in it.
 ## The one-paragraph version
 
 inkwell is the systems layer under [inkcell](https://github.com/mcereal/inkcell). C17, Linux
-only, no threads, one epoll loop. Four areas: `base/` (the leaves), `runtime/` (the loop, the
+(and macOS as a development host), no threads, one loop - epoll on Linux, kqueue on macOS. Four areas: `base/` (the leaves), `runtime/` (the loop, the
 signals, the crash report), `codec/` (bytes in, bytes out), `net/` (one hostname, one socket,
 one TLS session, one request). Arrows point down and `scripts/check-layers.py` holds them
 there. `make test` before every push.
@@ -55,13 +55,18 @@ header's source by *filename*, never by path.
 
 - **`base/` includes nothing of inkwell's.** It is the floor.
 - **No threads.** Anything that would block gets a descriptor and a callback instead.
+- **Only `runtime/` and `base/fd.c` say which kernel this is.** Everything else registers
+  `INKWELL_LOOP_IN`/`_OUT`, never `EPOLLIN`, and asks `runtime/timer.h`, `runtime/wake.h` and
+  `base/fd.h` for a timer, a wake, a pipe or a socket rather than calling `timerfd_create()`,
+  `eventfd()`, `pipe2()` or `SOCK_NONBLOCK` itself. Those compile on Linux and nowhere else, and
+  the macOS CI job is the thing that notices.
 - **No application vocabulary.** Not in code, not in comments. Say "a peer", "a protocol", "a
   transport". The day a comment in here says "the radio" is the day this stopped being a
   platform layer.
 - **A new area under `src/` needs an entry in `ALLOWED`** in `scripts/check-layers.py`. Adding
   one is a decision about the shape of the stack.
 - **`#include <inkcell/...>` and `#include <mesh/...>` are build failures.** inkwell is the
-  bottom; there is nothing below it but Linux. The layer check fails on both spellings.
+  bottom; there is nothing below it but the operating system. The layer check fails on both spellings.
 - **A vendored file is upstream's.** `third_party/` is excluded from `make format` and its
   digest is checked against its own README by `scripts/check-vendor.py`, which `make test` runs.
   A fix goes upstream and comes back as a new revision; an edit in place is invisible in review

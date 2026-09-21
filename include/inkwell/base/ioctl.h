@@ -4,12 +4,12 @@
  * ioctl()'s request argument, in whatever type the libc in front of us declares it.
  *
  * The two disagree: glibc's second parameter is `unsigned long`, musl's - which the release
- * build links against - is `int`. That is invisible for most requests and not for the ones whose
- * encoding sets the high bit: every _IOR/_IOW code with a direction of "read" does, so EVIOCGBIT,
- * EVIOCGNAME, HCIGETCONNLIST and the USBDEVFS verbs all arrive as constants above INT_MAX. Handed
- * straight to musl they are an implicit narrowing the compiler reports as -Woverflow ("changes
- * value from 2153792801 to -2141174495"), and a request built from a size_t length is a
- * -Wconversion on top of it.
+ * build links against - is `int`. Darwin's libc, on a development host, sides with glibc. That is
+ * invisible for most requests and not for the ones whose encoding sets the high bit: every
+ * _IOR/_IOW code with a direction of "read" does, so EVIOCGBIT, EVIOCGNAME, HCIGETCONNLIST and the
+ * USBDEVFS verbs all arrive as constants above INT_MAX. Handed straight to musl they are an
+ * implicit narrowing the compiler reports as -Woverflow ("changes value from 2153792801 to
+ * -2141174495"), and a request built from a size_t length is a -Wconversion on top of it.
  *
  * The value the kernel sees is the same either way - the ioctl syscall reads the low 32 bits - so
  * the conversion is a statement about the *declaration* rather than a change of meaning. Making
@@ -26,7 +26,7 @@
 
 #include <sys/ioctl.h>
 
-#if defined(__GLIBC__)
+#if defined(__GLIBC__) || defined(__APPLE__)
 typedef unsigned long inkwell_ioctl_request;
 #else
 typedef int inkwell_ioctl_request;
