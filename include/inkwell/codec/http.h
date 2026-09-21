@@ -11,12 +11,12 @@ extern "C" {
 /*
  * HTTP/1.1 on the wire, for a client that makes one request per connection.
  *
- * A codec, not a client, in the same way mqtt_packet.h is: it turns a URL and some header lines
- * into request bytes, and response bytes into a status, some headers and a body. It holds no
- * socket and no opinion about redirects, timeouts or where a body goes - that is
- * src/core/net/fetch.c. Keeping the two apart is what makes the fiddly half testable against byte
- * arrays and fuzzable, which matters more here than for most of this directory: what this reads
- * is the reply from a server on the internet, and it sits in front of the self-updater.
+ * A codec, not a client: it turns a URL and some header lines into request bytes, and response
+ * bytes into a status, some headers and a body. It holds no socket and no opinion about
+ * redirects, timeouts or where a body goes - those belong to whatever drives it over one.
+ * Keeping the two apart is what makes the fiddly half testable against byte arrays and
+ * fuzzable, and that matters more here than for most of this directory: what this reads is the
+ * reply from a server nobody here controls.
  *
  * **Only what a download needs.** `Connection: close` on every request, so there is no keep-alive
  * and no pipelining and a reply ends where the connection does or earlier. No `Accept-Encoding`

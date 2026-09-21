@@ -233,8 +233,8 @@ static enum inkwell_resolve_outcome resolve_outcome_of(const struct resolve_reco
  * Hands the outcome over, exactly once.
  *
  * Everything is lifted off the resolver and the resolver left idle *before* the callback runs,
- * the same re-entrancy rule fetch.c's completion keeps: a caller that starts its next lookup from
- * inside this one's completion is starting it against a clean resolver.
+ * which is what lets a caller start its next lookup from inside this one's completion: it is
+ * starting it against a clean resolver rather than one still holding the last answer.
  */
 static void resolve_complete(struct inkwell_resolve *resolve,
                              enum inkwell_resolve_outcome outcome) {

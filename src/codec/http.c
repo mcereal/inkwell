@@ -103,10 +103,20 @@ static bool http_url_bytes_ok(const char *text, size_t len) {
 
 /* The target from what follows the authority: path and query, never the fragment. */
 static bool http_url_set_target(struct inkwell_http_url *out, const char *rest) {
-    size_t len = strcspn(rest, "#");
-    if (!http_url_bytes_ok(rest, len)) {
+    /*
+     * Validated whole, *then* truncated at the fragment - and the order is the point.
+     *
+     * The fragment never reaches the wire, so checking only what precedes it looks sufficient
+     * and is not: the contract above inkwell_http_url_parse() says a space or control byte
+     * anywhere is a refusal, and a caller that logs the URL it was handed, or shows it to
+     * somebody, is relying on that rather than on the target. Checking the prefix alone made
+     * `https://host/#\r\ninvalid` parse clean while `https://host/\r\ninvalid` did not, which is
+     * the same malformed URL answered two ways.
+     */
+    if (!http_url_bytes_ok(rest, strlen(rest))) {
         return false;
     }
+    const size_t len = strcspn(rest, "#");
     const bool slash = len > 0U && rest[0] == '/';
     const size_t need = len + (slash ? 0U : 1U) + 1U;
     if (need > sizeof out->target) {

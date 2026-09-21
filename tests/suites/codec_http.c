@@ -144,7 +144,12 @@ INKWELL_TEST_CASE(http_url_refuses_what_it_cannot_send, unit) {
         "https://example.org:80a/",
         "https://example.org/a b",            /* a space */
         "https://example.org/a\r\nX-Evil: 1", /* a header smuggled in on the request line */
-        "https://[fd00::1/",                  /* unclosed bracket */
+        /* The fragment never reaches the wire, which is exactly why it was going unchecked:
+           the same two bytes refused before a `#` have to be refused after one, or a caller
+           that trusts the parse and then logs or shows the URL is trusting the wrong thing. */
+        "https://example.org/#a b",
+        "https://example.org/#\r\nX-Evil: 1",
+        "https://[fd00::1/", /* unclosed bracket */
         "https://[fd00::1]x/",
         "https://[not-v6]/",
     };
@@ -169,8 +174,8 @@ INKWELL_TEST_CASE(http_url_refuses_what_it_cannot_send, unit) {
 }
 
 /*
- * The redirect the self-updater actually follows: a GitHub release download answers 302 with an
- * absolute URL on another host, carrying a long signed query.
+ * The redirect a download actually follows: a release asset answers 302 with an absolute URL on
+ * another host, carrying a long signed query.
  */
 INKWELL_TEST_CASE(http_url_resolves_a_location, unit) {
     struct inkwell_http_url base;
