@@ -7,7 +7,6 @@
 
 #include <errno.h>
 #include <string.h>
-#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -90,8 +89,8 @@ static void stream_drop_queue(struct inkwell_stream *stream) {
     stream->queued = 0U;
 }
 
-/* Keeps EPOLLOUT armed exactly while the queue has a remainder, so a descriptor that filled up
-   wakes the loop instead of waiting out the poll timeout. */
+/* Keeps INKWELL_LOOP_OUT armed exactly while the queue has a remainder, so a descriptor that filled
+   up wakes the loop instead of waiting out the poll timeout. */
 static void stream_update_write_interest(struct inkwell_stream *stream) {
     if (!stream->fd_registered || stream->loop == NULL) {
         return;
@@ -100,7 +99,7 @@ static void stream_update_write_interest(struct inkwell_stream *stream) {
     if (want == stream->want_write) {
         return;
     }
-    const uint32_t events = want ? (uint32_t)(EPOLLIN | EPOLLOUT) : (uint32_t)EPOLLIN;
+    const uint32_t events = want ? (uint32_t)(INKWELL_LOOP_IN | INKWELL_LOOP_OUT) : INKWELL_LOOP_IN;
     if (inkwell_loop_update_fd(stream->loop, stream->fd, events) == 0) {
         stream->want_write = want;
     }
@@ -120,7 +119,7 @@ int inkwell_stream_flush(struct inkwell_stream *stream) {
             stream, slot_bytes_at(stream, stream->head) + slot->sent, slot->length - slot->sent);
         if (written < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                break; /* the far end is not draining; EPOLLOUT brings us back */
+                break; /* the far end is not draining; INKWELL_LOOP_OUT brings us back */
             }
             if (errno == EINTR) {
                 continue;
@@ -236,7 +235,7 @@ int inkwell_stream_open(struct inkwell_stream *stream, int fd, enum inkwell_stre
     }
 
     if (loop != NULL) {
-        const int added = inkwell_loop_add_fd(loop, fd, EPOLLIN, callback, userdata);
+        const int added = inkwell_loop_add_fd(loop, fd, INKWELL_LOOP_IN, callback, userdata);
         if (added < 0) {
             return added;
         }

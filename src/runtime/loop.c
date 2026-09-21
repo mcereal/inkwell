@@ -8,9 +8,176 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/epoll.h>
-#include <sys/eventfd.h>
 #include <unistd.h>
+
+/*
+ * Two backends behind one table of sources.
+ *
+ * epoll is the one that ships, and on Linux nothing is translated: loop.h's INKWELL_LOOP_* are
+ * epoll's own bits, asserted below, so a mask goes into epoll_ctl() and comes back out of
+ * epoll_wait() untouched.
+ *
+ * kqueue is for a development host - macOS, where the same UI runs in a window - and it differs
+ * from epoll in the three ways the code below is shaped around. Reading and writing are separate
+ * filters, so a mask becomes zero, one or two registrations and changing it is a diff. One
+ * descriptor that is both readable and writable comes back as two events, so a batch is merged
+ * per source before anything is dispatched, and a callback is still called once with the union
+ * as it is under epoll. And end-of-file is a flag on a filter rather than an event of its own, so
+ * it is mapped onto what epoll would have said; see kqueue_mask().
+ */
+#if defined(__linux__)
+#include <sys/epoll.h>
+
+_Static_assert(INKWELL_LOOP_IN == EPOLLIN, "INKWELL_LOOP_IN is EPOLLIN");
+_Static_assert(INKWELL_LOOP_OUT == EPOLLOUT, "INKWELL_LOOP_OUT is EPOLLOUT");
+_Static_assert(INKWELL_LOOP_ERR == EPOLLERR, "INKWELL_LOOP_ERR is EPOLLERR");
+_Static_assert(INKWELL_LOOP_HUP == EPOLLHUP, "INKWELL_LOOP_HUP is EPOLLHUP");
+#else
+#include <fcntl.h>
+#include <sys/event.h>
+#endif
+
+/* ---- the backend ----------------------------------------------------------------------------- */
+
+#if defined(__linux__)
+
+static int backend_open(void) {
+    const int fd = epoll_create1(EPOLL_CLOEXEC);
+    return fd < 0 ? -errno : fd;
+}
+
+static int backend_ctl(int poll_fd, int op, struct inkwell_loop_source *source, uint32_t events) {
+    struct epoll_event event;
+    event.events = events;
+    event.data.ptr = source;
+    return epoll_ctl(poll_fd, op, source->fd, &event) < 0 ? -errno : 0;
+}
+
+static int backend_add(struct inkwell_loop *loop, struct inkwell_loop_source *source) {
+    return backend_ctl(loop->poll_fd, EPOLL_CTL_ADD, source, source->events);
+}
+
+static int backend_update(struct inkwell_loop *loop, struct inkwell_loop_source *source,
+                          uint32_t was) {
+    (void)was;
+    return backend_ctl(loop->poll_fd, EPOLL_CTL_MOD, source, source->events);
+}
+
+static int backend_remove(struct inkwell_loop *loop, struct inkwell_loop_source *source) {
+    return epoll_ctl(loop->poll_fd, EPOLL_CTL_DEL, source->fd, NULL) < 0 ? -errno : 0;
+}
+
+#else
+
+static int backend_open(void) {
+    const int fd = kqueue();
+    if (fd < 0) {
+        return -errno;
+    }
+    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+    return fd;
+}
+
+/*
+ * Registers or drops each filter whose wanted state differs between `was` and `now`, and on a
+ * failure undoes whatever it had already done, so the kernel is left as `was` described it.
+ *
+ * One kevent() per change rather than one for both: a change list without room for errors stops
+ * at the first that fails, so a batch whose first entry was a stale EV_DELETE would silently skip
+ * the EV_ADD behind it. The price is that the two can half-succeed - an IN -> OUT update that
+ * dropped the read filter and then could not add the write one would leave the source hearing
+ * nothing while its caller was told only "failed", and a failed add would leave a registration
+ * pointing at a slot the table has already released for reuse. Hence the rollback.
+ */
+static int kqueue_change(int poll_fd, int fd, int16_t filter, bool add, void *source) {
+    struct kevent change;
+    EV_SET(&change, (uintptr_t)fd, filter, add ? EV_ADD : EV_DELETE, 0, 0, source);
+    return kevent(poll_fd, &change, 1, NULL, 0, NULL) < 0 ? -errno : 0;
+}
+
+static int kqueue_apply(int poll_fd, struct inkwell_loop_source *source, uint32_t was,
+                        uint32_t now) {
+    const struct {
+        uint32_t bit;
+        int16_t filter;
+    } filters[2] = {{INKWELL_LOOP_IN, EVFILT_READ}, {INKWELL_LOOP_OUT, EVFILT_WRITE}};
+    bool applied[2] = {false, false};
+    for (size_t i = 0; i < 2U; ++i) {
+        const bool before = (was & filters[i].bit) != 0U;
+        const bool after = (now & filters[i].bit) != 0U;
+        if (before == after) {
+            continue;
+        }
+        const int result = kqueue_change(poll_fd, source->fd, filters[i].filter, after, source);
+        if (result < 0) {
+            for (size_t j = 0; j < i; ++j) {
+                if (applied[j]) {
+                    const bool restore = (was & filters[j].bit) != 0U;
+                    (void)kqueue_change(poll_fd, source->fd, filters[j].filter, restore, source);
+                }
+            }
+            return result;
+        }
+        applied[i] = true;
+    }
+    return 0;
+}
+
+static int backend_add(struct inkwell_loop *loop, struct inkwell_loop_source *source) {
+    return kqueue_apply(loop->poll_fd, source, 0U, source->events);
+}
+
+static int backend_update(struct inkwell_loop *loop, struct inkwell_loop_source *source,
+                          uint32_t was) {
+    return kqueue_apply(loop->poll_fd, source, was, source->events);
+}
+
+static int backend_remove(struct inkwell_loop *loop, struct inkwell_loop_source *source) {
+    /*
+     * The failure is not reported. A kqueue drops a descriptor's filters by itself when the
+     * descriptor is closed - epoll only does once every duplicate is - so a caller that closed
+     * before removing gets ENOENT here for a registration that is already gone, and the source is
+     * released all the same.
+     */
+    (void)kqueue_apply(loop->poll_fd, source, source->events, 0U);
+    return 0;
+}
+
+/*
+ * One kqueue event as the epoll bits it stands for.
+ *
+ * EV_EOF on the read filter is always readable, as it is under epoll, and is also a hangup only
+ * once nothing is left to read: epoll reports a socket whose peer has sent FIN as readable and
+ * nothing more, and a caller that checks for a hangup before it reads must not lose the last
+ * bytes because this backend said it sooner. On the write filter it is a hangup, and an error
+ * too when the socket carries one - a refused connect() is EPOLLOUT | EPOLLERR | EPOLLHUP under
+ * epoll, and net/fetch.c reads exactly that.
+ */
+static uint32_t kqueue_mask(const struct kevent *event) {
+    if ((event->flags & EV_ERROR) != 0U) {
+        return INKWELL_LOOP_ERR;
+    }
+    const bool eof = (event->flags & EV_EOF) != 0U;
+    /* The socket's error rides in fflags on either filter once EV_EOF is set - a reset
+       connection is ECONNRESET here - and epoll reports it as EPOLLERR whichever direction was
+       being watched. */
+    const uint32_t error = eof && event->fflags != 0U ? INKWELL_LOOP_ERR : 0U;
+    if (event->filter == EVFILT_READ) {
+        return INKWELL_LOOP_IN | error | (eof && event->data == 0 ? INKWELL_LOOP_HUP : 0U);
+    }
+    if (event->filter == EVFILT_WRITE) {
+        uint32_t mask = INKWELL_LOOP_OUT;
+        if (eof) {
+            mask |= INKWELL_LOOP_HUP | error;
+        }
+        return mask;
+    }
+    return 0U;
+}
+
+#endif
+
+/* ---- the table ------------------------------------------------------------------------------- */
 
 static int find_source_index(const struct inkwell_loop *loop, int fd) {
     for (int i = 0; i < INKWELL_LOOP_MAX_SOURCES; ++i) {
@@ -22,12 +189,12 @@ static int find_source_index(const struct inkwell_loop *loop, int fd) {
 }
 
 static int wake_callback(int fd, uint32_t events, void *userdata) {
+    (void)fd;
     (void)events;
     struct inkwell_loop *loop = (struct inkwell_loop *)userdata;
-    uint64_t value = 0;
-    ssize_t result = read(fd, &value, sizeof value);
-    if (result < 0 && errno != EAGAIN) {
-        inkwell_log_warn("loop", "wake read failed: %s", strerror(errno));
+    const int drained = inkwell_wake_drain(&loop->wake);
+    if (drained < 0) {
+        inkwell_log_warn("loop", "wake read failed: %s", strerror(-drained));
     }
     loop->running = false;
     loop->stop_requested = true;
@@ -40,30 +207,32 @@ int inkwell_loop_init(struct inkwell_loop *loop) {
     }
 
     memset(loop, 0, sizeof *loop);
-    loop->epoll_fd = -1;
-    loop->wake_fd = -1;
+    loop->poll_fd = -1;
+    loop->wake.fd = -1;
+    loop->wake.write_fd = -1;
 
-    loop->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
-    if (loop->epoll_fd < 0) {
-        inkwell_log_error("loop", "epoll_create1 failed: %s", strerror(errno));
-        return -errno;
+    loop->poll_fd = backend_open();
+    if (loop->poll_fd < 0) {
+        const int error = loop->poll_fd;
+        inkwell_log_error("loop", "creating the poll set failed: %s", strerror(-error));
+        loop->poll_fd = -1;
+        return error;
     }
 
-    loop->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (loop->wake_fd < 0) {
-        inkwell_log_error("loop", "eventfd failed: %s", strerror(errno));
-        close(loop->epoll_fd);
-        loop->epoll_fd = -1;
-        return -errno;
+    const int woken = inkwell_wake_open(&loop->wake);
+    if (woken < 0) {
+        inkwell_log_error("loop", "creating the wake failed: %s", strerror(-woken));
+        close(loop->poll_fd);
+        loop->poll_fd = -1;
+        return woken;
     }
 
-    int result = inkwell_loop_add_fd(loop, loop->wake_fd, EPOLLIN, wake_callback, loop);
+    int result = inkwell_loop_add_fd(loop, loop->wake.fd, INKWELL_LOOP_IN, wake_callback, loop);
     if (result < 0) {
         inkwell_log_error("loop", "Failed to register wake FD: %d", result);
-        close(loop->wake_fd);
-        close(loop->epoll_fd);
-        loop->wake_fd = -1;
-        loop->epoll_fd = -1;
+        inkwell_wake_close(&loop->wake);
+        close(loop->poll_fd);
+        loop->poll_fd = -1;
         return result;
     }
 
@@ -84,14 +253,11 @@ void inkwell_loop_shutdown(struct inkwell_loop *loop) {
         }
     }
 
-    if (loop->wake_fd >= 0) {
-        close(loop->wake_fd);
-        loop->wake_fd = -1;
-    }
+    inkwell_wake_close(&loop->wake);
 
-    if (loop->epoll_fd >= 0) {
-        close(loop->epoll_fd);
-        loop->epoll_fd = -1;
+    if (loop->poll_fd >= 0) {
+        close(loop->poll_fd);
+        loop->poll_fd = -1;
     }
 
     loop->running = false;
@@ -127,15 +293,11 @@ int inkwell_loop_add_fd(struct inkwell_loop *loop, int fd, uint32_t events,
     source->userdata = userdata;
     source->active = true;
 
-    struct epoll_event event;
-    event.events = events;
-    event.data.ptr = source;
-
-    if (epoll_ctl(loop->epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0) {
-        int error = -errno;
+    const int added = backend_add(loop, source);
+    if (added < 0) {
         source->active = false;
-        inkwell_log_error("loop", "epoll_ctl add failed: %s", strerror(errno));
-        return error;
+        inkwell_log_error("loop", "watching fd %d failed: %s", fd, strerror(-added));
+        return added;
     }
 
     return 0;
@@ -152,15 +314,13 @@ int inkwell_loop_update_fd(struct inkwell_loop *loop, int fd, uint32_t events) {
     }
 
     struct inkwell_loop_source *source = &loop->sources[index];
+    const uint32_t was = source->events;
     source->events = events;
 
-    struct epoll_event event;
-    event.events = events;
-    event.data.ptr = source;
-
-    if (epoll_ctl(loop->epoll_fd, EPOLL_CTL_MOD, fd, &event) < 0) {
-        inkwell_log_error("loop", "epoll_ctl mod failed: %s", strerror(errno));
-        return -errno;
+    const int updated = backend_update(loop, source, was);
+    if (updated < 0) {
+        inkwell_log_error("loop", "changing fd %d failed: %s", fd, strerror(-updated));
+        return updated;
     }
 
     return 0;
@@ -176,9 +336,10 @@ int inkwell_loop_remove_fd(struct inkwell_loop *loop, int fd) {
         return -ENOENT;
     }
 
-    if (epoll_ctl(loop->epoll_fd, EPOLL_CTL_DEL, fd, NULL) < 0) {
-        inkwell_log_error("loop", "epoll_ctl del failed: %s", strerror(errno));
-        return -errno;
+    const int removed = backend_remove(loop, &loop->sources[index]);
+    if (removed < 0) {
+        inkwell_log_error("loop", "unwatching fd %d failed: %s", fd, strerror(-removed));
+        return removed;
     }
 
     loop->sources[index].active = false;
@@ -189,6 +350,81 @@ int inkwell_loop_remove_fd(struct inkwell_loop *loop, int fd) {
 
     return 0;
 }
+
+/*
+ * One wait and everything it returned, dispatched. Returns how many sources were ready - 0 on a
+ * timeout - or a negative errno, -EINTR included, which the caller retries.
+ */
+#if defined(__linux__)
+static int backend_dispatch(struct inkwell_loop *loop, int wait_ms) {
+    struct epoll_event events[8];
+    const int ready =
+        epoll_wait(loop->poll_fd, events, (int)(sizeof events / sizeof events[0]), wait_ms);
+    if (ready < 0) {
+        return -errno;
+    }
+    for (int i = 0; i < ready; ++i) {
+        struct inkwell_loop_source *source = (struct inkwell_loop_source *)events[i].data.ptr;
+        if (source == NULL || !source->active) {
+            continue;
+        }
+        source->callback(source->fd, events[i].events, source->userdata);
+    }
+    return ready;
+}
+#else
+static int backend_dispatch(struct inkwell_loop *loop, int wait_ms) {
+    struct kevent events[16];
+    struct timespec timeout;
+    struct timespec *wait = NULL;
+    if (wait_ms >= 0) {
+        timeout.tv_sec = wait_ms / 1000;
+        timeout.tv_nsec = (long)(wait_ms % 1000) * 1000000L;
+        wait = &timeout;
+    }
+    const int got =
+        kevent(loop->poll_fd, NULL, 0, events, (int)(sizeof events / sizeof events[0]), wait);
+    if (got < 0) {
+        return -errno;
+    }
+
+    /* Merged first, dispatched second: the one-callback-per-source-per-wait that epoll gives. The
+       descriptor is kept beside the source so a slot freed and refilled by an earlier callback
+       in this batch is not handed an event that was about its predecessor. */
+    struct {
+        struct inkwell_loop_source *source;
+        int fd;
+        uint32_t mask;
+    } ready[16];
+    int count = 0;
+    for (int i = 0; i < got; ++i) {
+        struct inkwell_loop_source *source = (struct inkwell_loop_source *)events[i].udata;
+        if (source == NULL) {
+            continue;
+        }
+        int slot = 0;
+        while (slot < count && ready[slot].source != source) {
+            ++slot;
+        }
+        if (slot == count) {
+            ready[count].source = source;
+            ready[count].fd = (int)events[i].ident;
+            ready[count].mask = 0U;
+            ++count;
+        }
+        ready[slot].mask |= kqueue_mask(&events[i]);
+    }
+
+    for (int i = 0; i < count; ++i) {
+        struct inkwell_loop_source *source = ready[i].source;
+        if (!source->active || source->fd != ready[i].fd) {
+            continue;
+        }
+        source->callback(source->fd, ready[i].mask, source->userdata);
+    }
+    return count;
+}
+#endif
 
 int inkwell_loop_run(struct inkwell_loop *loop, int timeout_ms) {
     if (loop == NULL) {
@@ -216,35 +452,25 @@ int inkwell_loop_run(struct inkwell_loop *loop, int timeout_ms) {
     const bool bounded = timeout_ms > 0;
     const uint64_t deadline_ms = bounded ? inkwell_time_monotonic_ms() + (uint64_t)timeout_ms : 0U;
 
-    struct epoll_event events[8];
     while (loop->running) {
         int wait_ms = timeout_ms;
         if (bounded) {
             const uint64_t now = inkwell_time_monotonic_ms();
             wait_ms = now >= deadline_ms ? 0 : (int)(deadline_ms - now);
         }
-        int ready =
-            epoll_wait(loop->epoll_fd, events, (int)(sizeof events / sizeof events[0]), wait_ms);
+        int ready = backend_dispatch(loop, wait_ms);
         if (ready < 0) {
-            if (errno == EINTR) {
+            if (ready == -EINTR) {
                 continue;
             }
-            inkwell_log_error("loop", "epoll_wait failed: %s", strerror(errno));
+            inkwell_log_error("loop", "waiting failed: %s", strerror(-ready));
             loop->running = false;
-            return -errno;
+            return ready;
         }
 
         if (ready == 0) {
             // Timeout without events; allow caller to regain control.
             break;
-        }
-
-        for (int i = 0; i < ready; ++i) {
-            struct inkwell_loop_source *source = (struct inkwell_loop_source *)events[i].data.ptr;
-            if (source == NULL || !source->active) {
-                continue;
-            }
-            source->callback(source->fd, events[i].events, source->userdata);
         }
 
         if (bounded && inkwell_time_monotonic_ms() >= deadline_ms) {
@@ -263,11 +489,10 @@ void inkwell_loop_request_stop(struct inkwell_loop *loop) {
 
     loop->running = false;
     loop->stop_requested = true;
-    if (loop->wake_fd >= 0) {
-        const uint64_t value = 1;
-        ssize_t written = write(loop->wake_fd, &value, sizeof value);
-        if (written < 0 && errno != EAGAIN) {
-            inkwell_log_warn("loop", "wake write failed: %s", strerror(errno));
+    if (loop->wake.write_fd >= 0) {
+        const int signalled = inkwell_wake_signal(&loop->wake);
+        if (signalled < 0) {
+            inkwell_log_warn("loop", "wake write failed: %s", strerror(-signalled));
         }
     }
 }

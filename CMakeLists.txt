@@ -54,15 +54,19 @@ add_library(inkwell STATIC
     # base: the leaves. Nothing in inkwell includes upward into these, and they include nothing
     # of inkwell's but each other.
     src/base/env.c
+    src/base/fd.c
     src/base/file.c
     src/base/log.c
     src/base/text.c
     src/base/time.c
     src/base/version.c
-    # runtime: the one epoll loop everything else is driven from, and the signals that stop it
+    # runtime: the one loop everything else is driven from, the signals that stop it, and the two
+    # descriptors - a timer and a wake - that let something which is not I/O wait on it too
     src/runtime/crash.c
     src/runtime/loop.c
     src/runtime/signals.c
+    src/runtime/timer.c
+    src/runtime/wake.c
     # codec: bytes in, bytes out. They parse; they do not know what the bytes are for.
     src/codec/base64.c
     src/codec/http.c
@@ -106,6 +110,14 @@ add_library(inkwell::inkwell ALIAS inkwell)
 # vocabulary. PUBLIC because a consumer that includes runtime/loop.h and then calls epoll
 # needs the same declarations visible.
 target_compile_definitions(inkwell PUBLIC _POSIX_C_SOURCE=200809L _DEFAULT_SOURCE)
+
+# macOS is a development host, not a target: the loop is kqueue there, the device-only halves of
+# the layers above compile out, and the same UI runs in a window. _POSIX_C_SOURCE on Darwin
+# *hides* everything that is not POSIX - kqueue's timer flags, mkdtemp(), SO_NOSIGPIPE - where on
+# Linux _DEFAULT_SOURCE puts the rest back, and _DARWIN_C_SOURCE is Darwin's spelling of that.
+if(APPLE)
+    target_compile_definitions(inkwell PUBLIC _DARWIN_C_SOURCE)
+endif()
 
 # Mbed TLS, for net/tls.c and therefore net/fetch.c.
 #

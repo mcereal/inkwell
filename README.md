@@ -15,6 +15,7 @@ from off the device into something a program can hold. Neither knows what a prog
      inkwell           loop, signals, clock, log, env, files, codecs
         |
       Linux            epoll, timerfd, signalfd, evdev, /dev/fb0
+                       (macOS for development: kqueue, and a window instead of the panel)
 ```
 
 The arrows only point down. inkwell knows nothing about inkcell and less about any application;
@@ -68,8 +69,15 @@ These are authoring rules — breaking one compiles and looks fine.
 
 ## Building
 
-Linux only — `epoll`, `timerfd`, `signalfd`, `eventfd`. There is no portable fallback and there
-is not meant to be one.
+Linux is the target — `epoll`, `timerfd`, `signalfd`, `eventfd`. macOS builds and passes the
+same suite as a **development host**: the loop is `kqueue` there, and the timer, the wake and the
+signals are the three descriptors `runtime/` hands out instead of the Linux calls, so nothing
+above this layer names either system. It exists so the UI above can be worked on in a window
+without a device; nothing ships for it, and CI builds and tests it so it does not rot. There is
+no third backend and there is not meant to be one.
+
+On macOS the Mbed TLS generator wants a Python with `jinja2` and `jsonschema`; point CMake at one
+with `-DPython3_EXECUTABLE=...` if the one on `PATH` does not have them.
 
 ```bash
 make test        # Debug build + ctest - the default verify step, and what CI runs
