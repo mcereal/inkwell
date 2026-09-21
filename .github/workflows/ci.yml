@@ -58,5 +58,8 @@ jobs:
       - name: Install clang-format
         run: sudo apt-get update && sudo apt-get install -y clang-format-18
 
+      # Through the Makefile, so the file list lives in exactly one place. It used to be
+      # duplicated here, and the day third_party/ was excluded from `make format` this job
+      # went on checking a 3.6 MB vendored file and failed.
       - name: Check formatting
-        run: clang-format-18 --dry-run --Werror $(git ls-files '*.c' '*.h')
+        run: make format-check CLANG_FORMAT=clang-format-18
