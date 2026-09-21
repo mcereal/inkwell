@@ -12,7 +12,9 @@
 #include "inkwell/runtime/timer.h"
 
 #include <errno.h>
+#include <netinet/in.h>
 #include <stdint.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -254,6 +256,64 @@ INKWELL_TEST_CASE(loop_peer_close_with_data_left_is_readable, unit) {
     INKWELL_TEST_FAIL_IF((heard.events & INKWELL_LOOP_IN) == 0U, "the last byte was not readable");
     INKWELL_TEST_FAIL_IF((heard.events & INKWELL_LOOP_HUP) != 0U,
                          "a half-closed socket with data left was reported as a hangup");
+    record_success(test_name);
+}
+
+/*
+ * A connection reset under a source that only reads is an error, as epoll reports it. kqueue
+ * carries the socket's error in fflags on whichever filter saw the end of file, and the read
+ * filter used to drop it - so a reader was told "readable, hung up" about a reset and could not
+ * tell it from an orderly close.
+ */
+INKWELL_TEST_CASE(loop_reset_under_a_reader_is_an_error, unit) {
+    struct inkwell_loop loop;
+    INKWELL_TEST_FAIL_IF(inkwell_loop_init(&loop) < 0, "inkwell_loop_init failed");
+    int listener = socket(AF_INET, SOCK_STREAM, 0);
+    int client = socket(AF_INET, SOCK_STREAM, 0);
+    int server = -1;
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof address);
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t address_len = sizeof address;
+    bool ready = listener >= 0 && client >= 0 &&
+                 bind(listener, (struct sockaddr *)&address, sizeof address) == 0 &&
+                 listen(listener, 1) == 0 &&
+                 getsockname(listener, (struct sockaddr *)&address, &address_len) == 0 &&
+                 connect(client, (struct sockaddr *)&address, sizeof address) == 0;
+    if (ready) {
+        server = accept(listener, NULL, NULL);
+        /* A zero linger turns the close into a reset rather than a FIN. */
+        const struct linger abort_close = {1, 0};
+        ready = server >= 0 &&
+                setsockopt(server, SOL_SOCKET, SO_LINGER, &abort_close, sizeof abort_close) == 0;
+    }
+    struct heard heard = {&loop, THEN_REMOVE, 0U, 0U};
+    if (ready) {
+        close(server);
+        server = -1;
+        ready = inkwell_loop_add_fd(&loop, client, INKWELL_LOOP_IN, record_events, &heard) == 0;
+    }
+    /* Bounded rather than one turn: macOS hands loopback segments to an input thread. */
+    const uint64_t give_up = inkwell_time_monotonic_ms() + 1000U;
+    while (ready && heard.calls == 0U && inkwell_time_monotonic_ms() < give_up) {
+        (void)inkwell_loop_run(&loop, 20);
+    }
+    if (server >= 0) {
+        close(server);
+    }
+    if (client >= 0) {
+        close(client);
+    }
+    if (listener >= 0) {
+        close(listener);
+    }
+    inkwell_loop_shutdown(&loop);
+
+    INKWELL_TEST_FAIL_IF(!ready, "could not set the connection up");
+    INKWELL_TEST_FAIL_IF(heard.calls == 0U, "the reset was never reported");
+    INKWELL_TEST_FAIL_IF((heard.events & INKWELL_LOOP_ERR) == 0U,
+                         "a reset seen by a reader was not reported as an error");
     record_success(test_name);
 }
 

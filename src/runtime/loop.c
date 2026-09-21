@@ -79,33 +79,48 @@ static int backend_open(void) {
 }
 
 /*
- * Registers or drops each filter whose wanted state differs between `was` and `now`.
+ * Registers or drops each filter whose wanted state differs between `was` and `now`, and on a
+ * failure undoes whatever it had already done, so the kernel is left as `was` described it.
  *
  * One kevent() per change rather than one for both: a change list without room for errors stops
  * at the first that fails, so a batch whose first entry was a stale EV_DELETE would silently skip
- * the EV_ADD behind it.
+ * the EV_ADD behind it. The price is that the two can half-succeed - an IN -> OUT update that
+ * dropped the read filter and then could not add the write one would leave the source hearing
+ * nothing while its caller was told only "failed", and a failed add would leave a registration
+ * pointing at a slot the table has already released for reuse. Hence the rollback.
  */
+static int kqueue_change(int poll_fd, int fd, int16_t filter, bool add, void *source) {
+    struct kevent change;
+    EV_SET(&change, (uintptr_t)fd, filter, add ? EV_ADD : EV_DELETE, 0, 0, source);
+    return kevent(poll_fd, &change, 1, NULL, 0, NULL) < 0 ? -errno : 0;
+}
+
 static int kqueue_apply(int poll_fd, struct inkwell_loop_source *source, uint32_t was,
                         uint32_t now) {
     const struct {
         uint32_t bit;
         int16_t filter;
     } filters[2] = {{INKWELL_LOOP_IN, EVFILT_READ}, {INKWELL_LOOP_OUT, EVFILT_WRITE}};
-    int result = 0;
+    bool applied[2] = {false, false};
     for (size_t i = 0; i < 2U; ++i) {
         const bool before = (was & filters[i].bit) != 0U;
         const bool after = (now & filters[i].bit) != 0U;
         if (before == after) {
             continue;
         }
-        struct kevent change;
-        EV_SET(&change, (uintptr_t)source->fd, filters[i].filter, after ? EV_ADD : EV_DELETE, 0, 0,
-               source);
-        if (kevent(poll_fd, &change, 1, NULL, 0, NULL) < 0 && result == 0) {
-            result = -errno;
+        const int result = kqueue_change(poll_fd, source->fd, filters[i].filter, after, source);
+        if (result < 0) {
+            for (size_t j = 0; j < i; ++j) {
+                if (applied[j]) {
+                    const bool restore = (was & filters[j].bit) != 0U;
+                    (void)kqueue_change(poll_fd, source->fd, filters[j].filter, restore, source);
+                }
+            }
+            return result;
         }
+        applied[i] = true;
     }
-    return result;
+    return 0;
 }
 
 static int backend_add(struct inkwell_loop *loop, struct inkwell_loop_source *source) {
@@ -143,13 +158,17 @@ static uint32_t kqueue_mask(const struct kevent *event) {
         return INKWELL_LOOP_ERR;
     }
     const bool eof = (event->flags & EV_EOF) != 0U;
+    /* The socket's error rides in fflags on either filter once EV_EOF is set - a reset
+       connection is ECONNRESET here - and epoll reports it as EPOLLERR whichever direction was
+       being watched. */
+    const uint32_t error = eof && event->fflags != 0U ? INKWELL_LOOP_ERR : 0U;
     if (event->filter == EVFILT_READ) {
-        return INKWELL_LOOP_IN | (eof && event->data == 0 ? INKWELL_LOOP_HUP : 0U);
+        return INKWELL_LOOP_IN | error | (eof && event->data == 0 ? INKWELL_LOOP_HUP : 0U);
     }
     if (event->filter == EVFILT_WRITE) {
         uint32_t mask = INKWELL_LOOP_OUT;
         if (eof) {
-            mask |= INKWELL_LOOP_HUP | (event->fflags != 0U ? INKWELL_LOOP_ERR : 0U);
+            mask |= INKWELL_LOOP_HUP | error;
         }
         return mask;
     }
