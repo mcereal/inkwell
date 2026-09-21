@@ -60,6 +60,7 @@ add_library(inkwell STATIC
     src/base/time.c
     src/base/version.c
     # runtime: the one epoll loop everything else is driven from, and the signals that stop it
+    src/runtime/crash.c
     src/runtime/loop.c
     src/runtime/signals.c
     # codec: bytes in, bytes out. They parse; they do not know what the bytes are for.
