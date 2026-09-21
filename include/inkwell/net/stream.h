@@ -44,6 +44,23 @@ enum inkwell_stream_kind {
     INKWELL_STREAM_SOCKET,   /* a socket: send() with MSG_NOSIGNAL */
 };
 
+/*
+ * **A tty handed to this must be configured so that an empty read blocks or gives EAGAIN, not
+ * zero.** In practice that means `VMIN = 1` in noncanonical mode, on an `O_NONBLOCK`
+ * descriptor.
+ *
+ * This is a real requirement rather than a preference, and it is the caller's because the
+ * caller is the only one that can meet it. `read()` returning 0 is the only way a descriptor
+ * says "the far end is gone", and a noncanonical tty with `VMIN = 0` returns 0 the moment its
+ * input queue is empty - which is every quiet moment on a working serial port. The two are
+ * indistinguishable from in here, so a stream configured that way would report -ENOTCONN on a
+ * device that is sitting there perfectly happy, and its owner would tear down a live link.
+ *
+ * With `VMIN = 1` an empty queue on a non-blocking descriptor is a proper `EAGAIN`, and 0 means
+ * the port really did go away. A socket or a pipe needs none of this: 0 is unambiguously EOF on
+ * both.
+ */
+
 /* One queued write, with a cursor for a partial one. The bytes live in the caller's buffer;
    see inkwell_stream_init(). */
 struct inkwell_stream_slot {

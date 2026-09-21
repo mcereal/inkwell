@@ -206,8 +206,9 @@ int inkwell_stream_pump(struct inkwell_stream *stream) {
             continue;
         }
         if (got == 0) {
-            /* A tty does not normally report EOF, so there this is the device unplugged; on a
-               socket it is the ordinary way a far end says it has gone. */
+            /* On a socket or a pipe this is unambiguously EOF. On a tty it is EOF only because
+               the caller was required to configure VMIN = 1 - see the note by
+               enum inkwell_stream_kind, which is where the reason lives. */
             return -ENOTCONN;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
