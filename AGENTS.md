@@ -39,7 +39,8 @@ header's source by *filename*, never by path.
   *why* it works the way it does. The reasoning is the valuable part; a signature can be read
   off the line below it.
 - Functions return `0` or a negative `errno`. A refusal that a caller must distinguish gets its
-  own enum rather than being folded into a generic failure.
+  own enum rather than being folded into a generic failure - `net/reason.h` is the worked
+  example, and the one thing it is strict about is that a reason never carries a word.
 
 ## Rules that compile fine when broken
 
