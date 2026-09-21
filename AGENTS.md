@@ -67,8 +67,11 @@ inkcell ends - that block several rows at once. Read it before picking something
 
 Most of what lands here arrives the same way, and the order matters:
 
-1. **Check what it actually depends on.** `grep -h '#include "' <file>` is the whole test. A
-   candidate that includes an application header is not ready; find the seam first.
+1. **Check what it actually depends on.** `grep -h '#include "' <file>` over the source **and
+   its header**, then check what the source *calls* across the line. A candidate that includes
+   an application header is not ready; find the seam first. Reading only the source is how
+   `stream_link.c` sat in `docs/extraction.md` as a file move for a tranche - it includes one
+   application header, its own, which includes two more.
 2. **Move the tests with it.** A component that arrives without the cases that held it is a
    downgrade, however clean the diff looks. If the cases live inside a larger suite, slice out
    the ones that belong to the component and leave the rest behind.

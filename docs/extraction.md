@@ -13,9 +13,16 @@ decides whether it moves - not the order of the table.
 Three questions, in this order.
 
 1. **Does it name anything from the application?** `grep -h '#include "' <file>` is most of the
-   test; the rest is reading the prose, because a comment that says "the radio" is a component
-   that will be wrong in the next application even if it compiles. A candidate that fails this
-   is not ready - find the seam first.
+   test, **and `<file>` is the source *and its header*.** The rest is reading the prose, because
+   a comment that says "the radio" is a component that will be wrong in the next application
+   even if it compiles. A candidate that fails this is not ready - find the seam first.
+
+   The emphasis is there because reading only the source got a row on this page wrong for a
+   whole tranche. `stream_link.c` includes one application header - its own - and looks clean;
+   that header includes two more, and the count that mattered was never in the file being
+   grepped. A component's dependencies are what a caller has to compile against, not what its
+   first translation unit spells out. Check both, and check what the source actually *calls*
+   across the line, which is the claim the includes are only evidence for.
 2. **Is there a seam, or only a wrapper?** The good extractions here each left a two-line
    wrapper behind: `codec/png.h` decodes a PNG of a stated size, and the application's tile
    decoder is that call with 256 in it. The bad version of the same move is dragging the tile
@@ -52,21 +59,42 @@ three are already thin against the application.
 Mbed TLS would become inkwell's dependency, which is the real decision in this tranche: it is a
 submodule and a config directory, and it is the first optional dependency inkwell would carry.
 
-### 2. The stream link, then the transports
+### 2. The stream link - a seam, not a move
 
-`src/transport/stream_link.c` is 316 lines and includes its own header and `inkwell/base/log.h`
-and nothing else. It is a buffered read/write link on a descriptor driven by the loop, which is
-as general as anything already here. It goes to `net/`.
+**This row said "316 lines, nothing to convert first" and that was wrong.** It was measured by
+grepping the source, which includes one application header - its own. The header includes
+`mesh/core/session.h` and `mesh/proto/stream_framing.h`, and the source calls two session
+functions outright. Re-measured:
 
-The transports above it - serial, TCP - are a different matter. They are ordinary socket and
-termios work wrapped in the Meshtastic transport registry and reporting through the string
-catalog, so extracting them means answering the errors question below first. The framing they
-use (`src/proto/stream_framing.c`) is Meshtastic's and stays.
+| What | Where it sits |
+|---|---|
+| the descriptor, the loop registration, `want_write` | general |
+| the outbound queue and its slot count | general, once the slot size is the caller's |
+| `struct mesh_stream_parser parser`, embedded in the struct | Meshtastic's framing |
+| `mesh_session_handle_from_radio()`, `mesh_session_packet_failed()` | the application's, called directly |
+
+So the general form is a byte link, not a frame link: it reads what is there and hands the bytes
+up, it takes bytes down and drains them, and it says when one could not be sent. Two callbacks
+and a caller-chosen slot size. What stays behind is a two-field wrapper holding the parser and
+the session, which is the same shape `codec/png.h` left behind - the mechanism comes down, the
+constant and the meaning stay up.
+
+That is a better component than the one this row described, and it is a day's work rather than a
+file move. The queue's slot is `MESH_STREAM_FRAME_HEADER_LEN + MESH_STREAM_FRAME_MAX_PAYLOAD`
+today, which is one radio's protocol deciding a platform buffer - exactly the thing test 2
+above exists to catch.
+
+The transports over it - serial, TCP - are a further step again. They are ordinary socket and
+termios work wrapped in the Meshtastic transport registry. The errors question that used to
+block them is answered (`net/reason.h`), and the TCP link already reports that way; what is left
+is the registry, which is the application's.
 
 ### 3. BlueZ
 
 `src/transport/ble/bluez_client.c` is 2,980 lines and includes exactly one application header -
-its own. Everything in it is D-Bus, BlueZ object paths, GATT characteristics and a pairing agent.
+its own, which includes none. Re-measured against the corrected test above, including what the
+source calls: no `mesh_session_*`, no `mesh_app_*`, no `mesh_ui_*`, anywhere in it. Everything
+in it is D-Bus, BlueZ object paths, GATT characteristics and a pairing agent.
 It is the largest single piece of platform still sitting in the application, and for a handheld
 OS it is the most valuable: nothing else in the tree is a reusable Bluetooth stack.
 
