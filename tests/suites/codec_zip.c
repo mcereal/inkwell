@@ -10,8 +10,8 @@
  *
  * The windows do not start at the beginning of the file, so every case has to hand the reader
  * the offset the window was fetched from. That is not test scaffolding: it is the shape of the
- * download, and a reader that could only work on a whole file would be a reader this client
- * could not use.
+ * download, and a reader that could only work on a whole file would be a reader a caller
+ * fetching a range could not use.
  */
 
 #include "framework/inkwell_test.h"
