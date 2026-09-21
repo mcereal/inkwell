@@ -7,9 +7,12 @@ says how to work in it.
 
 inkwell is the systems layer under [inkcell](https://github.com/mcereal/inkcell). C17, Linux
 only, no threads, one epoll loop. Four areas: `base/` (the leaves), `runtime/` (the loop, the
-signals, the crash report), `codec/` (bytes in, bytes out), `net/` (one hostname, one socket).
-Arrows point down and `scripts/check-layers.py` holds them there. `make test` before every
-push.
+signals, the crash report), `codec/` (bytes in, bytes out), `net/` (one hostname, one socket,
+one TLS session, one request). Arrows point down and `scripts/check-layers.py` holds them
+there. `make test` before every push.
+
+One optional dependency: Mbed TLS, a submodule. Without it `net/tls.h` refuses every session and
+everything else builds and tests exactly as it does with it.
 
 ## Layout
 
@@ -63,13 +66,20 @@ header's source by *filename*, never by path.
   digest is checked against its own README by `scripts/check-vendor.py`, which `make test` runs.
   A fix goes upstream and comes back as a new revision; an edit in place is invisible in review
   and fails the check. The exclusion is not tidiness - clang-format over 3.6 MB of generated C
-  is both an unreadable diff and a digest mismatch, and it happened once.
+  is both an unreadable diff and a digest mismatch, and it happened once. The same applies to
+  `third_party/mbedtls`, where the pinned SHA is what a digest is for a vendored file; the
+  configuration of it next door in `third_party/mbedtls-config/` is ours and is edited freely.
+- **A dependency may not be compulsory.** Mbed TLS is the only submodule here and `net/tls.c`
+  compiles to a refusing stub without it, so a plain `git clone` is still a complete, buildable,
+  testable inkwell. CI has a job that builds that way, because the claim is worth nothing if
+  nobody checks it. A second dependency, if it ever arrives, arrives the same way.
 
 ## Extracting something from mesh-client
 
 [`docs/extraction.md`](docs/extraction.md) is the running map: what has already come down, what
-is next, the evidence for each candidate, and the two questions - error vocabulary, and where
-inkcell ends - that block several rows at once. Read it before picking something up.
+is next, and the evidence for each candidate. The error-vocabulary question that used to block
+several rows is answered - `net/reason.h` - and where inkcell ends is the one still open. Read
+it before picking something up.
 
 Most of what lands here arrives the same way, and the order matters:
 

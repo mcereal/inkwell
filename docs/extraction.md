@@ -42,23 +42,41 @@ Three questions, in this order.
 | `runtime/crash.h` | `mesh/utils/crash.h` | the product's name, its issues URL, its note labels, and the sentence about what *its* log may contain |
 | `net/reason.h` | nothing - it is new | the table from a reason to a sentence, which is the application's whole half of this |
 | `net/stream.h` | `mesh/transport/stream_link.h` | the frame parser, the session it feeds, and the two numbers that size the outbound queue |
+| `net/tls.h` | `mesh/core/tls_client.h` | which roots to trust, and where they came from - a generated table compiled into a binary is one product's answer to shipping without a certificate store |
+| `net/fetch.h` | `mesh/core/fetch.h` | the product's name and version, sent as `User-Agent`, and every state machine that decides what to do with what came back |
 
 ## Next, in the order the dependencies allow
 
 ### 1. The network stack
 
-`tls_client`, `fetch` and `mqtt_proxy` are one tranche because they stand on each other, and all
-three are already thin against the application.
+**`tls_client` and `fetch` have come down as `net/tls.h` and `net/fetch.h`.** Both went the way
+`codec/png.h` did: the mechanism came here and the number stayed up there. For TLS the number was
+the trust anchors, which are now registered by the application rather than linked against; for
+the fetcher it was the `User-Agent`, which is the product's name and never was this layer's to
+know. Neither header had an application include to begin with - the seams were both one line in
+a source file, which is the shape a candidate should be in before it moves at all.
+
+Mbed TLS came with them, and it is worth being accurate about what that cost. It is *not*
+inkwell's first dependency: Wuffs has been here since `codec/png.h`, with the same
+`third_party/x` and `third_party/x-config` shape. What is new is the first **submodule** - the
+first thing a clone has to go and get - and that is why it is optional by presence rather than
+by a flag, and why CI carries a job that builds without it. A platform layer may have a
+dependency; it may not make everyone who clones it pay for one.
 
 | Candidate | Lines | Application includes | What the seam is |
 |---|---|---|---|
-| `src/core/net/tls_client.c` | 496 | 2 | the CA roots. A generated `ca_roots.c` is a *policy*, and the application should hand over a bundle rather than inherit one |
-| `src/core/net/fetch.c` | 870 | 3 | the User-Agent, which names the product and its version |
 | `src/core/net/mqtt_proxy.c` | 1142 | 4 | the string ids it reports errors as - `net/reason.h` is what it reports instead |
 
-`codec/mqtt.h` is already here, so `mqtt_proxy` has nothing left to lose but its vocabulary.
-Mbed TLS would become inkwell's dependency, which is the real decision in this tranche: it is a
-submodule and a config directory, and it is the first optional dependency inkwell would carry.
+`codec/mqtt.h` is already here and the vocabulary question is answered, so `mqtt_proxy` is now
+the one row left in this tranche.
+
+**One thing was deliberately left undone.** `enum inkwell_fetch_outcome` came down unchanged, and
+its `NETWORK` member folds four things `net/reason.h` can tell apart - an unknown host, a lookup
+that failed, an unreachable address, a connection that closed - into one. That is the same
+duplication `net/reason.h` was written to remove, and a caller that wants to say "no such host"
+rather than "could not be reached" cannot. Folding it is a behaviour change to every caller's
+sentences, so it did not belong in a move; it is worth doing on its own, with the call sites in
+view.
 
 ### 2. The transports, now that the stream under them has gone
 

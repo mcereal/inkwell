@@ -8,6 +8,9 @@
 set(INKWELL_TEST_SUPPORT
     support/data_fixture.c
     support/fs_fixture.c
+    # A real TLS server on a loopback socket, for net_fetch.c. Compiles to nothing without
+    # INKWELL_HAVE_TLS, so it is listed unconditionally.
+    support/https_fixture.c
 )
 
 set(INKWELL_TEST_SUITES
@@ -23,6 +26,7 @@ set(INKWELL_TEST_SUITES
     suites/codec_png.c
     suites/codec_sha256.c
     suites/codec_zip.c
+    suites/net_fetch.c
     suites/net_reason.c
     suites/net_resolve.c
     suites/net_stream.c
