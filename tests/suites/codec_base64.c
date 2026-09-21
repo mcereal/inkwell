@@ -45,7 +45,7 @@ INKWELL_TEST_CASE(base64_round_trips_both_alphabets, unit) {
 /*
  * The strictness is the point of the parameter, and the case that says so is a *key*: it is a
  * fixed number of bytes, a mistyped one decodes to a plausible wrong key, and nothing on the
- * wire reports it - the radio just stops hearing the mesh.
+ * wire reports it - the peer just stops answering.
  */
 INKWELL_TEST_CASE(base64_padding_strictness_differs_by_form, unit) {
     uint8_t out[8];

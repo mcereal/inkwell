@@ -63,9 +63,12 @@ add_library(inkwell STATIC
     src/runtime/signals.c
     # codec: bytes in, bytes out. They parse; they do not know what the bytes are for.
     src/codec/base64.c
+    src/codec/http.c
     src/codec/json.c
     src/codec/sha256.c
     src/codec/zip.c
+    # net: one hostname, one socket, one session - all of it on the loop, none of it blocking
+    src/net/resolve.c
 )
 
 target_include_directories(inkwell PUBLIC

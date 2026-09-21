@@ -42,7 +42,8 @@ So the foundation moved down here, and inkcell stands on it.
 |---|---|
 | `base/` | The floor: a monotonic clock and a wall clock you can distrust, a levelled log that bounds its own file, `$PREFIX_`-namespaced environment knobs, whole-file reads, UTF-8 that counts characters rather than bytes. Includes nothing, including from each other's area. |
 | `runtime/` | One epoll loop with a bounded number of fd sources, no threads anywhere, and `SIGINT`/`SIGTERM`/`SIGHUP` delivered through a signalfd so a shutdown runs the ordinary path instead of the default kill action. |
-| `codec/` | Bytes in, bytes out: base64 in both alphabets, SHA-256, a non-allocating JSON reader, and a zip central-directory walker that works on a window of a file rather than the whole thing. A codec parses; it does not know what the bytes are for. |
+| `codec/` | Bytes in, bytes out: base64 in both alphabets, SHA-256, a non-allocating JSON reader, an HTTP/1.1 request formatter and response parser that takes its input in whatever sized pieces the network hands it, and a zip central-directory walker that works on a window of a file rather than the whole thing. A codec parses; it does not know what the bytes are for. |
+| `net/` | One hostname turned into an address by forking a child that is allowed to block, because `getaddrinfo()` has no non-blocking form and `getaddrinfo_a()` starts threads. Reported back through the loop, never from the call that started it. |
 
 Everything here is C17, freestanding of any framework, and allocates as little as it can get
 away with. There are no threads and there will not be any: the loop is the concurrency model.
@@ -105,13 +106,12 @@ new suite file goes in `INKWELL_TEST_SUITES` in `tests/CMakeLists.txt`.
 
 ## Status
 
-Early. The first slice is here — the foundation, the loop, and the leaf codecs — and it is the
-slice everything else has to stand on, which is why it went first. Still to come out of
-mesh-client, roughly in the order the dependencies allow:
+Early. The foundation, the loop, the leaf codecs and the resolver are here. Still to come out
+of mesh-client, roughly in the order the dependencies allow:
 
-- **`net/`** — a forked DNS resolver, non-blocking TCP connect, Mbed TLS on the loop, an HTTP/1.1
-  client, and Mozilla's CA roots compiled in. About 2,600 lines, none of which mentions
-  Meshtastic today.
+- **the rest of `net/`** — non-blocking TCP connect, Mbed TLS on the loop, the HTTP client that
+  drives the codec over a socket, and Mozilla's CA roots compiled in. Deferred only because TLS
+  wants the Mbed TLS submodule wired up, which is a slice of its own.
 - **`bt/`** — a BlueZ GATT client over D-Bus: discovery, bonding, an `org.bluez.Agent1` that can
   answer a PIN prompt from inside the application, characteristic reads and writes, all
   asynchronous on the loop. About 3,200 lines, of which exactly four are Meshtastic-specific.

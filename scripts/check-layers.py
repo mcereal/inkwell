@@ -34,6 +34,9 @@ ALLOWED = {
     "codec": {"base"},
     # The loop and the signals that stop it. It logs, and it reads a clock.
     "runtime": {"base"},
+    # One hostname, one socket, one session. It runs on the loop and speaks through a codec;
+    # it does not know which application asked.
+    "net": {"base", "runtime", "codec"},
 }
 
 INCLUDE = re.compile(r'^\s*#\s*include\s+["<]inkwell/([a-z0-9_]+)/')
