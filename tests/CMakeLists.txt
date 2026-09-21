@@ -23,6 +23,7 @@ set(INKWELL_TEST_SUITES
     suites/codec_png.c
     suites/codec_sha256.c
     suites/codec_zip.c
+    suites/net_reason.c
     suites/net_resolve.c
     suites/runtime_crash.c
     suites/runtime_loop.c

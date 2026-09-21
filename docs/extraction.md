@@ -33,6 +33,7 @@ Three questions, in this order.
 | `codec/inflate.h` | `mesh/utils/inflate.h` | nothing; it was already general |
 | `codec/png.h` | `mesh/map/tile_image.h` | the tile-sized wrapper, and the two static buffers a 256-square decode needs |
 | `runtime/crash.h` | `mesh/utils/crash.h` | the product's name, its issues URL, its note labels, and the sentence about what *its* log may contain |
+| `net/reason.h` | nothing - it is new | the table from a reason to a sentence, which is the application's whole half of this |
 
 ## Next, in the order the dependencies allow
 
@@ -45,7 +46,7 @@ three are already thin against the application.
 |---|---|---|---|
 | `src/core/net/tls_client.c` | 496 | 2 | the CA roots. A generated `ca_roots.c` is a *policy*, and the application should hand over a bundle rather than inherit one |
 | `src/core/net/fetch.c` | 870 | 3 | the User-Agent, which names the product and its version |
-| `src/core/net/mqtt_proxy.c` | 1142 | 4 | the string ids it reports errors as - see **Errors, not string ids** below |
+| `src/core/net/mqtt_proxy.c` | 1142 | 4 | the string ids it reports errors as - `net/reason.h` is what it reports instead |
 
 `codec/mqtt.h` is already here, so `mqtt_proxy` has nothing left to lose but its vocabulary.
 Mbed TLS would become inkwell's dependency, which is the real decision in this tranche: it is a
@@ -93,21 +94,46 @@ thing an OS offers and a thing every application then depends on. Find the codec
 probably a record reader/writer over a file, with the field table staying up in the application -
 and move that.
 
-## Two questions that block several rows
+## The two questions that blocked several rows
 
-### Errors, not string ids
+### Errors, not string ids - answered
 
 Several candidates - the transports, `mqtt_proxy` - report failure by handing back a
 `MESH_STR_*` id for the application's catalog to translate. inkwell has no catalog and should not
 grow one: a platform layer that owns the words is a platform layer every application argues with.
 
-The rule this repo already states is the answer: **functions return 0 or a negative errno, and a
-refusal a caller must distinguish gets its own enum.** So `net/tcp.h` returns
-`INKWELL_TCP_UNREACHABLE` and the application maps that to whatever it wants to say, in whatever
-language. It is more work than moving the id, and it is the difference between a layer and a
-library with a dialect.
+The answer is `net/reason.h`: **a reason and a number, and the application turns the pair into a
+sentence.** Reading every failure site in `tcp_transport.c` and `mqtt_proxy.c` is what settled
+it, because each one's arguments turn out to be one of only three things:
 
-Do this per component as it moves, not as a sweep beforehand.
+| What the call site passes today | Where it comes from instead |
+|---|---|
+| `state->target`, `proxy->host` | the caller passed it in and still has it |
+| `strerror(error)`, `strerror(errno)` | an `int` |
+| `(unsigned)code`, a TLS code | an `int` |
+
+So nothing that crosses is a word, and `struct inkwell_net_failure` is two fields and no buffer.
+The sentences were already half-untranslated - `LINK_TCP_UNREACHABLE` is `"%.24s: %.20s"` with
+`strerror()` formatted into it - so carrying the number loses nothing and stops pretending.
+
+**Two enums, not one.** `enum inkwell_net_reason` is the part every transport shares: getting to
+a host. What happens *after* the connection is up is the protocol's, and stays with the protocol
+- MQTT's CONNACK refusals are `codec/mqtt.h`'s business, not `net/`'s. The evidence for the
+split is in the catalog: `LINK_TCP_UNKNOWN_HOST` and `LINK_MQTT_UNKNOWN_HOST` are the *same
+English sentence written twice*, and so are the lookup-failed, unreachable and timeout pairs.
+Four duplicate strings, translated twice, because the reason had nowhere to live.
+
+**Nothing collapses on the way down.** Where the layer can tell two failures apart it keeps them
+apart, even where every application today says one thing about both - `LOOKUP_TIMED_OUT` is not
+folded into `LOOKUP_FAILED`. Merging is a decision about words, so it belongs in the table that
+produces words. That table is the application's; in mesh-client it is the transport's
+`take_error`.
+
+**Convert in the component, in its own commit, just before it moves.** Not as a sweep
+beforehand, and not in the same diff as the move: the MQTT extraction mixed a rename into a
+relocation and hid 26 wrong names inside it, and an errno conversion folded into a file move is
+that trap with more surface. One diff that changes behaviour with the tests still in place, then
+one diff that is a move.
 
 ### Where the UI toolkit ends
 
@@ -116,6 +142,21 @@ case of that and was easy - a decoder is bytes in, bytes out, and a UI toolkit t
 decoding would own it for everything above it too. Expect the same argument about fonts, and
 expect it to go the other way: a glyph table is a typeface, which is a design decision, which is
 inkcell's.
+
+**The string catalog is the case this turns on, and the answer is that it stays in inkcell.**
+The mechanism is not a UI concern by any test above - a table of ids, a locale, a plural rule
+and a checked format string are a text service, and a headless daemon that wanted translated
+output would want all four. By the `codec/png.h` argument it should come down.
+
+It does not come down, for one reason: **"inkwell has no catalog" is worth more as a structural
+impossibility than as a discipline.** The rule at the top of this page - no word a user reads -
+is kept today by nothing but people remembering it. If there is no catalog to name an id in,
+nothing here *can* report a word, and that property holds across every application nobody has
+written yet. The errors question above was the only thing that made the rule expensive, and
+`net/reason.h` is what made it cheap.
+
+Revisit when something that does not draw actually needs translated text. Until then this is
+speculative generality with a real cost.
 
 ## What must not come down here
 
