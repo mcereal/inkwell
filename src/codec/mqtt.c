@@ -297,7 +297,7 @@ static uint8_t *mqtt_begin_packet(uint8_t *out, size_t cap, enum inkwell_mqtt_pa
     if (cap < header_len + body_len) {
         return NULL;
     }
-    out[0] = (uint8_t)(((uint8_t)type << 4) | (flags & 0x0FU));
+    out[0] = (uint8_t)(((unsigned)type << 4U) | (flags & 0x0FU));
     (void)mqtt_write_varint(out + 1, body_len);
     *total = header_len + body_len;
     return out + header_len;
