@@ -60,6 +60,10 @@ header's source by *filename*, never by path.
 
 ## Extracting something from mesh-client
 
+[`docs/extraction.md`](docs/extraction.md) is the running map: what has already come down, what
+is next, the evidence for each candidate, and the two questions - error vocabulary, and where
+inkcell ends - that block several rows at once. Read it before picking something up.
+
 Most of what lands here arrives the same way, and the order matters:
 
 1. **Check what it actually depends on.** `grep -h '#include "' <file>` is the whole test. A
