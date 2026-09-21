@@ -1,3 +1,12 @@
+/*
+ * _GNU_SOURCE as well as _POSIX_C_SOURCE: EAI_NODATA is a GNU extension, and <netdb.h> declares
+ * it under __USE_GNU only. Under strict POSIX the `#ifdef EAI_NODATA` arm of
+ * resolve_outcome_of() below is compiled out, and a name that exists with no address of its own
+ * is reported as a resolver that did not work - the opposite of what that function is for.
+ *
+ * Nothing here is one of the calls _GNU_SOURCE changes the shape of.
+ */
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "inkwell/net/resolve.h"
@@ -222,6 +231,7 @@ static enum inkwell_resolve_outcome resolve_outcome_of(const struct resolve_reco
         return INKWELL_RESOLVE_NOT_FOUND;
     }
 #ifdef EAI_NODATA
+    /* Kept guarded: musl drops EAI_NODATA from some configurations, and it is obsolete in POSIX. */
     if (record->error == EAI_NODATA) {
         return INKWELL_RESOLVE_NOT_FOUND;
     }
