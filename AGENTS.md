@@ -42,6 +42,12 @@ header's source by *filename*, never by path.
   own enum rather than being folded into a generic failure - `net/reason.h` is the worked
   example, and the one thing it is strict about is that a reason never carries a word.
 
+  That is a rule about *status*. A function whose answer is a quantity returns the quantity, and
+  a negative errno when it has none - `inkwell_base64_encode()`, `inkwell_log_file_compact()`,
+  `inkwell_text_utf8_next()` and `inkwell_stream_pump()` all do. The test is whether a caller wants
+  the number: if it does, hiding it behind an out-parameter to satisfy the shape of the rule
+  makes every call site longer and none of them clearer.
+
 ## Rules that compile fine when broken
 
 - **`base/` includes nothing of inkwell's.** It is the floor.

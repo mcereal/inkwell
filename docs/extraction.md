@@ -41,6 +41,7 @@ Three questions, in this order.
 | `codec/png.h` | `mesh/map/tile_image.h` | the tile-sized wrapper, and the two static buffers a 256-square decode needs |
 | `runtime/crash.h` | `mesh/utils/crash.h` | the product's name, its issues URL, its note labels, and the sentence about what *its* log may contain |
 | `net/reason.h` | nothing - it is new | the table from a reason to a sentence, which is the application's whole half of this |
+| `net/stream.h` | `mesh/transport/stream_link.h` | the frame parser, the session it feeds, and the two numbers that size the outbound queue |
 
 ## Next, in the order the dependencies allow
 
@@ -59,35 +60,28 @@ three are already thin against the application.
 Mbed TLS would become inkwell's dependency, which is the real decision in this tranche: it is a
 submodule and a config directory, and it is the first optional dependency inkwell would carry.
 
-### 2. The stream link - a seam, not a move
+### 2. The transports, now that the stream under them has gone
 
-**This row said "316 lines, nothing to convert first" and that was wrong.** It was measured by
-grepping the source, which includes one application header - its own. The header includes
-`mesh/core/session.h` and `mesh/proto/stream_framing.h`, and the source calls two session
-functions outright. Re-measured:
+**The stream link has come down as `net/stream.h`.** It went as a seam rather than as a file
+move, which is what the re-measurement above said it would be: the general form is a byte
+stream, not a frame link. Bytes arrive as bytes and go out as bytes, and the two numbers that
+used to size its outbound queue - one protocol's largest message, one application's patience -
+are the caller's storage now. What stayed behind is the frame parser, the session it feeds, and
+a `struct mesh_stream_link` that is those two things over an `inkwell_stream`.
 
-| What | Where it sits |
-|---|---|
-| the descriptor, the loop registration, `want_write` | general |
-| the outbound queue and its slot count | general, once the slot size is the caller's |
-| `struct mesh_stream_parser parser`, embedded in the struct | Meshtastic's framing |
-| `mesh_session_handle_from_radio()`, `mesh_session_packet_failed()` | the application's, called directly |
+The transports over it - serial, TCP - are the next step and a larger one. They are ordinary
+socket and termios work wrapped in the Meshtastic transport registry. The errors question that
+used to block them is answered (`net/reason.h`) and the TCP link already reports that way; what
+is left is the registry, which is the application's, and the device discovery underneath it,
+which is not:
 
-So the general form is a byte link, not a frame link: it reads what is there and hands the bytes
-up, it takes bytes down and drains them, and it says when one could not be sent. Two callbacks
-and a caller-chosen slot size. What stays behind is a two-field wrapper holding the parser and
-the session, which is the same shape `codec/png.h` left behind - the mechanism comes down, the
-constant and the meaning stay up.
+| Candidate | What is general | What stays |
+|---|---|---|
+| `src/transport/serial/serial_usb.c` | the sysfs scan, the termios setup, the DTR assert | which USB ids are a radio |
+| `src/transport/tcp/tcp_transport.c` | the connect-with-a-deadline over `net/resolve` and `net/stream` | the registry, the handshake, the auto-connect policy |
 
-That is a better component than the one this row described, and it is a day's work rather than a
-file move. The queue's slot is `MESH_STREAM_FRAME_HEADER_LEN + MESH_STREAM_FRAME_MAX_PAYLOAD`
-today, which is one radio's protocol deciding a platform buffer - exactly the thing test 2
-above exists to catch.
-
-The transports over it - serial, TCP - are a further step again. They are ordinary socket and
-termios work wrapped in the Meshtastic transport registry. The errors question that used to
-block them is answered (`net/reason.h`), and the TCP link already reports that way; what is left
-is the registry, which is the application's.
+Neither is urgent and neither is blocked. A handheld OS wants "open the serial device at this
+path with these settings" long before it wants a transport registry.
 
 ### 3. BlueZ
 
