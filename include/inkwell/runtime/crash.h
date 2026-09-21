@@ -68,6 +68,13 @@ extern "C" {
 #define INKWELL_CRASH_NOTE_MAX 96U
 
 /*
+ * The longest product name this will take. Every heading in the report is built out of it and
+ * the rule under the title is its own length again, so it is bounded rather than truncated: a
+ * title cut in half is a report that does not say what wrote it.
+ */
+#define INKWELL_CRASH_PRODUCT_MAX 48U
+
+/*
  * How many notes an application may declare, how long a label may be, and the column its value
  * is aligned to. A label shorter than the column is padded at install time, so the caller writes
  * "version" rather than counting spaces.
@@ -123,9 +130,16 @@ struct inkwell_crash_config {
  * Install the handlers and decide where a report would go.
  *
  * The report is `config->dir` plus INKWELL_CRASH_REPORT_NAME. Returns 0, -EINVAL for a config
- * missing something required, or -errno when the handlers could not be installed - in which
- * case nothing else here does anything, which is the right failure: a program that cannot
- * report a crash is still a program.
+ * missing something required or carrying a product name or label too long to lay out,
+ * -ENAMETOOLONG for a directory that leaves no room for the report's name, or -errno when the
+ * handlers could not be installed - in which case nothing else here does anything, which is the
+ * right failure: a program that cannot report a crash is still a program.
+ *
+ * **A refused install changes nothing.** Everything that can be rejected is checked before
+ * anything is published, so a process that had a working handler still has exactly the one it
+ * had - the same name, the same warning, the same notes and the same path. That matters more
+ * here than in most places: a half-applied configuration would mean a report written under a
+ * name and a privacy warning the caller was told had been rejected.
  *
  * Calling it twice is not an error and does not stack handlers: the signal dispositions are set
  * once, and a later call re-aims the report at the directory it was given rather than quietly

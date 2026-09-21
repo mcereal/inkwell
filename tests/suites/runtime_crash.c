@@ -32,6 +32,7 @@
 
 #include "inkwell/runtime/crash.h"
 
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -706,5 +707,99 @@ INKWELL_TEST_CASE(crash_install_refuses_what_it_cannot_name, unit) {
                                               .note_labels = k_long,
                                               .note_count = 1U};
     INKWELL_TEST_FAIL_IF(inkwell_crash_install(&wide) == 0, "an unpaddable label was accepted");
+    record_success(test_name);
+}
+
+/*
+ * A refused install leaves the last accepted one exactly as it was.
+ *
+ * This is the case for a bug that was real: the config was applied field by field and validated
+ * as it went, so an install rejected on a late field had already replaced the title, the intro,
+ * the addr2line line and - the one that matters - the privacy warning, and had cleared every
+ * note label on the way. The handler installed by the *previous*, accepted call was still live,
+ * so a crash a moment later wrote a report naming a product the caller had been told was
+ * rejected, warning about a log it had been told was rejected, and carrying none of the notes
+ * the process had been keeping.
+ *
+ * Checked through the report rather than through the return value, because the return value was
+ * always right. -EINVAL was reported correctly the whole time; what was wrong was everything it
+ * had already done.
+ */
+INKWELL_TEST_CASE(crash_a_refused_install_changes_nothing, unit) {
+    char dir[] = "/tmp/inkwell_crash_refusedXXXXXX";
+    INKWELL_TEST_FAIL_IF(!crash_test_tempdir(dir), "mkdtemp failed");
+    INKWELL_TEST_FAIL_IF_CLEANUP(crash_test_install(dir) != 0, inkwell_test_remove_tree(dir),
+                                 "the accepted install was refused");
+    inkwell_crash_note(CRASH_NOTE_VERSION, "9.9.9-accepted");
+    inkwell_crash_note(CRASH_NOTE_ROUTE, "a-route-that-must-survive");
+
+    char kept[INKWELL_CRASH_PATH_MAX];
+    INKWELL_TEST_FAIL_IF_CLEANUP(!inkwell_crash_report_path(kept, sizeof kept),
+                                 inkwell_test_remove_tree(dir), "no path after a good install");
+
+    /* Three configs, each refused for a different reason, and each carrying an identity that
+       must not reach the report: a label too long to pad, a NULL label, and a product name
+       longer than the heading can lay out. */
+    static const char *const k_long_label[] = {"version", "a-label-far-too-long-to-pad"};
+    static const char *const k_null_label[] = {"version", NULL};
+    static char k_long_product[INKWELL_CRASH_PRODUCT_MAX + 8U];
+    memset(k_long_product, 'X', sizeof k_long_product - 1U);
+    k_long_product[sizeof k_long_product - 1U] = '\0';
+
+    const struct inkwell_crash_config k_refused[] = {
+        {.dir = dir,
+         .product = "RejectedApp",
+         .log_warning = "REJECTED WARNING",
+         .note_labels = k_long_label,
+         .note_count = 2U},
+        {.dir = dir,
+         .product = "RejectedApp",
+         .log_warning = "REJECTED WARNING",
+         .note_labels = k_null_label,
+         .note_count = 2U},
+        {.dir = dir, .product = k_long_product, .log_warning = "REJECTED WARNING"},
+    };
+    for (size_t i = 0; i < sizeof k_refused / sizeof k_refused[0]; ++i) {
+        INKWELL_TEST_FAIL_IF_CLEANUP(inkwell_crash_install(&k_refused[i]) != -EINVAL,
+                                     inkwell_test_remove_tree(dir), "a bad config was accepted");
+    }
+
+    /* And a directory with no room for the report's name, which fails later than the rest. */
+    static char k_long_dir[INKWELL_CRASH_PATH_MAX + 16U];
+    memset(k_long_dir, 'd', sizeof k_long_dir - 1U);
+    k_long_dir[0] = '/';
+    k_long_dir[sizeof k_long_dir - 1U] = '\0';
+    const struct inkwell_crash_config deep = {
+        .dir = k_long_dir, .product = "RejectedApp", .log_warning = "REJECTED WARNING"};
+    INKWELL_TEST_FAIL_IF_CLEANUP(inkwell_crash_install(&deep) != -ENAMETOOLONG,
+                                 inkwell_test_remove_tree(dir), "an unusable directory was taken");
+
+    /* The path is the one the accepted install set, not cleared and not re-aimed. */
+    char now[INKWELL_CRASH_PATH_MAX];
+    INKWELL_TEST_FAIL_IF_CLEANUP(
+        !inkwell_crash_report_path(now, sizeof now) || strcmp(now, kept) != 0,
+        inkwell_test_remove_tree(dir), "a refused install moved or cleared the report path");
+
+    char path[256];
+    snprintf(path, sizeof path, "%s/report.txt", dir);
+    FILE *file = fopen(path, "we");
+    INKWELL_TEST_FAIL_IF_CLEANUP(file == NULL, inkwell_test_remove_tree(dir), "could not open");
+    inkwell_crash_write_report(fileno(file), 11);
+    (void)fclose(file);
+
+    static char body[16384];
+    const bool read = crash_test_slurp(path, body, sizeof body);
+    inkwell_test_remove_tree(dir);
+    INKWELL_TEST_FAIL_IF(!read, "report was unreadable or longer than the buffer");
+
+    INKWELL_TEST_FAIL_IF(strstr(body, "RejectedApp") != NULL || strstr(body, "XXXX") != NULL,
+                         "a refused config's product name reached the report");
+    INKWELL_TEST_FAIL_IF(strstr(body, "REJECTED WARNING") != NULL,
+                         "a refused config's privacy warning reached the report");
+    INKWELL_TEST_FAIL_IF(strstr(body, "TestApp crash report") == NULL,
+                         "the accepted config's title did not survive");
+    INKWELL_TEST_FAIL_IF(strstr(body, "9.9.9-accepted") == NULL ||
+                             strstr(body, "a-route-that-must-survive") == NULL,
+                         "a refused install dropped the notes the process was keeping");
     record_success(test_name);
 }

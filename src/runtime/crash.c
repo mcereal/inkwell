@@ -553,42 +553,64 @@ static void crash_capture_load_base(void) {
 }
 
 /*
- * Everything the handler will need to say, assembled here where snprintf is allowed.
+ * Everything the handler will need to say, in two passes: check, then write.
  *
- * Returns false only for a label too long to pad, which is the one input that cannot be
- * truncated into something honest: a label cut short would line up with the wrong column and
- * read as a different fact. Every other field is copied bounded and simply stops.
+ * The two passes are the point, and they are here because one pass was wrong. A second install
+ * carrying a bad label used to fail *after* replacing the title, the intro, the warning and the
+ * addr2line line, and after clearing the note labels - so a process whose reconfiguration had
+ * been refused went on running the handler it already had, and the report it would then write
+ * carried the rejected config's name and, worse, the rejected config's privacy warning, with
+ * every live note dropped. A module whose whole job is to be trustworthy when everything else
+ * has failed does not get to half-apply a configuration it rejected.
+ *
+ * So crash_config_is_usable() touches nothing, and crash_publish_prose() cannot fail. The two
+ * inputs that can be refused are a product name too long to fit its own heading and a label too
+ * long to pad - the latter is the one input that cannot be truncated into something honest,
+ * because a label cut short would line up with the wrong column and read as a different fact.
+ * Every other field is copied bounded and simply stops.
  */
-static bool crash_prepare_prose(const struct inkwell_crash_config *config) {
+
+/* The title is the product name plus " crash report", the rule under it is the same length
+   again, and there are two newlines and a terminator. Nothing writes to g_title until this
+   has agreed it fits. */
+_Static_assert(2U * INKWELL_CRASH_PRODUCT_MAX + 2U * sizeof " crash report" + 2U <= sizeof g_title,
+               "g_title must hold the longest permitted title and its rule");
+
+static bool crash_config_is_usable(const struct inkwell_crash_config *config) {
+    if (strlen(config->product) > INKWELL_CRASH_PRODUCT_MAX) {
+        return false;
+    }
+    for (unsigned slot = 0U; slot < config->note_count; ++slot) {
+        const char *const label = config->note_labels[slot];
+        if (label == NULL || strlen(label) > INKWELL_CRASH_NOTE_LABEL_MAX) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void crash_publish_prose(const struct inkwell_crash_config *config) {
     const char *const product = config->product;
     const char *const binary =
         config->binary != NULL && config->binary[0] != '\0' ? config->binary : product;
 
-    /* The title and the rule under it, which has to be the title's own length - a fixed rule
-       under a name nobody here chose is either short or ragged. */
-    size_t title_len = strlen(product) + strlen(" crash report");
-    if (title_len > sizeof g_title / 2U - 4U) {
-        title_len = sizeof g_title / 2U - 4U;
-    }
+    /* The rule under the title has to be the title's own length - a fixed rule under a name
+       nobody here chose is either short or ragged. Both fit: see the assertion above. */
+    const size_t title_len = strlen(product) + strlen(" crash report");
     int at = snprintf(g_title, sizeof g_title, "%s crash report\n", product);
-    if (at < 0 || (size_t)at >= sizeof g_title) {
-        return false;
-    }
-    for (size_t i = 0U; i < title_len && (size_t)at + 2U < sizeof g_title; ++i) {
+    for (size_t i = 0U; i < title_len; ++i) {
         g_title[at++] = '=';
     }
     g_title[at++] = '\n';
     g_title[at] = '\0';
 
-    if (snprintf(g_intro, sizeof g_intro,
-                 "\n%s wrote this file when it stopped unexpectedly. Nothing was sent\n"
-                 "anywhere - it is on your device, and it is yours.\n"
-                 "\n"
-                 "Please read it before attaching it to a bug report. Everything above the log\n"
-                 "is addresses and counters. The lines at the end are %s's ordinary log:\n",
-                 product, product) < 0) {
-        return false;
-    }
+    (void)snprintf(g_intro, sizeof g_intro,
+                   "\n%s wrote this file when it stopped unexpectedly. Nothing was sent\n"
+                   "anywhere - it is on your device, and it is yours.\n"
+                   "\n"
+                   "Please read it before attaching it to a bug report. Everything above the log\n"
+                   "is addresses and counters. The lines at the end are %s's ordinary log:\n",
+                   product, product);
     inkwell_str_copy(g_warning, sizeof g_warning, config->log_warning);
 
     g_issues[0] = '\0';
@@ -602,16 +624,9 @@ static bool crash_prepare_prose(const struct inkwell_crash_config *config) {
 
     /* The labels, padded to the column the values line up in. */
     memset(g_note_labels, 0, sizeof g_note_labels);
-    g_note_count = 0U;
     for (unsigned slot = 0U; slot < config->note_count; ++slot) {
         const char *const label = config->note_labels[slot];
-        if (label == NULL) {
-            return false;
-        }
         const size_t len = strlen(label);
-        if (len > INKWELL_CRASH_NOTE_LABEL_MAX) {
-            return false;
-        }
         memcpy(g_note_labels[slot], label, len);
         for (size_t i = len; i < INKWELL_CRASH_NOTE_COLUMN; ++i) {
             g_note_labels[slot][i] = ' ';
@@ -619,7 +634,6 @@ static bool crash_prepare_prose(const struct inkwell_crash_config *config) {
         g_note_labels[slot][INKWELL_CRASH_NOTE_COLUMN] = '\0';
     }
     g_note_count = config->note_count;
-    return true;
 }
 
 int inkwell_crash_install(const struct inkwell_crash_config *config) {
@@ -645,15 +659,25 @@ int inkwell_crash_install(const struct inkwell_crash_config *config) {
      * rule the first exists for is that a process does not learn *mid-run* that it has crashed,
      * and an install is the defined moment for asking. A second install is another one.
      */
-    if (!crash_prepare_prose(config)) {
+    if (!crash_config_is_usable(config)) {
         return -EINVAL;
     }
-    const int written =
-        snprintf(g_report_path, sizeof g_report_path, "%s/%s", dir, INKWELL_CRASH_REPORT_NAME);
-    if (written < 0 || (size_t)written >= sizeof g_report_path) {
-        g_report_path[0] = '\0';
+
+    /*
+     * The path is built into a local and checked before anything is published, for the reason
+     * crash_publish_prose() is split in two: a refused install must leave the last accepted one
+     * exactly as it was. A directory too long to hold a report used to clear g_report_path on
+     * its way out, which disarmed a handler that was working a moment earlier.
+     */
+    char path[INKWELL_CRASH_PATH_MAX];
+    const int written = snprintf(path, sizeof path, "%s/%s", dir, INKWELL_CRASH_REPORT_NAME);
+    if (written < 0 || (size_t)written >= sizeof path) {
         return -ENAMETOOLONG;
     }
+
+    /* Past here nothing fails, so the new configuration lands whole. */
+    crash_publish_prose(config);
+    memcpy(g_report_path, path, (size_t)written + 1U);
 
     /*
      * Answered once, here, rather than by a stat() whenever somebody asks.

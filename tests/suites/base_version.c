@@ -78,3 +78,49 @@ INKWELL_TEST_CASE(version_prerelease, unit) {
 
     record_success(test_name);
 }
+
+/*
+ * Malformed build metadata and prerelease identifiers are unparseable, not ignorable.
+ *
+ * The rule this defends is the one at the top of the header: unparseable sorts below parseable,
+ * so a garbled tag off a network degrades to "no update" rather than to an upgrade. Build
+ * metadata takes no part in precedence, and the first version of this took that to mean it
+ * needed no checking - so "2.0.0+" and "2.0.0+a..b" parsed as 2.0.0 and read as newer than a
+ * running 1.x, which is precisely the direction the rule exists to prevent.
+ *
+ * Every case below is paired with a well-formed neighbour, because a validator that rejects
+ * everything would satisfy the first half of this on its own.
+ */
+INKWELL_TEST_CASE(version_rejects_malformed_identifiers, unit) {
+    static const char *const k_malformed[] = {
+        "2.0.0+",          /* metadata introduced and then absent */
+        "2.0.0+a..b",      /* an empty identifier */
+        "2.0.0+.build",    /* a leading dot is the same thing */
+        "2.0.0+build.",    /* and so is a trailing one */
+        "2.0.0+bui|d",     /* not alphanumeric or a hyphen */
+        "2.0.0-rc.1+",     /* the same tail, after a prerelease */
+        "2.0.0-rc.1+a..b", /* and the same emptiness in it */
+        "2.0.0-",          /* a prerelease introduced and then absent */
+        "2.0.0-rc..1",     /* an empty prerelease identifier */
+        "2.0.0-rc!",       /* not alphanumeric or a hyphen, in the prerelease */
+    };
+    for (size_t i = 0; i < sizeof k_malformed / sizeof k_malformed[0]; ++i) {
+        INKWELL_TEST_FAIL_IF(inkwell_version_compare(k_malformed[i], "1.0.0") >= 0, k_malformed[i]);
+        INKWELL_TEST_FAIL_IF(inkwell_version_is_prerelease(k_malformed[i]), k_malformed[i]);
+    }
+
+    /* The well-formed neighbours, which must still parse and still outrank 1.0.0. */
+    static const char *const k_fine[] = {
+        "2.0.0+build.7",
+        "2.0.0+21AF26D3-117B344092BD",
+        "2.0.0+a-b.c-d",
+        "2.0.0-rc.1+build.7",
+    };
+    for (size_t i = 0; i < sizeof k_fine / sizeof k_fine[0]; ++i) {
+        INKWELL_TEST_FAIL_IF(inkwell_version_compare(k_fine[i], "1.0.0") <= 0, k_fine[i]);
+    }
+    /* And the metadata still takes no part in precedence once it is well formed. */
+    INKWELL_TEST_FAIL_IF(inkwell_version_compare("2.0.0+build.7", "2.0.0+other.9") != 0,
+                         "build metadata must not order two otherwise equal versions");
+    record_success(test_name);
+}

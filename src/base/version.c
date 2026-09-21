@@ -4,6 +4,39 @@
 #include <stddef.h>
 #include <string.h>
 
+/*
+ * True when [text, text+len) is a well-formed run of dot-separated SemVer identifiers: at least
+ * one, none of them empty, and nothing in them but ASCII alphanumerics and hyphens.
+ *
+ * The spec says this of a prerelease and of build metadata alike, and both are checked with it
+ * for the same reason. This file promises that anything unparseable sorts below anything
+ * parseable, and that promise is what keeps a garbled tag off a network from ever reading as an
+ * upgrade - so a string the spec does not admit has to fail here rather than be tolerated into
+ * looking like a version. "2.0.0+" and "2.0.0+a..b" are the shapes that got through before this
+ * existed, and both compared as newer than a running 1.x.
+ */
+static bool dot_identifiers_are_valid(const char *text, size_t len) {
+    size_t run = 0U;
+    for (size_t i = 0; i < len; ++i) {
+        const char c = text[i];
+        if (c == '.') {
+            if (run == 0U) {
+                return false; /* an empty identifier, as in "a..b" or a leading dot */
+            }
+            run = 0U;
+            continue;
+        }
+        const bool allowed =
+            (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-';
+        if (!allowed) {
+            return false;
+        }
+        run++;
+    }
+    /* Zero when the run was empty ("+") or ended on a dot ("a.b."). */
+    return run != 0U;
+}
+
 /* One parsed version. `pre` points into the caller's string and is NULL when there is none. */
 struct semver {
     unsigned long major;
@@ -62,16 +95,20 @@ static bool semver_parse(const char *text, struct semver *out) {
 
     if (*text == '-') {
         out->pre = text + 1;
-        /* Build metadata is not part of precedence, so it ends the prerelease and is dropped. */
+        /* Build metadata is not part of precedence, so it ends the prerelease and is dropped -
+           but it is still checked, because a malformed tail makes the whole string malformed. */
         const char *plus = strchr(out->pre, '+');
         out->pre_len = plus != NULL ? (size_t)(plus - out->pre) : strlen(out->pre);
-        if (out->pre_len == 0U) {
+        if (!dot_identifiers_are_valid(out->pre, out->pre_len)) {
             return false;
         }
-        return true;
+        return plus == NULL || dot_identifiers_are_valid(plus + 1, strlen(plus + 1));
     }
     /* Only build metadata or nothing may follow the numbers. */
-    return *text == '\0' || *text == '+';
+    if (*text == '+') {
+        return dot_identifiers_are_valid(text + 1, strlen(text + 1));
+    }
+    return *text == '\0';
 }
 
 /* The next dot-separated identifier of a prerelease string, or false when it is exhausted. */
