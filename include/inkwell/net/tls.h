@@ -42,7 +42,7 @@ extern "C" {
 
 /* The descriptor is borrowed, never closed here: the caller opened it, the caller connected it,
    and on any error the caller is the one that has to decide whether to retry. */
-struct inkwell_tls_state; /* defined in src/core/net/tls_client.c; heap-held, one per session */
+struct inkwell_tls_state; /* defined in tls.c; heap-held, one per session */
 
 struct inkwell_tls_client {
     int fd;

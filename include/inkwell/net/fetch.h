@@ -37,7 +37,7 @@ extern "C" {
 #endif
 
 struct inkwell_loop;
-struct inkwell_fetch_conn; /* the request in flight; defined in src/core/net/fetch.c */
+struct inkwell_fetch_conn; /* the request in flight; defined in fetch.c */
 
 #define INKWELL_FETCH_PATH_MAX 256U
 /* How many headers one request may carry. Two (Accept and User-Agent) covers the common case

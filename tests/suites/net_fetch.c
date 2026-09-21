@@ -503,6 +503,52 @@ cleanup:
 }
 
 /*
+ * The cap is on the reply, and a reply of exactly that many bytes is inside it.
+ *
+ * The boundary is the whole point. Every other case here asks for a reply far past its cap or
+ * far short of it, which is how a limit that was one byte tight came all the way down from
+ * mesh-client unnoticed: the terminator this module adds was counted against the caller's
+ * number, so the documented maximum was never actually reachable.
+ */
+INKWELL_TEST_CASE(fetch_caps_the_reply_and_not_its_terminator, unit) {
+    struct fetch_harness h;
+    const char *failure = NULL;
+    if (!harness_start(&h)) {
+        failure = "the harness did not start";
+        goto cleanup;
+    }
+
+    const size_t exact = sizeof k_document - 1U;
+    const struct inkwell_fetch_request fits = {
+        .url = "https://api.github.com/doc",
+        .response_max = exact,
+    };
+    if (!harness_fetch(&h, &fits) || h.probe.outcome[0] != INKWELL_FETCH_OK ||
+        h.probe.len[0] != exact || strcmp(h.probe.body[0], k_document) != 0) {
+        failure = "a reply of exactly response_max bytes should be captured whole";
+        goto cleanup;
+    }
+
+    /* And one byte tighter really is too small, so the fix is not just a cap that never bites. */
+    const struct inkwell_fetch_request tight = {
+        .url = "https://api.github.com/doc",
+        .response_max = exact - 1U,
+    };
+    if (!harness_fetch(&h, &tight) || h.probe.outcome[1] != INKWELL_FETCH_TOO_LARGE) {
+        failure = "a reply one byte past its cap should still be abandoned";
+        goto cleanup;
+    }
+
+cleanup:
+    harness_stop(&h);
+    if (failure != NULL) {
+        record_failure(test_name, failure);
+    } else {
+        record_success(test_name);
+    }
+}
+
+/*
  * A reply past its cap is abandoned, and the completion that says so can start the next.
  *
  * Both by name rather than by address, so both go through the resolver: the first request is

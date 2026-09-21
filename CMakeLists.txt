@@ -119,10 +119,16 @@ target_compile_definitions(inkwell PUBLIC _POSIX_C_SOURCE=200809L _DEFAULT_SOURC
 # without 53 MB of somebody else's C in it. That is the deal this dependency is taken on: a
 # platform layer may have one, and it may not make everyone who clones it pay for one.
 #
-# `NOT TARGET mbedtls` is the same arrangement inkcell uses for inkwell itself: an application
-# that carries its own pin adds it first and that pin is what the whole tree builds, rather than
-# two copies of the library disagreeing about a version.
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/CMakeLists.txt)
+# `TARGET mbedtls` is the same arrangement inkcell uses for inkwell itself: an application that
+# carries its own pin adds it first and that pin is what the whole tree builds, rather than two
+# copies of the library disagreeing about a version.
+#
+# It is the *first* half of the condition, not just the guard around add_subdirectory(), and that
+# distinction is the whole of it. Such an application has no reason to initialise inkwell's nested
+# submodule as well - it already has one - so testing the checkout first would take the stub
+# branch and quietly turn TLS off for the entire tree, with the pin sitting right there unused.
+# The file check belongs only where a checkout is actually about to be read.
+if(TARGET mbedtls OR EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/CMakeLists.txt)
     if(NOT TARGET mbedtls)
         # Mbed TLS builds its own tests, sample programs and package config by default, none of
         # which belong in this build. FATAL_WARNINGS is turned off because it is that project's

@@ -204,9 +204,16 @@ static void fetch_fail(struct inkwell_fetch *fetch, enum inkwell_fetch_outcome o
 
 /* ---- the body --------------------------------------------------------------------------- */
 
-/* Appends to the captured reply, capped so a runaway one cannot grow without bound. */
+/*
+ * Appends to the captured reply, capped so a runaway one cannot grow without bound.
+ *
+ * The cap is on the reply, not on the allocation. The terminator is this file's own - the result
+ * promises a NUL-terminated body, which the caller never asked for and should not pay for - so a
+ * reply of exactly `response_max` bytes is captured whole and the byte after it is ours. Counting
+ * it made the documented limit one short, silently, and only at the boundary.
+ */
 static bool fetch_capture(struct inkwell_fetch_conn *conn, const uint8_t *bytes, size_t len) {
-    if (len > conn->response_max || conn->body_len + len + 1U > conn->response_max) {
+    if (len > conn->response_max || conn->body_len + len > conn->response_max) {
         return false;
     }
     char *grown = realloc(conn->body, conn->body_len + len + 1U);
