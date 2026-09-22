@@ -79,6 +79,7 @@ add_library(inkwell STATIC
     src/codec/zip.c
     # net: one hostname, one socket, one session - all of it on the loop, none of it blocking
     src/net/fetch.c
+    src/net/mqtt.c
     src/net/reason.c
     src/net/resolve.c
     src/net/stream.c
