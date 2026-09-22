@@ -532,14 +532,11 @@ static struct bluez_object *object_find(struct bluez_backend *backend, const cha
     return NULL;
 }
 
-/* The object at `path`, added if it is not there yet. NULL when it cannot be kept. */
+/* The object at `path`, added if it is not there yet. NULL when there is no memory for it. */
 static struct bluez_object *object_add(struct bluez_backend *backend, const char *path) {
     struct bluez_object *object = object_find(backend, path);
     if (object != NULL) {
         return object;
-    }
-    if (strlen(path) >= sizeof object->path) {
-        return NULL;
     }
     if (backend->object_count == backend->object_capacity) {
         const size_t capacity =
@@ -581,7 +578,7 @@ static void objects_clear(struct bluez_backend *backend) {
 }
 
 /* UUIDs is replaced whole, never patched. */
-static void object_set_services(struct bluez_object *object, DBusMessageIter *array) {
+static int object_set_services(struct bluez_object *object, DBusMessageIter *array) {
     object_clear_services(object);
     DBusMessageIter uuids;
     dbus_message_iter_recurse(array, &uuids);
@@ -591,12 +588,12 @@ static void object_set_services(struct bluez_object *object, DBusMessageIter *ar
         ++count;
     }
     if (count == 0U) {
-        return;
+        return 0;
     }
     object->services = calloc(count, sizeof *object->services);
     if (object->services == NULL) {
         inkwell_log_warn("ble", "No memory for the services of %s", object->path);
-        return;
+        return -ENOMEM;
     }
     for (; dbus_message_iter_get_arg_type(&uuids) == DBUS_TYPE_STRING;
          dbus_message_iter_next(&uuids)) {
@@ -605,10 +602,12 @@ static void object_set_services(struct bluez_object *object, DBusMessageIter *ar
         inkwell_str_copy(object->services[object->service_count++], sizeof object->services[0],
                          uuid != NULL ? uuid : "");
     }
+    return 0;
 }
 
-static void object_set_property(struct bluez_object *object, unsigned interface, const char *name,
-                                DBusMessageIter *variant) {
+/* -ENOMEM when a value could not be kept; every other property always can. */
+static int object_set_property(struct bluez_object *object, unsigned interface, const char *name,
+                               DBusMessageIter *variant) {
     const int type = dbus_message_iter_get_arg_type(variant);
     const char *text = NULL;
     if (type == DBUS_TYPE_STRING) {
@@ -618,10 +617,10 @@ static void object_set_property(struct bluez_object *object, unsigned interface,
         if (strcmp(name, "UUID") == 0 && text != NULL) {
             inkwell_str_copy(object->uuid, sizeof object->uuid, text);
         }
-        return;
+        return 0;
     }
     if (interface != BLUEZ_DEVICE) {
-        return;
+        return 0;
     }
     if (strcmp(name, "Address") == 0 && text != NULL) {
         inkwell_str_copy(object->address, sizeof object->address, text);
@@ -639,8 +638,9 @@ static void object_set_property(struct bluez_object *object, unsigned interface,
         object->rssi = rssi;
         object->has_rssi = true;
     } else if (strcmp(name, "UUIDs") == 0 && type == DBUS_TYPE_ARRAY) {
-        object_set_services(object, variant);
+        return object_set_services(object, variant);
     }
+    return 0;
 }
 
 /* A property that has stopped existing. RSSI is the one that matters: bluetoothd drops it when a
@@ -664,9 +664,10 @@ static void object_unset_property(struct bluez_object *object, unsigned interfac
     }
 }
 
-/* An a{sv}: some or all of `interface`'s properties. */
-static void object_set_properties(struct bluez_object *object, unsigned interface,
-                                  DBusMessageIter *array) {
+/* An a{sv}: some or all of `interface`'s properties. -ENOMEM when one could not be kept. */
+static int object_set_properties(struct bluez_object *object, unsigned interface,
+                                 DBusMessageIter *array) {
+    int result = 0;
     DBusMessageIter properties;
     dbus_message_iter_recurse(array, &properties);
     for (; dbus_message_iter_get_arg_type(&properties) == DBUS_TYPE_DICT_ENTRY;
@@ -684,14 +685,23 @@ static void object_set_properties(struct bluez_object *object, unsigned interfac
         }
         DBusMessageIter variant;
         dbus_message_iter_recurse(&property, &variant);
-        object_set_property(object, interface, name, &variant);
+        if (object_set_property(object, interface, name, &variant) < 0) {
+            result = -ENOMEM;
+        }
     }
+    return result;
 }
 
 /* An a{sa{sv}}: the interfaces an object has, as GetManagedObjects and InterfacesAdded list
-   them. An object with none this copy keeps is never added. */
-static void objects_add_interfaces(struct bluez_backend *backend, const char *path,
-                                   DBusMessageIter *array) {
+   them. An object with none this copy keeps is never added, and neither is one whose path is
+   longer than any handle. -ENOMEM when the object or one of its values could not be kept: the
+   copy is then incomplete, and the caller must not treat it as the tree. */
+static int objects_add_interfaces(struct bluez_backend *backend, const char *path,
+                                  DBusMessageIter *array) {
+    if (strlen(path) >= INKWELL_BLE_HANDLE_MAX) {
+        return 0;
+    }
+    int result = 0;
     DBusMessageIter interfaces;
     dbus_message_iter_recurse(array, &interfaces);
     for (; dbus_message_iter_get_arg_type(&interfaces) == DBUS_TYPE_DICT_ENTRY;
@@ -709,11 +719,14 @@ static void objects_add_interfaces(struct bluez_backend *backend, const char *pa
         }
         struct bluez_object *object = object_add(backend, path);
         if (object == NULL) {
-            return;
+            return -ENOMEM;
         }
         object->interfaces |= bit;
-        object_set_properties(object, bit, &interface);
+        if (object_set_properties(object, bit, &interface) < 0) {
+            result = -ENOMEM;
+        }
     }
+    return result;
 }
 
 /* An `as`: the interfaces an object has lost. It goes once it has none this copy keeps. */
@@ -736,7 +749,8 @@ static void objects_remove_interfaces(struct bluez_backend *backend, const char 
     }
 }
 
-/* Replaces the whole copy with a GetManagedObjects reply. */
+/* Replaces the whole copy with a GetManagedObjects reply. One that could not be held whole is
+   not kept at all, so the next lookup fetches it again rather than trusting half of it. */
 static int objects_load(struct bluez_backend *backend, DBusMessage *reply) {
     if (dbus_message_get_type(reply) != DBUS_MESSAGE_TYPE_METHOD_RETURN) {
         return reply_error(reply, "GetManagedObjects");
@@ -759,8 +773,10 @@ static int objects_load(struct bluez_backend *backend, DBusMessage *reply) {
         const char *path = NULL;
         dbus_message_iter_get_basic(&entry, &path);
         if (dbus_message_iter_next(&entry) &&
-            dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_ARRAY) {
-            objects_add_interfaces(backend, path, &entry);
+            dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_ARRAY &&
+            objects_add_interfaces(backend, path, &entry) < 0) {
+            objects_clear(backend);
+            return -ENOMEM;
         }
     }
     backend->objects_loaded = true;
@@ -851,8 +867,12 @@ static bool objects_handle_signal(struct inkwell_ble_central *central, DBusMessa
             dbus_message_iter_get_basic(&iter, &path);
             if (dbus_message_iter_next(&iter) &&
                 dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_ARRAY) {
+                /* A change that could not be kept leaves a copy that is not the tree: drop it,
+                   and the next lookup fetches the whole tree again. */
                 if (added) {
-                    objects_add_interfaces(backend, path, &iter);
+                    if (objects_add_interfaces(backend, path, &iter) < 0) {
+                        objects_clear(backend);
+                    }
                 } else {
                     objects_remove_interfaces(backend, path, &iter);
                 }
@@ -872,7 +892,10 @@ static void objects_properties_changed(struct bluez_backend *backend, const char
         !dbus_message_iter_next(iter) || dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_ARRAY) {
         return;
     }
-    object_set_properties(object, BLUEZ_DEVICE, iter);
+    if (object_set_properties(object, BLUEZ_DEVICE, iter) < 0) {
+        objects_clear(backend);
+        return;
+    }
     if (!dbus_message_iter_next(iter) || dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_ARRAY) {
         return;
     }
