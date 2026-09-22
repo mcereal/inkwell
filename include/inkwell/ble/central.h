@@ -40,9 +40,10 @@
  * after its request was timed out or cancelled is discarded rather than completing whatever was
  * asked next.
  *
- * Some calls do block the loop, each for a bounded time: a listing or characteristic lookup (one
- * second), discovery on or off and a disconnect (five), and on BlueZ a subscribe (eight, because
- * StartNotify may start a bond). They are marked where they are declared.
+ * Some calls do block the loop, each for a bounded time: the first adapter, device or
+ * characteristic lookup after the stack starts (one second - later ones read a copy the stack
+ * keeps current), discovery on or off and a disconnect (five), and on BlueZ a subscribe (eight,
+ * because StartNotify may start a bond). They are marked where they are declared.
  *
  * Only one of each kind of request is in flight at a time - one read, one write, one connect,
  * one pair - which is what a single link needs and what keeps the bookkeeping here a handful of
@@ -205,8 +206,8 @@ int inkwell_ble_find_adapter(struct inkwell_ble_central *central, char *name, si
 int inkwell_ble_start_discovery(struct inkwell_ble_central *central);
 int inkwell_ble_stop_discovery(struct inkwell_ble_central *central);
 /* Every peripheral the stack holds that advertises `service_uuid`, compared without regard to
-   case. On BlueZ this is one bounded GetManagedObjects; a caller should not make it every turn
-   of the loop. */
+   case. Read from memory, except that on BlueZ the first lookup of any kind after bluetoothd
+   starts fetches its object tree, bounded to a second. */
 int inkwell_ble_list_by_service(struct inkwell_ble_central *central, const char *service_uuid,
                                 struct inkwell_ble_device *devices, size_t capacity, size_t *count);
 
@@ -262,7 +263,7 @@ int inkwell_ble_device_connected(struct inkwell_ble_central *central, const char
 int inkwell_ble_services_resolved(struct inkwell_ble_central *central, const char *address,
                                   bool *out_resolved);
 /* The handle of one characteristic under `address`, by UUID. -ENOENT when the peripheral has
-   resolved no such characteristic. On BlueZ this blocks for at most a second. */
+   resolved no such characteristic. Blocks only as list_by_service() does. */
 int inkwell_ble_find_characteristic(struct inkwell_ble_central *central, const char *address,
                                     const char *char_uuid, char *out_handle, size_t out_len);
 /*
@@ -311,8 +312,9 @@ void inkwell_ble_set_notification_handler(struct inkwell_ble_central *central,
  */
 struct inkwell_ble_mock_config {
     /*
-     * Routes the backend-specific half - reads, writes and property queries - to a real
-     * backend on this bus instead of the script, with everything else still scripted. BlueZ
+     * Routes the backend-specific half - reads, writes, property queries, and the adapter,
+     * device and characteristic lookups - to a real backend on this bus instead of the script,
+     * with everything else still scripted. BlueZ
      * only: it exists so the D-Bus marshalling and the reply bookkeeping can be tested against
      * a fake org.bluez on an isolated bus under dbus-run-session. Never the system bus.
      */
@@ -377,8 +379,7 @@ struct inkwell_ble_mock_config {
     const struct inkwell_ble_device *devices;
     size_t device_count;
     int list_result;
-    /* Counts listings. On BlueZ each one blocks the loop, so what a test needs to pin is how
-       often it is made, not what it answers. */
+    /* Counts listings, so a test can pin how often a caller makes one. */
     unsigned *list_calls;
     uint8_t *write_capture_buffer;
     size_t write_capture_capacity;

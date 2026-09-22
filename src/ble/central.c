@@ -62,8 +62,8 @@ static bool mocked(void) {
     return g_mock.enabled;
 }
 
-/* Everything the mock answers when there is no bus behind it: reads, writes, property queries
-   and the loop. With a bus address those go to the real backend. */
+/* Everything the mock answers when there is no bus behind it: reads, writes, property queries,
+   the lookups and the loop. With a bus address those go to the real backend. */
 static bool scripted(void) {
     return g_mock.enabled && g_mock.config.bus_address == NULL;
 }
@@ -462,7 +462,7 @@ int inkwell_ble_find_adapter(struct inkwell_ble_central *central, char *name, si
     if (central == NULL || name == NULL || name_len == 0U) {
         return -EINVAL;
     }
-    if (mocked()) {
+    if (scripted()) {
         if (g_mock.config.find_adapter_result < 0) {
             return g_mock.config.find_adapter_result;
         }
@@ -517,7 +517,7 @@ int inkwell_ble_list_by_service(struct inkwell_ble_central *central, const char 
     if (!central->open) {
         return -ENOTCONN;
     }
-    if (mocked()) {
+    if (scripted()) {
         if (g_mock.config.list_calls != NULL) {
             ++*g_mock.config.list_calls;
         }
@@ -906,7 +906,7 @@ int inkwell_ble_find_characteristic(struct inkwell_ble_central *central, const c
         return -EINVAL;
     }
     out_handle[0] = '\0';
-    if (mocked()) {
+    if (scripted()) {
         snprintf(out_handle, out_len, "%s/%s", address, char_uuid);
         return 0;
     }

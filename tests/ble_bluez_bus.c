@@ -166,6 +166,212 @@ static const char *test_operations(DBusConnection *server, struct inkwell_loop *
     return NULL;
 }
 
+/* ---- the object tree ---------------------------------------------------------------------- */
+
+#define SERVICE "6ba1b218-15a8-461f-9fa8-5dcae273eafd"
+#define CHARACTERISTIC "2c55e69e-4993-11ed-b878-0242ac120002"
+#define DEVICE_PATH "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"
+#define CHARACTERISTIC_PATH DEVICE_PATH "/service0010/char0011"
+
+static void append_property(DBusMessageIter *dict, const char *name, int type, const void *value) {
+    char signature[2] = {(char)type, '\0'};
+    DBusMessageIter entry, variant;
+    dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
+    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &name);
+    dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, signature, &variant);
+    dbus_message_iter_append_basic(&variant, type, value);
+    dbus_message_iter_close_container(&entry, &variant);
+    dbus_message_iter_close_container(dict, &entry);
+}
+
+/* One interface's a{sv}. A device carries an address, a name, a bond, an RSSI and one service;
+   a characteristic its UUID; an adapter nothing. */
+static void append_interface(DBusMessageIter *interfaces, const char *interface,
+                             const char *address) {
+    DBusMessageIter entry, properties;
+    dbus_message_iter_open_container(interfaces, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
+    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &interface);
+    dbus_message_iter_open_container(&entry, DBUS_TYPE_ARRAY, "{sv}", &properties);
+    if (strcmp(interface, "org.bluez.Device1") == 0) {
+        const char *name = "Node";
+        const dbus_bool_t paired = TRUE;
+        const int16_t rssi = -60;
+        append_property(&properties, "Address", DBUS_TYPE_STRING, &address);
+        append_property(&properties, "Name", DBUS_TYPE_STRING, &name);
+        append_property(&properties, "Paired", DBUS_TYPE_BOOLEAN, &paired);
+        append_property(&properties, "RSSI", DBUS_TYPE_INT16, &rssi);
+        const char *key = "UUIDs";
+        const char *uuid = SERVICE;
+        DBusMessageIter property, variant, uuids;
+        dbus_message_iter_open_container(&properties, DBUS_TYPE_DICT_ENTRY, NULL, &property);
+        dbus_message_iter_append_basic(&property, DBUS_TYPE_STRING, &key);
+        dbus_message_iter_open_container(&property, DBUS_TYPE_VARIANT, "as", &variant);
+        dbus_message_iter_open_container(&variant, DBUS_TYPE_ARRAY, "s", &uuids);
+        dbus_message_iter_append_basic(&uuids, DBUS_TYPE_STRING, &uuid);
+        dbus_message_iter_close_container(&variant, &uuids);
+        dbus_message_iter_close_container(&property, &variant);
+        dbus_message_iter_close_container(&properties, &property);
+    } else if (strcmp(interface, "org.bluez.GattCharacteristic1") == 0) {
+        const char *uuid = CHARACTERISTIC;
+        append_property(&properties, "UUID", DBUS_TYPE_STRING, &uuid);
+    }
+    dbus_message_iter_close_container(&entry, &properties);
+    dbus_message_iter_close_container(interfaces, &entry);
+}
+
+/* One object and its interface, as GetManagedObjects lists it. */
+static void append_object(DBusMessageIter *objects, const char *path, const char *interface,
+                          const char *address) {
+    DBusMessageIter entry, interfaces;
+    dbus_message_iter_open_container(objects, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
+    dbus_message_iter_append_basic(&entry, DBUS_TYPE_OBJECT_PATH, &path);
+    dbus_message_iter_open_container(&entry, DBUS_TYPE_ARRAY, "{sa{sv}}", &interfaces);
+    append_interface(&interfaces, interface, address);
+    dbus_message_iter_close_container(&entry, &interfaces);
+    dbus_message_iter_close_container(objects, &entry);
+}
+
+static void emit(DBusConnection *server, DBusMessage *signal) {
+    dbus_connection_send(server, signal, NULL);
+    dbus_connection_flush(server);
+    dbus_message_unref(signal);
+}
+
+static void emit_interfaces(DBusConnection *server, bool added, const char *path,
+                            const char *interface, const char *address) {
+    DBusMessage *signal = dbus_message_new_signal("/", "org.freedesktop.DBus.ObjectManager",
+                                                  added ? "InterfacesAdded" : "InterfacesRemoved");
+    DBusMessageIter iter, array;
+    dbus_message_iter_init_append(signal, &iter);
+    dbus_message_iter_append_basic(&iter, DBUS_TYPE_OBJECT_PATH, &path);
+    if (added) {
+        dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sa{sv}}", &array);
+        append_interface(&array, interface, address);
+    } else {
+        dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "s", &array);
+        dbus_message_iter_append_basic(&array, DBUS_TYPE_STRING, &interface);
+    }
+    dbus_message_iter_close_container(&iter, &array);
+    emit(server, signal);
+}
+
+/* A rename, and the RSSI going: what bluetoothd says when a device stops being heard. */
+static void emit_renamed_and_unheard(DBusConnection *server) {
+    DBusMessage *signal = dbus_message_new_signal(DEVICE_PATH, "org.freedesktop.DBus.Properties",
+                                                  "PropertiesChanged");
+    const char *interface = "org.bluez.Device1";
+    const char *name = "Renamed";
+    const char *rssi = "RSSI";
+    DBusMessageIter iter, changed, invalidated;
+    dbus_message_iter_init_append(signal, &iter);
+    dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &interface);
+    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sv}", &changed);
+    append_property(&changed, "Name", DBUS_TYPE_STRING, &name);
+    dbus_message_iter_close_container(&iter, &changed);
+    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "s", &invalidated);
+    dbus_message_iter_append_basic(&invalidated, DBUS_TYPE_STRING, &rssi);
+    dbus_message_iter_close_container(&iter, &invalidated);
+    emit(server, signal);
+}
+
+/* Everything the server sent before this has been handled by the client once it returns: a
+   read's reply comes after them on the same connection. */
+static void settle(DBusConnection *server, struct inkwell_loop *loop,
+                   struct inkwell_ble_central *client) {
+    uint8_t bytes[16];
+    size_t length;
+    if (inkwell_ble_read(client, "/characteristic", bytes, sizeof bytes, &length) != -EAGAIN)
+        return;
+    DBusMessage *call = request_named(server, loop, "ReadValue");
+    if (call != NULL) {
+        respond(server, call, false);
+        dbus_message_unref(call);
+    }
+    for (unsigned turn = 0U; turn < 100U; ++turn) {
+        inkwell_loop_run(loop, 1);
+        if (inkwell_ble_read(client, "/characteristic", bytes, sizeof bytes, &length) != -EAGAIN)
+            return;
+    }
+}
+
+static bool request_name(DBusConnection *server) {
+    return dbus_bus_request_name(server, "org.bluez", 0, NULL) ==
+           DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER;
+}
+
+/*
+ * A listing reads a copy of the object tree, fetched once and kept current by signals - never a
+ * GetManagedObjects per call. A bluetoothd that restarts is fetched again, without blocking, and
+ * one that is gone empties the copy rather than leaving its devices listed.
+ */
+static const char *test_object_tree(DBusConnection *server, struct inkwell_loop *loop,
+                                    struct inkwell_ble_central *client) {
+    /* A restart: the name goes and comes back, and the client asks for the new tree. */
+    dbus_bus_release_name(server, "org.bluez", NULL);
+    if (!request_name(server))
+        return "could not take org.bluez back";
+    DBusMessage *call = request_named(server, loop, "GetManagedObjects");
+    if (call == NULL)
+        return "a restarted bluetoothd was not asked for its tree";
+    DBusMessage *reply = dbus_message_new_method_return(call);
+    dbus_message_unref(call);
+    DBusMessageIter iter, objects;
+    dbus_message_iter_init_append(reply, &iter);
+    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{oa{sa{sv}}}", &objects);
+    append_object(&objects, "/org/bluez/hci0", "org.bluez.Adapter1", NULL);
+    append_object(&objects, DEVICE_PATH, "org.bluez.Device1", ADDRESS);
+    append_object(&objects, CHARACTERISTIC_PATH, "org.bluez.GattCharacteristic1", NULL);
+    dbus_message_iter_close_container(&iter, &objects);
+    emit(server, reply);
+    settle(server, loop, client);
+
+    /* Each of these blocks for a second and fails without the copy: the fake answers nothing
+       while the client is waiting on it. */
+    char adapter[64];
+    char handle[INKWELL_BLE_HANDLE_MAX];
+    struct inkwell_ble_device devices[4];
+    size_t count = 0U;
+    if (inkwell_ble_find_adapter(client, adapter, sizeof adapter) != 0 ||
+        strcmp(adapter, "/org/bluez/hci0") != 0)
+        return "the adapter was not read from the copy";
+    if (inkwell_ble_list_by_service(client, SERVICE, devices, 4U, &count) != 0 || count != 1U ||
+        strcmp(devices[0].address, ADDRESS) != 0 || strcmp(devices[0].name, "Node") != 0 ||
+        !devices[0].paired || devices[0].rssi != -60 || !devices[0].in_range)
+        return "the listing was not read from the copy";
+    if (inkwell_ble_find_characteristic(client, ADDRESS, CHARACTERISTIC, handle, sizeof handle) !=
+            0 ||
+        strcmp(handle, CHARACTERISTIC_PATH) != 0)
+        return "the characteristic was not read from the copy";
+
+    emit_renamed_and_unheard(server);
+    emit_interfaces(server, true, "/org/bluez/hci0/dev_11_22_33_44_55_66", "org.bluez.Device1",
+                    "11:22:33:44:55:66");
+    emit_interfaces(server, false, CHARACTERISTIC_PATH, "org.bluez.GattCharacteristic1", NULL);
+    settle(server, loop, client);
+    if (inkwell_ble_list_by_service(client, SERVICE, devices, 4U, &count) != 0 || count != 2U ||
+        strcmp(devices[0].name, "Renamed") != 0 || devices[0].in_range ||
+        strcmp(devices[1].address, "11:22:33:44:55:66") != 0)
+        return "a property change or an added device did not reach the copy";
+    if (inkwell_ble_find_characteristic(client, ADDRESS, CHARACTERISTIC, handle, sizeof handle) !=
+        -ENOENT)
+        return "a removed characteristic was still found";
+
+    emit_interfaces(server, false, "/org/bluez/hci0/dev_11_22_33_44_55_66", "org.bluez.Device1",
+                    NULL);
+    settle(server, loop, client);
+    if (inkwell_ble_list_by_service(client, SERVICE, devices, 4U, &count) != 0 || count != 1U)
+        return "a removed device was still listed";
+
+    /* Gone: nothing is listed from the old tree, and asking finds nobody to answer. */
+    dbus_bus_release_name(server, "org.bluez", NULL);
+    settle(server, loop, client);
+    if (inkwell_ble_list_by_service(client, SERVICE, devices, 4U, &count) != -EIO)
+        return "a vanished bluetoothd's devices were still listed";
+    if (!request_name(server))
+        return "could not take org.bluez back";
+    return NULL;
+}
+
 /*
  * The default agent is asked about every pairing on the host, not only ours. A RequestPasskey for
  * a device this central is not pairing must be refused on the bus and never become a prompt.
@@ -307,6 +513,9 @@ int main(void) {
         failure = test_operations(server, &loop, &client, input_fd, &inputs);
     }
     if (failure == NULL) {
+        failure = test_object_tree(server, &loop, &client);
+    }
+    if (failure == NULL) {
         failure = client_name[0] != '\0'
                       ? test_agent_refuses_strangers(server, &loop, &client, client_name)
                       : "never learned the central's bus name";
@@ -324,6 +533,6 @@ int main(void) {
         return 1;
     }
     puts("Isolated D-Bus: nonblocking send, input responsiveness, reply parsing, timeout and "
-         "agent ownership passed.");
+         "agent ownership, object tree passed.");
     return 0;
 }
