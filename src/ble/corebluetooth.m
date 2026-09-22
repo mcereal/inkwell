@@ -140,21 +140,64 @@ static int error_to_errno(NSError *error) {
 @implementation IWSeen
 @end
 
-/* A peripheral a connect was asked for, and everything outstanding on it. */
+/* One read or write sent to the peripheral and not yet answered. */
+@interface IWPending : NSObject
+@property(nonatomic, strong) CBCharacteristic *characteristic;
+@property(nonatomic) uint32_t token;
+@end
+
+@implementation IWPending
+@end
+
+/*
+ * A peripheral a connect was asked for, and everything outstanding on it.
+ *
+ * Reads and writes are *queues*, not slots, because CoreBluetooth's answers carry no request
+ * id - only the characteristic. It does answer the requests on one characteristic in the order
+ * they were made, so each answer retires the oldest request on that characteristic. A slot
+ * would let a read the central had already timed out or cancelled lend its late answer to the
+ * retry sent after it: the stale bytes would arrive labelled with the new token. In a queue the
+ * old request keeps its place until its own answer drains it, and that answer carries the old
+ * token, which the central no longer recognises.
+ */
 @interface IWLink : NSObject
 @property(nonatomic, strong) CBPeripheral *peripheral;
 @property(nonatomic) uint32_t connectToken;
 @property(nonatomic) BOOL resolved;
 @property(nonatomic) NSInteger servicesPending;
-/* The one write and the one read in flight, and what they were on. */
-@property(nonatomic) uint32_t writeToken;
-@property(nonatomic, strong) CBCharacteristic *writeCharacteristic;
-@property(nonatomic) uint32_t readToken;
-@property(nonatomic, strong) CBCharacteristic *readCharacteristic;
+@property(nonatomic, strong) NSMutableArray<IWPending *> *writes;
+@property(nonatomic, strong) NSMutableArray<IWPending *> *reads;
 @end
 
 @implementation IWLink
+- (instancetype)init {
+    if ((self = [super init]) != nil) {
+        _writes = [NSMutableArray array];
+        _reads = [NSMutableArray array];
+    }
+    return self;
+}
 @end
+
+static void enqueue(NSMutableArray<IWPending *> *queue, CBCharacteristic *characteristic,
+                    uint32_t token) {
+    IWPending *pending = [IWPending new];
+    pending.characteristic = characteristic;
+    pending.token = token;
+    [queue addObject:pending];
+}
+
+/* The oldest request on `characteristic`, removed; nil when none is outstanding. */
+static IWPending *retire(NSMutableArray<IWPending *> *queue, CBCharacteristic *characteristic) {
+    for (NSUInteger i = 0U; i < queue.count; ++i) {
+        IWPending *pending = queue[i];
+        if (pending.characteristic == characteristic) {
+            [queue removeObjectAtIndex:i];
+            return pending;
+        }
+    }
+    return nil;
+}
 
 @interface IWCentral : NSObject <CBCentralManagerDelegate, CBPeripheralDelegate>
 @property(nonatomic, strong) dispatch_queue_t queue;
@@ -217,13 +260,15 @@ static int error_to_errno(NSError *error) {
 /* Fails whatever was outstanding on a link that has gone. */
 - (void)failLink:(IWLink *)link result:(int)result {
     [self postKind:CB_EVENT_CONNECT token:link.connectToken result:result];
-    [self postKind:CB_EVENT_WRITE token:link.writeToken result:result];
-    [self postKind:CB_EVENT_READ token:link.readToken result:result];
+    for (IWPending *pending in link.writes) {
+        [self postKind:CB_EVENT_WRITE token:pending.token result:result];
+    }
+    for (IWPending *pending in link.reads) {
+        [self postKind:CB_EVENT_READ token:pending.token result:result];
+    }
     link.connectToken = 0U;
-    link.writeToken = 0U;
-    link.readToken = 0U;
-    link.writeCharacteristic = nil;
-    link.readCharacteristic = nil;
+    [link.writes removeAllObjects];
+    [link.reads removeAllObjects];
     link.resolved = NO;
 }
 
@@ -361,18 +406,16 @@ static int error_to_errno(NSError *error) {
     didWriteValueForCharacteristic:(CBCharacteristic *)characteristic
                              error:(NSError *)error {
     IWLink *link = [self linkFor:peripheral];
-    if (link == nil || link.writeToken == 0U || link.writeCharacteristic != characteristic) {
-        return;
+    IWPending *pending = link != nil ? retire(link.writes, characteristic) : nil;
+    if (pending != nil) {
+        [self postKind:CB_EVENT_WRITE token:pending.token result:error_to_errno(error)];
     }
-    [self postKind:CB_EVENT_WRITE token:link.writeToken result:error_to_errno(error)];
-    link.writeToken = 0U;
-    link.writeCharacteristic = nil;
 }
 
 /*
- * One callback for two things: the answer to a read, and a notification. A read pending on
- * this characteristic takes the value; otherwise it is a notification if this is the one
- * subscribed to, and nothing if it is not.
+ * One callback for two things: the answer to a read, and a notification. The oldest read
+ * outstanding on this characteristic takes the value; with none outstanding it is a
+ * notification if this is the one subscribed to, and nothing if it is not.
  */
 - (void)peripheral:(CBPeripheral *)peripheral
     didUpdateValueForCharacteristic:(CBCharacteristic *)characteristic
@@ -380,11 +423,12 @@ static int error_to_errno(NSError *error) {
     IWLink *link = [self linkFor:peripheral];
     NSData *value = characteristic.value;
     const size_t len = value.length > INKWELL_BLE_VALUE_MAX ? INKWELL_BLE_VALUE_MAX : value.length;
-    if (link != nil && link.readToken != 0U && link.readCharacteristic == characteristic) {
+    IWPending *pending = link != nil ? retire(link.reads, characteristic) : nil;
+    if (pending != nil) {
         struct cb_event event;
         memset(&event, 0, offsetof(struct cb_event, data));
         event.kind = CB_EVENT_READ;
-        event.token = link.readToken;
+        event.token = pending.token;
         event.result = error_to_errno(error);
         if (event.result == 0 && value.length > INKWELL_BLE_VALUE_MAX) {
             event.result = -EMSGSIZE;
@@ -393,8 +437,6 @@ static int error_to_errno(NSError *error) {
             event.len = len;
             memcpy(event.data, value.bytes, len);
         }
-        link.readToken = 0U;
-        link.readCharacteristic = nil;
         [self post:&event];
         return;
     }
@@ -661,7 +703,14 @@ int inkwell_ble_backend_list_by_service(struct inkwell_ble_central *central,
           }
           IWLink *link = object.links[seen.peripheral.identifier];
           const bool connected = link != nil && seen.peripheral.state == CBPeripheralStateConnected;
-          if (![seen.services containsObject:wanted] && !connected) {
+          /* Advertised, or found by discovery on a live link - a peripheral that stops putting
+             the UUID in its advertisements once connected still offers the service. Being
+             connected is not itself a match. */
+          bool offers = [seen.services containsObject:wanted];
+          for (CBService *service in connected ? seen.peripheral.services : @[]) {
+              offers = offers || [service.UUID isEqual:wanted];
+          }
+          if (!offers) {
               continue;
           }
           struct inkwell_ble_device *device = &devices[matched++];
@@ -933,8 +982,7 @@ int inkwell_ble_backend_write(struct inkwell_ble_central *central, const char *h
                                                                                        : -ENOENT;
           return;
       }
-      link.writeToken = ours;
-      link.writeCharacteristic = characteristic;
+      enqueue(link.writes, characteristic, ours);
       [peripheral writeValue:value
            forCharacteristic:characteristic
                         type:CBCharacteristicWriteWithResponse];
@@ -961,8 +1009,7 @@ int inkwell_ble_backend_read(struct inkwell_ble_central *central, const char *ha
                                                                                        : -ENOENT;
           return;
       }
-      link.readToken = ours;
-      link.readCharacteristic = characteristic;
+      enqueue(link.reads, characteristic, ours);
       [peripheral readValueForCharacteristic:characteristic];
     });
     if (result == 0) {
