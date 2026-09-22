@@ -20,9 +20,11 @@
  * Three rules shape everything here.
  *
  * **Nothing that can take long blocks.** Connect, Pair, ReadValue, WriteValue and the two
- * property queries are sent and their replies matched by serial in process(). What does block -
- * GetManagedObjects, StartNotify, the agent registration - is bounded by an explicit timeout of
- * a second or a few, never libdbus' 25 s default.
+ * property queries are sent and their replies matched by serial in process(). A listing or a
+ * lookup reads a copy of bluetoothd's object tree that signals keep current, so the blocking
+ * GetManagedObjects behind it is made once per bluetoothd, not once per scan. What does still
+ * block - that first fetch, StartNotify, the agent registration - is bounded by an explicit
+ * timeout of a second or a few, never libdbus' 25 s default.
  *
  * **Messages are popped here, not dispatched.** process() takes every message off the
  * connection itself, so libdbus' object tree never sees one; the pairing agent is dispatched by
@@ -54,13 +56,57 @@ struct bluez_watch {
     bool registered;
 };
 
+/* 36 characters and the terminator. */
+#define INKWELL_BLUEZ_UUID_LEN 37U
+
+/* The interfaces the object tree below keeps. */
+enum {
+    BLUEZ_ADAPTER = 1U << 0,
+    BLUEZ_DEVICE = 1U << 1,
+    BLUEZ_CHARACTERISTIC = 1U << 2,
+};
+
+struct bluez_object {
+    char path[INKWELL_BLE_HANDLE_MAX];
+    unsigned interfaces;
+    /* Device1 */
+    char address[INKWELL_BLE_ADDRESS_MAX];
+    char name[INKWELL_BLE_NAME_MAX];
+    char alias[INKWELL_BLE_NAME_MAX];
+    int16_t rssi;
+    bool has_rssi;
+    bool paired;
+    char (*services)[INKWELL_BLUEZ_UUID_LEN];
+    size_t service_count;
+    /* GattCharacteristic1 */
+    char uuid[INKWELL_BLUEZ_UUID_LEN];
+};
+
 struct bluez_backend {
     DBusConnection *connection;
     bool connection_private;
     /* An agent call held until the user answers it. */
     DBusMessage *agent_pending;
     struct bluez_watch watches[INKWELL_BLUEZ_WATCHES];
+    /* The object tree; see its section. */
+    struct bluez_object *objects;
+    size_t object_count;
+    size_t object_capacity;
+    bool objects_loaded;
+    /* A GetManagedObjects sent without waiting, or 0. */
+    dbus_uint32_t objects_serial;
 };
+
+/* What keeps the object tree current, subscribed to in open(); see that section. */
+static const char *const k_object_rules[] = {
+    "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.ObjectManager'",
+    "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',"
+    "member='PropertiesChanged',arg0='org.bluez.Device1'",
+    "type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',"
+    "member='NameOwnerChanged',arg0='org.bluez'",
+};
+
+static void objects_clear(struct bluez_backend *backend);
 
 static struct bluez_backend *backend_of(struct inkwell_ble_central *central) {
     return (struct bluez_backend *)central->backend;
@@ -380,6 +426,11 @@ int inkwell_ble_backend_open(struct inkwell_ble_central *central, bool private_c
         free(backend);
         return -EIO;
     }
+    /* Without an error to fill, AddMatch is sent and not waited for. */
+    for (size_t i = 0U; i < INKWELL_ARRAY_LEN(k_object_rules); ++i) {
+        dbus_bus_add_match(connection, k_object_rules[i], NULL);
+    }
+    dbus_connection_flush(connection);
     return 0;
 }
 
@@ -399,6 +450,8 @@ void inkwell_ble_backend_close(struct inkwell_ble_central *central) {
         }
         dbus_connection_unref(backend->connection);
     }
+    objects_clear(backend);
+    free(backend->objects);
     free(backend);
     central->backend = NULL;
 }
@@ -439,305 +492,520 @@ void inkwell_ble_backend_detach(struct inkwell_ble_central *central) {
     }
 }
 
-/* ---- GetManagedObjects ----------------------------------------------------------------------- */
+/* ---- the object tree ------------------------------------------------------------------------ *
+ *
+ * A copy of the part of bluetoothd's object tree this backend asks about - adapters, devices and
+ * characteristics - kept current from the signals BlueZ sends as the tree changes. The tree used
+ * to be fetched whole, with a blocking GetManagedObjects, on every listing: once a second for as
+ * long as a caller scans. Now it is fetched once, the first time it is needed, and again without
+ * blocking whenever bluetoothd restarts.
+ *
+ * The signals are subscribed to in open(), before any fetch, so nothing that changes after a
+ * snapshot is missed. A signal that is still queued when a blocking fetch returns is older than
+ * the snapshot and is applied on top of it, which converges: the last word on any object or
+ * property is still the newest one. While no snapshot is held, signals are ignored - the one
+ * that is coming is newer than all of them.
+ */
 
-/* The whole object tree, bounded to a second: this is the one call made from the loop that
-   blocks, and only ever on a listing or a lookup, never per packet. */
-static DBusMessage *managed_objects(DBusConnection *connection) {
-    DBusMessage *message = dbus_message_new_method_call(
-        "org.bluez", "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects");
-    if (message == NULL) {
-        return NULL;
+static unsigned interface_bit(const char *name) {
+    if (name == NULL) {
+        return 0U;
     }
-    DBusError error;
-    dbus_error_init(&error);
-    DBusMessage *reply =
-        dbus_connection_send_with_reply_and_block(connection, message, 1000, &error);
-    dbus_message_unref(message);
-    if (reply == NULL && dbus_error_is_set(&error)) {
-        inkwell_log_warn("ble", "GetManagedObjects failed: %s", error.message);
-        dbus_error_free(&error);
+    if (strcmp(name, "org.bluez.Adapter1") == 0) {
+        return BLUEZ_ADAPTER;
     }
-    return reply;
+    if (strcmp(name, "org.bluez.Device1") == 0) {
+        return BLUEZ_DEVICE;
+    }
+    if (strcmp(name, "org.bluez.GattCharacteristic1") == 0) {
+        return BLUEZ_CHARACTERISTIC;
+    }
+    return 0U;
 }
 
-int inkwell_ble_backend_find_adapter(struct inkwell_ble_central *central, char *name,
-                                     size_t name_len) {
-    DBusConnection *connection = connection_of(central);
-    if (connection == NULL) {
-        return -ENOTCONN;
+static struct bluez_object *object_find(struct bluez_backend *backend, const char *path) {
+    for (size_t i = 0U; i < backend->object_count; ++i) {
+        if (strcmp(backend->objects[i].path, path) == 0) {
+            return &backend->objects[i];
+        }
     }
-    DBusMessage *reply = managed_objects(connection);
-    if (reply == NULL) {
-        return -EIO;
+    return NULL;
+}
+
+/* The object at `path`, added if it is not there yet. NULL when there is no memory for it. */
+static struct bluez_object *object_add(struct bluez_backend *backend, const char *path) {
+    struct bluez_object *object = object_find(backend, path);
+    if (object != NULL) {
+        return object;
+    }
+    if (backend->object_count == backend->object_capacity) {
+        const size_t capacity =
+            backend->object_capacity == 0U ? 32U : backend->object_capacity * 2U;
+        struct bluez_object *grown = realloc(backend->objects, capacity * sizeof *grown);
+        if (grown == NULL) {
+            inkwell_log_warn("ble", "No memory to track %s", path);
+            return NULL;
+        }
+        backend->objects = grown;
+        backend->object_capacity = capacity;
+    }
+    object = &backend->objects[backend->object_count++];
+    memset(object, 0, sizeof *object);
+    inkwell_str_copy(object->path, sizeof object->path, path);
+    return object;
+}
+
+static void object_clear_services(struct bluez_object *object) {
+    free(object->services);
+    object->services = NULL;
+    object->service_count = 0U;
+}
+
+/* Order is kept, so a listing comes back in the order bluetoothd first reported each device. */
+static void object_remove(struct bluez_backend *backend, struct bluez_object *object) {
+    object_clear_services(object);
+    const size_t index = (size_t)(object - backend->objects);
+    memmove(object, object + 1, (backend->object_count - index - 1U) * sizeof *object);
+    --backend->object_count;
+}
+
+static void objects_clear(struct bluez_backend *backend) {
+    for (size_t i = 0U; i < backend->object_count; ++i) {
+        object_clear_services(&backend->objects[i]);
+    }
+    backend->object_count = 0U;
+    backend->objects_loaded = false;
+}
+
+/* UUIDs is replaced whole, never patched. */
+static int object_set_services(struct bluez_object *object, DBusMessageIter *array) {
+    object_clear_services(object);
+    DBusMessageIter uuids;
+    dbus_message_iter_recurse(array, &uuids);
+    size_t count = 0U;
+    for (DBusMessageIter it = uuids; dbus_message_iter_get_arg_type(&it) == DBUS_TYPE_STRING;
+         dbus_message_iter_next(&it)) {
+        ++count;
+    }
+    if (count == 0U) {
+        return 0;
+    }
+    object->services = calloc(count, sizeof *object->services);
+    if (object->services == NULL) {
+        inkwell_log_warn("ble", "No memory for the services of %s", object->path);
+        return -ENOMEM;
+    }
+    for (; dbus_message_iter_get_arg_type(&uuids) == DBUS_TYPE_STRING;
+         dbus_message_iter_next(&uuids)) {
+        const char *uuid = NULL;
+        dbus_message_iter_get_basic(&uuids, &uuid);
+        inkwell_str_copy(object->services[object->service_count++], sizeof object->services[0],
+                         uuid != NULL ? uuid : "");
+    }
+    return 0;
+}
+
+/* -ENOMEM when a value could not be kept; every other property always can. */
+static int object_set_property(struct bluez_object *object, unsigned interface, const char *name,
+                               DBusMessageIter *variant) {
+    const int type = dbus_message_iter_get_arg_type(variant);
+    const char *text = NULL;
+    if (type == DBUS_TYPE_STRING) {
+        dbus_message_iter_get_basic(variant, &text);
+    }
+    if (interface == BLUEZ_CHARACTERISTIC) {
+        if (strcmp(name, "UUID") == 0 && text != NULL) {
+            inkwell_str_copy(object->uuid, sizeof object->uuid, text);
+        }
+        return 0;
+    }
+    if (interface != BLUEZ_DEVICE) {
+        return 0;
+    }
+    if (strcmp(name, "Address") == 0 && text != NULL) {
+        inkwell_str_copy(object->address, sizeof object->address, text);
+    } else if (strcmp(name, "Name") == 0 && text != NULL) {
+        inkwell_str_copy(object->name, sizeof object->name, text);
+    } else if (strcmp(name, "Alias") == 0 && text != NULL) {
+        inkwell_str_copy(object->alias, sizeof object->alias, text);
+    } else if (strcmp(name, "Paired") == 0 && type == DBUS_TYPE_BOOLEAN) {
+        dbus_bool_t paired = FALSE;
+        dbus_message_iter_get_basic(variant, &paired);
+        object->paired = paired != FALSE;
+    } else if (strcmp(name, "RSSI") == 0 && type == DBUS_TYPE_INT16) {
+        int16_t rssi = 0;
+        dbus_message_iter_get_basic(variant, &rssi);
+        object->rssi = rssi;
+        object->has_rssi = true;
+    } else if (strcmp(name, "UUIDs") == 0 && type == DBUS_TYPE_ARRAY) {
+        return object_set_services(object, variant);
+    }
+    return 0;
+}
+
+/* A property that has stopped existing. RSSI is the one that matters: bluetoothd drops it when a
+   device goes unheard, and its absence is what `in_range` reports. */
+static void object_unset_property(struct bluez_object *object, unsigned interface,
+                                  const char *name) {
+    if (interface != BLUEZ_DEVICE) {
+        return;
+    }
+    if (strcmp(name, "RSSI") == 0) {
+        object->has_rssi = false;
+        object->rssi = 0;
+    } else if (strcmp(name, "Name") == 0) {
+        object->name[0] = '\0';
+    } else if (strcmp(name, "Alias") == 0) {
+        object->alias[0] = '\0';
+    } else if (strcmp(name, "Paired") == 0) {
+        object->paired = false;
+    } else if (strcmp(name, "UUIDs") == 0) {
+        object_clear_services(object);
+    }
+}
+
+/* An a{sv}: some or all of `interface`'s properties. -ENOMEM when one could not be kept. */
+static int object_set_properties(struct bluez_object *object, unsigned interface,
+                                 DBusMessageIter *array) {
+    int result = 0;
+    DBusMessageIter properties;
+    dbus_message_iter_recurse(array, &properties);
+    for (; dbus_message_iter_get_arg_type(&properties) == DBUS_TYPE_DICT_ENTRY;
+         dbus_message_iter_next(&properties)) {
+        DBusMessageIter property;
+        dbus_message_iter_recurse(&properties, &property);
+        if (dbus_message_iter_get_arg_type(&property) != DBUS_TYPE_STRING) {
+            continue;
+        }
+        const char *name = NULL;
+        dbus_message_iter_get_basic(&property, &name);
+        if (!dbus_message_iter_next(&property) ||
+            dbus_message_iter_get_arg_type(&property) != DBUS_TYPE_VARIANT) {
+            continue;
+        }
+        DBusMessageIter variant;
+        dbus_message_iter_recurse(&property, &variant);
+        if (object_set_property(object, interface, name, &variant) < 0) {
+            result = -ENOMEM;
+        }
+    }
+    return result;
+}
+
+/* An a{sa{sv}}: the interfaces an object has, as GetManagedObjects and InterfacesAdded list
+   them. An object with none this copy keeps is never added, and neither is one whose path is
+   longer than any handle. -ENOMEM when the object or one of its values could not be kept: the
+   copy is then incomplete, and the caller must not treat it as the tree. */
+static int objects_add_interfaces(struct bluez_backend *backend, const char *path,
+                                  DBusMessageIter *array) {
+    if (strlen(path) >= INKWELL_BLE_HANDLE_MAX) {
+        return 0;
+    }
+    int result = 0;
+    DBusMessageIter interfaces;
+    dbus_message_iter_recurse(array, &interfaces);
+    for (; dbus_message_iter_get_arg_type(&interfaces) == DBUS_TYPE_DICT_ENTRY;
+         dbus_message_iter_next(&interfaces)) {
+        DBusMessageIter interface;
+        dbus_message_iter_recurse(&interfaces, &interface);
+        const char *name = NULL;
+        if (dbus_message_iter_get_arg_type(&interface) == DBUS_TYPE_STRING) {
+            dbus_message_iter_get_basic(&interface, &name);
+        }
+        const unsigned bit = interface_bit(name);
+        if (bit == 0U || !dbus_message_iter_next(&interface) ||
+            dbus_message_iter_get_arg_type(&interface) != DBUS_TYPE_ARRAY) {
+            continue;
+        }
+        struct bluez_object *object = object_add(backend, path);
+        if (object == NULL) {
+            return -ENOMEM;
+        }
+        object->interfaces |= bit;
+        if (object_set_properties(object, bit, &interface) < 0) {
+            result = -ENOMEM;
+        }
+    }
+    return result;
+}
+
+/* An `as`: the interfaces an object has lost. It goes once it has none this copy keeps. */
+static void objects_remove_interfaces(struct bluez_backend *backend, const char *path,
+                                      DBusMessageIter *array) {
+    struct bluez_object *object = object_find(backend, path);
+    if (object == NULL) {
+        return;
+    }
+    DBusMessageIter names;
+    dbus_message_iter_recurse(array, &names);
+    for (; dbus_message_iter_get_arg_type(&names) == DBUS_TYPE_STRING;
+         dbus_message_iter_next(&names)) {
+        const char *name = NULL;
+        dbus_message_iter_get_basic(&names, &name);
+        object->interfaces &= ~interface_bit(name);
+    }
+    if (object->interfaces == 0U) {
+        object_remove(backend, object);
+    }
+}
+
+/* Replaces the whole copy with a GetManagedObjects reply. One that could not be held whole is
+   not kept at all, so the next lookup fetches it again rather than trusting half of it. */
+static int objects_load(struct bluez_backend *backend, DBusMessage *reply) {
+    if (dbus_message_get_type(reply) != DBUS_MESSAGE_TYPE_METHOD_RETURN) {
+        return reply_error(reply, "GetManagedObjects");
     }
     DBusMessageIter iter;
     if (!dbus_message_iter_init(reply, &iter) ||
         dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_ARRAY) {
-        dbus_message_unref(reply);
-        return -EIO;
+        return -EPROTO;
     }
-
-    bool found = false;
+    objects_clear(backend);
     DBusMessageIter objects;
     dbus_message_iter_recurse(&iter, &objects);
-    while (!found && dbus_message_iter_get_arg_type(&objects) == DBUS_TYPE_DICT_ENTRY) {
+    for (; dbus_message_iter_get_arg_type(&objects) == DBUS_TYPE_DICT_ENTRY;
+         dbus_message_iter_next(&objects)) {
         DBusMessageIter entry;
         dbus_message_iter_recurse(&objects, &entry);
-        if (dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_OBJECT_PATH) {
-            const char *object_path = NULL;
-            dbus_message_iter_get_basic(&entry, &object_path);
-            dbus_message_iter_next(&entry);
-            if (dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_ARRAY) {
-                DBusMessageIter interfaces;
-                dbus_message_iter_recurse(&entry, &interfaces);
-                while (dbus_message_iter_get_arg_type(&interfaces) == DBUS_TYPE_DICT_ENTRY) {
-                    DBusMessageIter interface;
-                    dbus_message_iter_recurse(&interfaces, &interface);
-                    const char *interface_name = NULL;
-                    if (dbus_message_iter_get_arg_type(&interface) == DBUS_TYPE_STRING) {
-                        dbus_message_iter_get_basic(&interface, &interface_name);
+        if (dbus_message_iter_get_arg_type(&entry) != DBUS_TYPE_OBJECT_PATH) {
+            continue;
+        }
+        const char *path = NULL;
+        dbus_message_iter_get_basic(&entry, &path);
+        if (dbus_message_iter_next(&entry) &&
+            dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_ARRAY &&
+            objects_add_interfaces(backend, path, &entry) < 0) {
+            objects_clear(backend);
+            return -ENOMEM;
+        }
+    }
+    backend->objects_loaded = true;
+    return 0;
+}
+
+static DBusMessage *managed_objects_call(void) {
+    return dbus_message_new_method_call("org.bluez", "/", "org.freedesktop.DBus.ObjectManager",
+                                        "GetManagedObjects");
+}
+
+/* A fresh snapshot, fetched without waiting: process() loads the reply. */
+static void objects_request(struct inkwell_ble_central *central) {
+    struct bluez_backend *backend = backend_of(central);
+    backend->objects_serial = 0U;
+    DBusMessage *message = managed_objects_call();
+    if (message == NULL) {
+        return;
+    }
+    dbus_uint32_t serial = 0U;
+    if (dbus_connection_send(backend->connection, message, &serial)) {
+        backend->objects_serial = serial;
+    }
+    dbus_message_unref(message);
+}
+
+/* The copy, fetched now if there is none: the one blocking GetManagedObjects, bounded to a
+   second, and made once per bluetoothd rather than once per listing. */
+static int objects_ensure(struct inkwell_ble_central *central) {
+    struct bluez_backend *backend = backend_of(central);
+    if (backend->objects_loaded) {
+        return 0;
+    }
+    DBusMessage *message = managed_objects_call();
+    if (message == NULL) {
+        return -ENOMEM;
+    }
+    DBusError error;
+    dbus_error_init(&error);
+    DBusMessage *reply =
+        dbus_connection_send_with_reply_and_block(backend->connection, message, 1000, &error);
+    dbus_message_unref(message);
+    if (reply == NULL) {
+        if (dbus_error_is_set(&error)) {
+            inkwell_log_warn("ble", "GetManagedObjects failed: %s", error.message);
+            dbus_error_free(&error);
+        }
+        return -EIO;
+    }
+    /* Anything still in flight is older than this. */
+    backend->objects_serial = 0U;
+    const int result = objects_load(backend, reply);
+    dbus_message_unref(reply);
+    return result < 0 ? -EIO : 0;
+}
+
+/* The signals that keep the copy current. Returns true when `message` was one of them. */
+static bool objects_handle_signal(struct inkwell_ble_central *central, DBusMessage *message) {
+    struct bluez_backend *backend = backend_of(central);
+    if (dbus_message_is_signal(message, "org.freedesktop.DBus", "NameOwnerChanged")) {
+        const char *name = NULL;
+        const char *old_owner = NULL;
+        const char *new_owner = NULL;
+        if (!dbus_message_has_sender(message, "org.freedesktop.DBus") ||
+            !dbus_message_get_args(message, NULL, DBUS_TYPE_STRING, &name, DBUS_TYPE_STRING,
+                                   &old_owner, DBUS_TYPE_STRING, &new_owner, DBUS_TYPE_INVALID) ||
+            strcmp(name, "org.bluez") != 0) {
+            return true;
+        }
+        /* A restarted bluetoothd has a new tree and none of the old one's objects. */
+        objects_clear(backend);
+        backend->objects_serial = 0U;
+        if (new_owner[0] != '\0') {
+            objects_request(central);
+        }
+        return true;
+    }
+    const bool added =
+        dbus_message_is_signal(message, "org.freedesktop.DBus.ObjectManager", "InterfacesAdded");
+    const bool removed =
+        !added &&
+        dbus_message_is_signal(message, "org.freedesktop.DBus.ObjectManager", "InterfacesRemoved");
+    if (added || removed) {
+        DBusMessageIter iter;
+        const char *path = NULL;
+        if (backend->objects_loaded && dbus_message_iter_init(message, &iter) &&
+            dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_OBJECT_PATH) {
+            dbus_message_iter_get_basic(&iter, &path);
+            if (dbus_message_iter_next(&iter) &&
+                dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_ARRAY) {
+                /* A change that could not be kept leaves a copy that is not the tree: drop it,
+                   and the next lookup fetches the whole tree again. */
+                if (added) {
+                    if (objects_add_interfaces(backend, path, &iter) < 0) {
+                        objects_clear(backend);
                     }
-                    if (interface_name != NULL &&
-                        strcmp(interface_name, "org.bluez.Adapter1") == 0) {
-                        inkwell_str_copy(central->adapter, sizeof central->adapter, object_path);
-                        inkwell_str_copy(name, name_len, object_path);
-                        found = true;
-                        break;
-                    }
-                    dbus_message_iter_next(&interfaces);
+                } else {
+                    objects_remove_interfaces(backend, path, &iter);
                 }
             }
         }
-        dbus_message_iter_next(&objects);
+        return true;
     }
-    dbus_message_unref(reply);
-    return found ? 0 : -ENODEV;
+    return false;
+}
+
+/* A Device1 PropertiesChanged: `iter` is on the interface name. */
+static void objects_properties_changed(struct bluez_backend *backend, const char *path,
+                                       DBusMessageIter *iter) {
+    struct bluez_object *object =
+        backend->objects_loaded && path != NULL ? object_find(backend, path) : NULL;
+    if (object == NULL || (object->interfaces & BLUEZ_DEVICE) == 0U ||
+        !dbus_message_iter_next(iter) || dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_ARRAY) {
+        return;
+    }
+    if (object_set_properties(object, BLUEZ_DEVICE, iter) < 0) {
+        objects_clear(backend);
+        return;
+    }
+    if (!dbus_message_iter_next(iter) || dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_ARRAY) {
+        return;
+    }
+    DBusMessageIter invalidated;
+    dbus_message_iter_recurse(iter, &invalidated);
+    for (; dbus_message_iter_get_arg_type(&invalidated) == DBUS_TYPE_STRING;
+         dbus_message_iter_next(&invalidated)) {
+        const char *name = NULL;
+        dbus_message_iter_get_basic(&invalidated, &name);
+        object_unset_property(object, BLUEZ_DEVICE, name);
+    }
+}
+
+int inkwell_ble_backend_find_adapter(struct inkwell_ble_central *central, char *name,
+                                     size_t name_len) {
+    if (connection_of(central) == NULL) {
+        return -ENOTCONN;
+    }
+    const int loaded = objects_ensure(central);
+    if (loaded < 0) {
+        return loaded;
+    }
+    const struct bluez_backend *backend = backend_of(central);
+    for (size_t i = 0U; i < backend->object_count; ++i) {
+        const struct bluez_object *object = &backend->objects[i];
+        if ((object->interfaces & BLUEZ_ADAPTER) != 0U) {
+            inkwell_str_copy(central->adapter, sizeof central->adapter, object->path);
+            inkwell_str_copy(name, name_len, object->path);
+            return 0;
+        }
+    }
+    return -ENODEV;
+}
+
+static bool object_has_service(const struct bluez_object *object, const char *uuid) {
+    for (size_t i = 0U; i < object->service_count; ++i) {
+        if (strcasecmp(object->services[i], uuid) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 int inkwell_ble_backend_list_by_service(struct inkwell_ble_central *central,
                                         const char *service_uuid,
                                         struct inkwell_ble_device *devices, size_t capacity,
                                         size_t *count) {
-    DBusConnection *connection = connection_of(central);
-    if (connection == NULL) {
+    if (connection_of(central) == NULL) {
         return -ENOTCONN;
     }
-    DBusMessage *reply = managed_objects(connection);
-    if (reply == NULL) {
-        return -EIO;
+    const int loaded = objects_ensure(central);
+    if (loaded < 0) {
+        return loaded;
     }
-    DBusMessageIter iter;
-    if (!dbus_message_iter_init(reply, &iter) ||
-        dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_ARRAY) {
-        dbus_message_unref(reply);
-        return -EIO;
-    }
-
-    DBusMessageIter objects;
-    dbus_message_iter_recurse(&iter, &objects);
+    const struct bluez_backend *backend = backend_of(central);
     size_t matched = 0U;
-    while (dbus_message_iter_get_arg_type(&objects) == DBUS_TYPE_DICT_ENTRY) {
-        DBusMessageIter entry;
-        dbus_message_iter_recurse(&objects, &entry);
-        if (dbus_message_iter_get_arg_type(&entry) != DBUS_TYPE_OBJECT_PATH) {
-            dbus_message_iter_next(&objects);
+    for (size_t i = 0U; i < backend->object_count; ++i) {
+        const struct bluez_object *object = &backend->objects[i];
+        if ((object->interfaces & BLUEZ_DEVICE) == 0U ||
+            !object_has_service(object, service_uuid)) {
             continue;
         }
-        dbus_message_iter_next(&entry);
-        if (dbus_message_iter_get_arg_type(&entry) != DBUS_TYPE_ARRAY) {
-            dbus_message_iter_next(&objects);
-            continue;
+        if (matched < capacity) {
+            struct inkwell_ble_device *info = &devices[matched];
+            memset(info, 0, sizeof *info);
+            inkwell_str_copy(info->address, sizeof info->address, object->address);
+            inkwell_str_copy(info->name, sizeof info->name,
+                             object->name[0] != '\0' ? object->name : object->alias);
+            info->paired = object->paired;
+            info->rssi = object->rssi;
+            /* The property being there at all is the range test; see `in_range`. */
+            info->in_range = object->has_rssi;
+        } else {
+            inkwell_log_warn("ble", "Device list full, dropping entry");
         }
-
-        struct inkwell_ble_device info;
-        memset(&info, 0, sizeof info);
-        bool has_service = false;
-
-        DBusMessageIter interfaces;
-        dbus_message_iter_recurse(&entry, &interfaces);
-        while (dbus_message_iter_get_arg_type(&interfaces) == DBUS_TYPE_DICT_ENTRY) {
-            DBusMessageIter interface;
-            dbus_message_iter_recurse(&interfaces, &interface);
-            const char *interface_name = NULL;
-            if (dbus_message_iter_get_arg_type(&interface) == DBUS_TYPE_STRING) {
-                dbus_message_iter_get_basic(&interface, &interface_name);
-            }
-            dbus_message_iter_next(&interface);
-            if (interface_name == NULL || strcmp(interface_name, "org.bluez.Device1") != 0 ||
-                dbus_message_iter_get_arg_type(&interface) != DBUS_TYPE_ARRAY) {
-                dbus_message_iter_next(&interfaces);
-                continue;
-            }
-
-            DBusMessageIter properties;
-            dbus_message_iter_recurse(&interface, &properties);
-            while (dbus_message_iter_get_arg_type(&properties) == DBUS_TYPE_DICT_ENTRY) {
-                DBusMessageIter property;
-                dbus_message_iter_recurse(&properties, &property);
-                if (dbus_message_iter_get_arg_type(&property) != DBUS_TYPE_STRING) {
-                    dbus_message_iter_next(&properties);
-                    continue;
-                }
-                const char *property_name = NULL;
-                dbus_message_iter_get_basic(&property, &property_name);
-                dbus_message_iter_next(&property);
-                DBusMessageIter variant;
-                dbus_message_iter_recurse(&property, &variant);
-                const int type = dbus_message_iter_get_arg_type(&variant);
-
-                if (strcmp(property_name, "UUIDs") == 0 && type == DBUS_TYPE_ARRAY) {
-                    DBusMessageIter uuids;
-                    dbus_message_iter_recurse(&variant, &uuids);
-                    while (dbus_message_iter_get_arg_type(&uuids) == DBUS_TYPE_STRING) {
-                        const char *uuid = NULL;
-                        dbus_message_iter_get_basic(&uuids, &uuid);
-                        if (uuid != NULL && strcasecmp(uuid, service_uuid) == 0) {
-                            has_service = true;
-                        }
-                        dbus_message_iter_next(&uuids);
-                    }
-                } else if (strcmp(property_name, "Address") == 0 && type == DBUS_TYPE_STRING) {
-                    const char *address = NULL;
-                    dbus_message_iter_get_basic(&variant, &address);
-                    if (address != NULL) {
-                        inkwell_str_copy(info.address, sizeof info.address, address);
-                    }
-                } else if ((strcmp(property_name, "Name") == 0 ||
-                            strcmp(property_name, "Alias") == 0) &&
-                           type == DBUS_TYPE_STRING && info.name[0] == '\0') {
-                    const char *name = NULL;
-                    dbus_message_iter_get_basic(&variant, &name);
-                    if (name != NULL) {
-                        inkwell_str_copy(info.name, sizeof info.name, name);
-                    }
-                } else if (strcmp(property_name, "Paired") == 0 && type == DBUS_TYPE_BOOLEAN) {
-                    dbus_bool_t paired = FALSE;
-                    dbus_message_iter_get_basic(&variant, &paired);
-                    info.paired = paired != FALSE;
-                } else if (strcmp(property_name, "RSSI") == 0 && type == DBUS_TYPE_INT16) {
-                    int16_t rssi = 0;
-                    dbus_message_iter_get_basic(&variant, &rssi);
-                    info.rssi = rssi;
-                    /* The property being here at all is the range test; see `in_range`. */
-                    info.in_range = true;
-                }
-                dbus_message_iter_next(&properties);
-            }
-            dbus_message_iter_next(&interfaces);
-        }
-
-        if (has_service) {
-            if (matched < capacity) {
-                devices[matched] = info;
-            } else {
-                inkwell_log_warn("ble", "Device list full, dropping entry");
-            }
-            ++matched;
-        }
-        dbus_message_iter_next(&objects);
+        ++matched;
     }
-    dbus_message_unref(reply);
     *count = matched > capacity ? capacity : matched;
     return 0;
-}
-
-/* The object path of the characteristic with `uuid` under `path`. */
-static int find_characteristic_path(DBusConnection *connection, const char *path, const char *uuid,
-                                    char *out, size_t out_len) {
-    DBusMessage *reply = managed_objects(connection);
-    if (reply == NULL) {
-        return -EIO;
-    }
-    DBusMessageIter iter;
-    if (!dbus_message_iter_init(reply, &iter) ||
-        dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_ARRAY) {
-        dbus_message_unref(reply);
-        return -EIO;
-    }
-
-    const size_t prefix = strlen(path);
-    bool found = false;
-    DBusMessageIter objects;
-    dbus_message_iter_recurse(&iter, &objects);
-    while (!found && dbus_message_iter_get_arg_type(&objects) == DBUS_TYPE_DICT_ENTRY) {
-        DBusMessageIter entry;
-        dbus_message_iter_recurse(&objects, &entry);
-        const char *object_path = NULL;
-        if (dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_OBJECT_PATH) {
-            dbus_message_iter_get_basic(&entry, &object_path);
-        }
-        dbus_message_iter_next(&entry);
-        if (object_path == NULL || strncmp(object_path, path, prefix) != 0 ||
-            dbus_message_iter_get_arg_type(&entry) != DBUS_TYPE_ARRAY) {
-            dbus_message_iter_next(&objects);
-            continue;
-        }
-
-        DBusMessageIter interfaces;
-        dbus_message_iter_recurse(&entry, &interfaces);
-        while (!found && dbus_message_iter_get_arg_type(&interfaces) == DBUS_TYPE_DICT_ENTRY) {
-            DBusMessageIter interface;
-            dbus_message_iter_recurse(&interfaces, &interface);
-            const char *interface_name = NULL;
-            if (dbus_message_iter_get_arg_type(&interface) == DBUS_TYPE_STRING) {
-                dbus_message_iter_get_basic(&interface, &interface_name);
-            }
-            dbus_message_iter_next(&interface);
-            if (interface_name == NULL ||
-                strcmp(interface_name, "org.bluez.GattCharacteristic1") != 0 ||
-                dbus_message_iter_get_arg_type(&interface) != DBUS_TYPE_ARRAY) {
-                dbus_message_iter_next(&interfaces);
-                continue;
-            }
-            DBusMessageIter properties;
-            dbus_message_iter_recurse(&interface, &properties);
-            while (dbus_message_iter_get_arg_type(&properties) == DBUS_TYPE_DICT_ENTRY) {
-                DBusMessageIter property;
-                dbus_message_iter_recurse(&properties, &property);
-                const char *property_name = NULL;
-                if (dbus_message_iter_get_arg_type(&property) == DBUS_TYPE_STRING) {
-                    dbus_message_iter_get_basic(&property, &property_name);
-                }
-                dbus_message_iter_next(&property);
-                if (property_name != NULL && strcmp(property_name, "UUID") == 0) {
-                    DBusMessageIter variant;
-                    dbus_message_iter_recurse(&property, &variant);
-                    const char *value = NULL;
-                    if (dbus_message_iter_get_arg_type(&variant) == DBUS_TYPE_STRING) {
-                        dbus_message_iter_get_basic(&variant, &value);
-                    }
-                    if (value != NULL && strcasecmp(value, uuid) == 0) {
-                        inkwell_str_copy(out, out_len, object_path);
-                        found = true;
-                        break;
-                    }
-                }
-                dbus_message_iter_next(&properties);
-            }
-            dbus_message_iter_next(&interfaces);
-        }
-        dbus_message_iter_next(&objects);
-    }
-    dbus_message_unref(reply);
-    return found ? 0 : -ENOENT;
 }
 
 int inkwell_ble_backend_find_characteristic(struct inkwell_ble_central *central,
                                             const char *address, const char *char_uuid,
                                             char *out_handle, size_t out_len) {
-    DBusConnection *connection = connection_of(central);
-    if (connection == NULL) {
+    if (connection_of(central) == NULL) {
         return -ENOTCONN;
     }
     char path[INKWELL_BLE_HANDLE_MAX];
     if (!device_path(central, address, path, sizeof path)) {
         return -EINVAL;
     }
+    const int loaded = objects_ensure(central);
+    if (loaded < 0) {
+        return loaded;
+    }
     /* The trailing slash keeps dev_..._0A from matching dev_..._0AB's children. */
     char prefix[INKWELL_BLE_HANDLE_MAX + 1U];
     snprintf(prefix, sizeof prefix, "%s/", path);
-    return find_characteristic_path(connection, prefix, char_uuid, out_handle, out_len);
+    const size_t prefix_len = strlen(prefix);
+    const struct bluez_backend *backend = backend_of(central);
+    for (size_t i = 0U; i < backend->object_count; ++i) {
+        const struct bluez_object *object = &backend->objects[i];
+        if ((object->interfaces & BLUEZ_CHARACTERISTIC) != 0U &&
+            strncmp(object->path, prefix, prefix_len) == 0 &&
+            strcasecmp(object->uuid, char_uuid) == 0) {
+            inkwell_str_copy(out_handle, out_len, object->path);
+            return 0;
+        }
+    }
+    return -ENOENT;
 }
 
 /* ---- method calls ---------------------------------------------------------------------------- */
@@ -1443,20 +1711,21 @@ static int read_reply(DBusMessage *reply, uint8_t *out, size_t capacity, size_t 
 }
 
 static void handle_properties_changed(struct inkwell_ble_central *central, DBusMessage *message) {
-    if (central->notify_handle[0] == '\0') {
-        return;
-    }
     const char *object = dbus_message_get_path(message);
-    if (object == NULL || strcmp(object, central->notify_handle) != 0) {
-        return;
-    }
     DBusMessageIter iter;
-    if (!dbus_message_iter_init(message, &iter) ||
+    if (object == NULL || !dbus_message_iter_init(message, &iter) ||
         dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_STRING) {
         return;
     }
     const char *interface_name = NULL;
     dbus_message_iter_get_basic(&iter, &interface_name);
+    if (interface_name != NULL && strcmp(interface_name, "org.bluez.Device1") == 0) {
+        objects_properties_changed(backend_of(central), object, &iter);
+        return;
+    }
+    if (central->notify_handle[0] == '\0' || strcmp(object, central->notify_handle) != 0) {
+        return;
+    }
     if (interface_name == NULL || strcmp(interface_name, "org.bluez.GattCharacteristic1") != 0 ||
         !dbus_message_iter_next(&iter) ||
         dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_ARRAY) {
@@ -1526,7 +1795,13 @@ static void handle_message(struct inkwell_ble_central *central, DBusMessage *mes
         return;
     }
 
+    struct bluez_backend *backend = backend_of(central);
     const dbus_uint32_t serial = dbus_message_get_reply_serial(message);
+    if (serial != 0U && serial == backend->objects_serial) {
+        backend->objects_serial = 0U;
+        (void)objects_load(backend, message);
+        return;
+    }
     if (serial != 0U) {
         for (size_t i = 0; i < INKWELL_ARRAY_LEN(central->requests); ++i) {
             struct inkwell_ble_pending *request = &central->requests[i];
@@ -1558,6 +1833,9 @@ static void handle_message(struct inkwell_ble_central *central, DBusMessage *mes
         }
     }
 
+    if (objects_handle_signal(central, message)) {
+        return;
+    }
     if (dbus_message_is_signal(message, "org.freedesktop.DBus.Properties", "PropertiesChanged")) {
         handle_properties_changed(central, message);
     }
