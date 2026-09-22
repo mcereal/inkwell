@@ -212,6 +212,38 @@ INKWELL_TEST_CASE(ble_notifications_follow_the_subscription, unit) {
     record_success(test_name);
 }
 
+/* A subscribe answers -EAGAIN until the stack has confirmed, as a write does, and the
+   characteristic is only the subscribed one once it has. */
+INKWELL_TEST_CASE(ble_subscribe_waits_for_the_stack, unit) {
+    const struct inkwell_ble_mock_config config = {.subscribe_pending_polls = 2U};
+    inkwell_ble_mock_enable(&config);
+    struct inkwell_ble_central central;
+    (void)inkwell_ble_open(&central);
+    struct received received = {0};
+    inkwell_ble_set_notification_handler(&central, on_notification, &received);
+    (void)inkwell_ble_connect_begin(&central, ADDRESS);
+    int result = 0;
+    (void)inkwell_ble_connect_poll(&central, &result);
+
+    const uint8_t value[] = {7};
+    const int first = inkwell_ble_subscribe(&central, "h");
+    const int second = inkwell_ble_subscribe(&central, "h");
+    const bool early = central.notify_handle[0] != '\0';
+    const int third = inkwell_ble_subscribe(&central, "h");
+    inkwell_ble_mock_emit_notification("h", value, sizeof value);
+    const unsigned delivered = received.calls;
+    const bool subscribed = strcmp(central.notify_handle, "h") == 0;
+    inkwell_ble_close(&central);
+    inkwell_ble_mock_disable();
+
+    INKWELL_TEST_FAIL_IF(first != -EAGAIN || second != -EAGAIN,
+                         "a subscribe did not wait for the stack");
+    INKWELL_TEST_FAIL_IF(early, "a pending subscribe already counted as subscribed");
+    INKWELL_TEST_FAIL_IF(third != 0 || !subscribed || delivered != 1U,
+                         "a confirmed subscribe did not answer 0 and deliver");
+    record_success(test_name);
+}
+
 INKWELL_TEST_CASE(ble_read_waits_and_wakes, unit) {
     static const uint8_t first[] = {0x08, 0x01};
     const uint8_t *const payloads[] = {first};

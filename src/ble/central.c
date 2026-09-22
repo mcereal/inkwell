@@ -49,6 +49,9 @@ struct inkwell_ble_mock_state {
     bool scanning;
     unsigned write_calls;
     unsigned pair_polls;
+    /* A subscribe in flight, and the calls it has answered -EAGAIN to. */
+    bool subscribing;
+    unsigned subscribe_polls;
     /* Addresses the mock has bonded, so a device lists as paired the way it would on the
        stack once the pairing completed. */
     char paired[INKWELL_BLE_MOCK_PAIRED_MAX][INKWELL_BLE_ADDRESS_MAX];
@@ -126,6 +129,8 @@ static void mock_reset_counters(void) {
     g_mock.connected_polls = 0U;
     g_mock.scanning = false;
     g_mock.write_calls = 0U;
+    g_mock.subscribing = false;
+    g_mock.subscribe_polls = 0U;
     g_mock.pair_polls = 0U;
     memset(g_mock.paired, 0, sizeof g_mock.paired);
     g_mock.paired_count = 0U;
@@ -291,6 +296,9 @@ static void pending_cancel(struct inkwell_ble_pending *request) {
 }
 
 void inkwell_ble_requests_cancel(struct inkwell_ble_central *central) {
+    if (scripted()) {
+        g_mock.subscribing = false;
+    }
     if (central != NULL) {
         for (size_t i = 0; i < INKWELL_ARRAY_LEN(central->requests); ++i) {
             pending_cancel(&central->requests[i]);
@@ -937,22 +945,60 @@ int inkwell_ble_characteristic_mtu(struct inkwell_ble_central *central, const ch
     return inkwell_ble_backend_mtu(central, handle, out_mtu);
 }
 
-int inkwell_ble_subscribe(struct inkwell_ble_central *central, const char *handle) {
-    if (central == NULL || handle == NULL) {
-        return -EINVAL;
+void inkwell_ble_subscribe_finish(struct inkwell_ble_central *central, int result) {
+    struct inkwell_ble_pending *request = &central->requests[3];
+    if (request->state != 1) {
+        return;
     }
-    int result = 0;
-    if (mocked()) {
-        result = g_mock.config.subscribe_result;
-    } else if (!central->open) {
-        return -ENOTCONN;
-    } else {
-        result = inkwell_ble_backend_subscribe(central, handle);
+    /* Before the caller hears of it: a notification can follow the confirmation at once. */
+    if (result == 0) {
+        inkwell_str_copy(central->notify_handle, sizeof central->notify_handle,
+                         central->subscribe_handle);
     }
+    inkwell_ble_pending_finish(request, result);
+}
+
+static int mock_subscribe(struct inkwell_ble_central *central, const char *handle) {
+    if (!g_mock.subscribing) {
+        g_mock.subscribing = true;
+        g_mock.subscribe_polls = 0U;
+    }
+    if (g_mock.subscribe_polls++ < g_mock.config.subscribe_pending_polls) {
+        return -EAGAIN;
+    }
+    g_mock.subscribing = false;
+    const int result = g_mock.config.subscribe_result;
     if (result == 0) {
         inkwell_str_copy(central->notify_handle, sizeof central->notify_handle, handle);
     }
     return result;
+}
+
+int inkwell_ble_subscribe(struct inkwell_ble_central *central, const char *handle) {
+    if (central == NULL || handle == NULL) {
+        return -EINVAL;
+    }
+    if (scripted()) {
+        return mock_subscribe(central, handle);
+    }
+    if (!central->open) {
+        return -ENOTCONN;
+    }
+    struct inkwell_ble_pending *request = &central->requests[3];
+    if (request->state != 0) {
+        return pending_take(request);
+    }
+    int result = pending_start(central, request, inkwell_ble_backend_subscribe_timeout_ms);
+    if (result < 0) {
+        return result;
+    }
+    inkwell_str_copy(central->subscribe_handle, sizeof central->subscribe_handle, handle);
+    result = inkwell_ble_backend_subscribe(central, handle, &request->token);
+    if (result < 0) {
+        pending_cancel(request);
+        return result;
+    }
+    return -EAGAIN;
 }
 
 int inkwell_ble_write(struct inkwell_ble_central *central, const char *handle, const uint8_t *data,

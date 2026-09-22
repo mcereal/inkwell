@@ -24,7 +24,7 @@
  * Disconnect and Trusted are sent too, and their replies only logged (send_logged()). A listing
  * or a lookup reads a copy of bluetoothd's object tree that signals keep current, so the blocking
  * GetManagedObjects behind it is made once per bluetoothd, not once per scan. What does still
- * block - that first fetch, StartNotify, the agent registration, RemoveDevice - is bounded by an
+ * block - that first fetch, the MTU, the agent registration, RemoveDevice - is bounded by an
  * explicit timeout of a second or a few, never libdbus' 25 s default.
  *
  * **Messages are popped here, not dispatched.** process() takes every message off the
@@ -45,6 +45,9 @@
 
 /* A bond is made before a link is used (pair_begin), so a write has nothing to wait behind. */
 const unsigned inkwell_ble_backend_write_timeout_ms = 3000U;
+/* StartNotify writes the peripheral's CCCD, and on a bond that has gone stale on the peripheral
+   it can start a pairing first. */
+const unsigned inkwell_ble_backend_subscribe_timeout_ms = 8000U;
 
 struct bluez_watch {
     DBusWatch *watch;
@@ -1028,6 +1031,21 @@ int inkwell_ble_backend_find_characteristic(struct inkwell_ble_central *central,
 
 /* ---- method calls ---------------------------------------------------------------------------- */
 
+/* The PropertiesChanged signals that carry a subscribed characteristic's values. Neither way
+   is waited for: without an error to fill, AddMatch and RemoveMatch are only sent. */
+static void notify_match(DBusConnection *connection, const char *handle, bool add) {
+    char rule[256];
+    snprintf(rule, sizeof rule,
+             "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',"
+             "member='PropertiesChanged',path='%s'",
+             handle);
+    if (add) {
+        dbus_bus_add_match(connection, rule, NULL);
+    } else {
+        dbus_bus_remove_match(connection, rule, NULL);
+    }
+}
+
 /* One call with no arguments, sent without waiting; its serial goes to *token. */
 static int send_call(struct inkwell_ble_central *central, const char *path, const char *interface,
                      const char *method, uint32_t *token) {
@@ -1156,12 +1174,7 @@ int inkwell_ble_backend_disconnect(struct inkwell_ble_central *central, const ch
         return result;
     }
     if (central->notify_handle[0] != '\0') {
-        char rule[256];
-        snprintf(rule, sizeof rule,
-                 "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',"
-                 "member='PropertiesChanged',path='%s'",
-                 central->notify_handle);
-        dbus_bus_remove_match(connection, rule, NULL);
+        notify_match(connection, central->notify_handle, false);
     }
     return 0;
 }
@@ -1624,7 +1637,14 @@ int inkwell_ble_backend_read(struct inkwell_ble_central *central, const char *ha
     return 0;
 }
 
-int inkwell_ble_backend_subscribe(struct inkwell_ble_central *central, const char *handle) {
+/*
+ * StartNotify, sent without waiting. On an encrypted characteristic it can make BlueZ start a
+ * pairing and call our agent - which is why it must not block: the agent's call is popped by the
+ * same loop, and a blocking call would sit on it until it timed out. The match for the values is
+ * added once the reply says they will come (process()).
+ */
+int inkwell_ble_backend_subscribe(struct inkwell_ble_central *central, const char *handle,
+                                  uint32_t *token) {
     DBusConnection *connection = connection_of(central);
     if (connection == NULL) {
         return -ENOTCONN;
@@ -1634,24 +1654,13 @@ int inkwell_ble_backend_subscribe(struct inkwell_ble_central *central, const cha
     if (message == NULL) {
         return -ENOMEM;
     }
-    /*
-     * Deliberately not the 25 s default. StartNotify on an encrypted characteristic can make
-     * BlueZ start a pairing, and BlueZ then calls our agent - which cannot be answered from
-     * inside a blocking call, because the loop that pops messages is this thread. A caller that
-     * bonds up front (pair_begin) never meets this; the timeout bounds the stall for the case
-     * it still can, a bond that has gone stale on the peripheral.
-     */
-    const int result = call_blocking(central, message, 8000, "StartNotify");
-    if (result < 0) {
-        return result;
+    dbus_uint32_t serial = 0U;
+    const dbus_bool_t sent = dbus_connection_send(connection, message, &serial);
+    dbus_message_unref(message);
+    if (!sent) {
+        return -ENOMEM;
     }
-    char rule[256];
-    snprintf(rule, sizeof rule,
-             "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',"
-             "member='PropertiesChanged',path='%s'",
-             handle);
-    /* Without an error to fill, AddMatch is sent and not waited for. */
-    dbus_bus_add_match(connection, rule, NULL);
+    *token = serial;
     return 0;
 }
 
@@ -1845,7 +1854,16 @@ static void handle_message(struct inkwell_ble_central *central, DBusMessage *mes
         }
     }
     if (serial != 0U) {
-        for (size_t i = 0; i < INKWELL_ARRAY_LEN(central->requests); ++i) {
+        struct inkwell_ble_pending *subscribe = &central->requests[3];
+        if (subscribe->state == 1 && subscribe->token == serial) {
+            const bool ok = dbus_message_get_type(message) == DBUS_MESSAGE_TYPE_METHOD_RETURN;
+            if (ok) {
+                notify_match(backend->connection, central->subscribe_handle, true);
+            }
+            inkwell_ble_subscribe_finish(central, ok ? 0 : reply_error(message, "StartNotify"));
+            return;
+        }
+        for (size_t i = 0; i < 3U; ++i) {
             struct inkwell_ble_pending *request = &central->requests[i];
             if (request->state == 1 && request->token == serial) {
                 const int result = request_reply(message, i, &request->value);

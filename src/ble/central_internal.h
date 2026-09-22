@@ -24,6 +24,8 @@ void inkwell_ble_pending_finish(struct inkwell_ble_pending *request, int result)
 void inkwell_ble_read_finish(struct inkwell_ble_central *central, int result);
 void inkwell_ble_connect_finish(struct inkwell_ble_central *central, int result);
 void inkwell_ble_pair_finish(struct inkwell_ble_central *central, int result);
+/* The stack's answer to a subscribe. On 0, notifications from it are delivered from now on. */
+void inkwell_ble_subscribe_finish(struct inkwell_ble_central *central, int result);
 /* A value from the subscribed characteristic. */
 void inkwell_ble_notify(struct inkwell_ble_central *central, const uint8_t *data, size_t len);
 
@@ -33,6 +35,8 @@ void inkwell_ble_notify(struct inkwell_ble_central *central, const uint8_t *data
    differs: BlueZ bonds up front, CoreBluetooth encrypts a link on first use and may hold a
    write while it does - or while the user answers its pairing dialog. */
 extern const unsigned inkwell_ble_backend_write_timeout_ms;
+/* How long a subscribe may go unanswered, for the same reason. */
+extern const unsigned inkwell_ble_backend_subscribe_timeout_ms;
 
 /* `private_connection` and `bus_address` as inkwell_ble_open_private() and the mock's
    bus_address describe; a backend with no such notion ignores both. Allocates
@@ -63,6 +67,9 @@ int inkwell_ble_backend_read(struct inkwell_ble_central *central, const char *ha
 /* `which` is 1 for services-resolved, 2 for connected: the index into central->requests. */
 int inkwell_ble_backend_query(struct inkwell_ble_central *central, const char *address,
                               size_t which, uint32_t *token);
+/* central->subscribe_handle is already `handle`; the reply goes to subscribe_finish(). */
+int inkwell_ble_backend_subscribe(struct inkwell_ble_central *central, const char *handle,
+                                  uint32_t *token);
 
 /* A connect or pair being abandoned while its reply is still out. */
 void inkwell_ble_backend_connect_cancel(struct inkwell_ble_central *central);
@@ -85,7 +92,6 @@ int inkwell_ble_backend_find_characteristic(struct inkwell_ble_central *central,
                                             char *out_handle, size_t out_len);
 int inkwell_ble_backend_mtu(struct inkwell_ble_central *central, const char *handle,
                             uint16_t *out_mtu);
-int inkwell_ble_backend_subscribe(struct inkwell_ble_central *central, const char *handle);
 
 int inkwell_ble_backend_attach(struct inkwell_ble_central *central);
 void inkwell_ble_backend_detach(struct inkwell_ble_central *central);
