@@ -210,6 +210,9 @@ static IWPending *retire(NSMutableArray<IWPending *> *queue, CBCharacteristic *c
 /* The subscribe in flight: its characteristic and the token its answer is posted under. */
 @property(nonatomic, strong) CBCharacteristic *subscribing;
 @property(nonatomic) uint32_t subscribeToken;
+/* The token of the subscribe that turned `notifying` on, so one the central has already given
+   up on can be turned back off. */
+@property(nonatomic) uint32_t notifyingToken;
 @property(nonatomic) BOOL scanning;
 @property(nonatomic) BOOL closed;
 @property(nonatomic) int wakeFd;
@@ -466,6 +469,7 @@ static IWPending *retire(NSMutableArray<IWPending *> *queue, CBCharacteristic *c
     }
     if (result == 0 && characteristic.isNotifying) {
         self.notifying = characteristic;
+        self.notifyingToken = self.subscribeToken;
     }
     [self finishSubscribe:result];
 }
@@ -959,6 +963,7 @@ int inkwell_ble_backend_subscribe(struct inkwell_ble_central *central, const cha
           /* Already on - a subscribe that outlived its caller's timeout, say. Answered as the
              stack would, on the next turn. */
           object.notifying = characteristic;
+          object.notifyingToken = ours;
           [object finishSubscribe:0];
           return;
       }
@@ -1078,6 +1083,20 @@ static void apply(struct inkwell_ble_central *central, const struct cb_event *ev
     case CB_EVENT_SUBSCRIBE:
         if (central->requests[3].state == 1 && central->requests[3].token == event->token) {
             inkwell_ble_subscribe_finish(central, event->result);
+        } else if (event->result == 0) {
+            /* Confirmed after the central timed it out or cancelled it: the caller was told it
+               failed, so the characteristic must not go on notifying behind its back. */
+            IWCentral *object = object_of(central);
+            const uint32_t stale = event->token;
+            dispatch_async(object.queue, ^{
+              CBCharacteristic *characteristic = object.notifying;
+              if (characteristic != nil && object.notifyingToken == stale) {
+                  object.notifying = nil;
+                  object.notifyingToken = 0U;
+                  [characteristic.service.peripheral setNotifyValue:NO
+                                                  forCharacteristic:characteristic];
+              }
+            });
         }
         break;
     case CB_EVENT_READ:
@@ -1090,7 +1109,11 @@ static void apply(struct inkwell_ble_central *central, const struct cb_event *ev
         }
         break;
     case CB_EVENT_NOTIFY:
-        inkwell_ble_notify(central, event->data, event->len);
+        /* Only while a subscribe the central accepted stands: a value posted between a stale
+           confirmation and its undoing above is dropped here. */
+        if (central->notify_handle[0] != '\0') {
+            inkwell_ble_notify(central, event->data, event->len);
+        }
         break;
     case CB_EVENT_LOG_INFO:
         inkwell_log_info("ble", "%s", (const char *)event->data);
