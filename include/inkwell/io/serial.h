@@ -23,7 +23,8 @@ extern "C" {
  *
  * - `inkwell_serial_bind()` writes "VID PID" to /sys/bus/usb-serial/drivers/generic/new_id. The
  *   generic driver rejects the control interface ("no bulk out") and attaches the data one as
- *   /dev/ttyUSB*.
+ *   /dev/ttyUSB*, usually at once and sometimes a little later - so the bind answers -EAGAIN
+ *   until the tty is there rather than sleeping on the loop.
  * - `inkwell_serial_set_line_state()` then sends one CDC SET_CONTROL_LINE_STATE through usbfs
  *   (/dev/bus/usb/BBB/DDD) against the unbound control interface, because TinyUSB discards
  *   output until the host sets DTR and the generic driver cannot.
@@ -64,29 +65,35 @@ struct inkwell_serial_port_info {
        the port is open. */
     bool needs_line_state;
     enum inkwell_serial_kind kind;
+    /* The bind's own bookkeeping: new_id has been written for this port, and a later call only
+       looks for the tty. */
+    bool bind_requested;
     /* A mass-storage Bulk-Only interface (08/06/50) sits on the same device - what a UF2
        bootloader presents beside its CDC pair. Only ever set on a native port. */
     bool mass_storage;
 };
 
-/* Fills `out` with the USB serial ports: interfaces already bound to a usb-serial driver, plus
-   unbound CDC-Data interfaces that `inkwell_serial_bind()` could bind. Returns how many were
-   written, at most `capacity`. */
+/* Fills `out` with the USB serial ports: interfaces that have published a tty or are bound to a
+   usb-serial driver, plus unbound CDC-Data interfaces that `inkwell_serial_bind()` could bind. A
+   CDC function is one port, reported at its data interface even when the tty hangs off its
+   control interface, as cdc_acm's does. Returns how many were written, at most `capacity`. */
 size_t inkwell_serial_scan(struct inkwell_serial_port_info *out, size_t capacity);
 
-/* Binds an unbound CDC-Data interface to the generic usbserial driver and waits, up to about a
-   second, for its tty to appear, filling in `path` and `bound`. Returns 0 at once for a port
-   that is already bound, or a negative errno. Linux only; -ENOTSUP elsewhere. */
+/* Binds an unbound CDC-Data interface to the generic usbserial driver, filling in `path` and
+   `bound` once its tty appears. Returns 0 when it has, -EAGAIN while it has not - call again
+   with the same `port` until it answers something else, and give up when the caller's patience
+   does (a second has always been plenty) - or a negative errno. A port that is already bound
+   answers 0 at once. Linux only; -ENOTSUP elsewhere. */
 int inkwell_serial_bind(struct inkwell_serial_port_info *port);
 
 /* One CDC SET_CONTROL_LINE_STATE to the port's control interface through usbfs. Returns 0,
    -ENOTSUP when there is no control interface or no usbfs, or a negative errno. */
-int inkwell_serial_set_line_state(const struct inkwell_serial_port_info *port, bool dtr,
-                                  bool rts);
+int inkwell_serial_set_line_state(const struct inkwell_serial_port_info *port, bool dtr, bool rts);
 
 /*
  * Opens the tty raw and non-blocking at `baud` (meaningless over USB CDC, honoured by bridges).
- * Returns the fd, -EINVAL for a rate termios has no constant for, or a negative errno.
+ * Returns the fd, -EINVAL for a rate this platform's termios has no constant for, or a negative
+ * errno.
  *
  * VMIN is 1, so an empty buffer reads as EAGAIN and a zero-length read means the device went
  * away - which is what inkwell's stream (`net/stream.h`) takes it to mean.
@@ -106,8 +113,10 @@ void inkwell_serial_set_sysfs_root(const char *root);
 struct inkwell_serial_mock_config {
     const struct inkwell_serial_port_info *ports;
     size_t port_count;
-    int scan_result;       /* < 0 makes the scan report nothing */
-    int bind_result;       /* returned by inkwell_serial_bind */
+    int scan_result; /* < 0 makes the scan report nothing */
+    int bind_result; /* returned by inkwell_serial_bind */
+    /* How many binds of an unbound port answer -EAGAIN before one succeeds. */
+    unsigned bind_pending_polls;
     int line_state_result; /* returned by inkwell_serial_set_line_state */
     /* The path a successful bind reports for a port the scan found unbound. */
     const char *bound_path;

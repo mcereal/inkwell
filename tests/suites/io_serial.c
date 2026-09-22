@@ -146,18 +146,35 @@ INKWELL_TEST_CASE(serial_scan_reads_the_usb_tree, unit) {
     /* 5-1: a hub's interface - neither CDC-Data nor on a serial driver. Not a port. */
     built = built && fixture_device(root, "5-1", "05e3", "0610", "USB2.0 Hub");
     built = built && fixture_interface(root, "5-1:1.0", "09", "00", "00", "00", "hub");
+    /* 6-1: a native device under cdc_acm on a kernel that has it. The driver claims both
+       halves and hangs the tty off the control interface. */
+    built = built && fixture_device(root, "6-1", "239a", "4405", "HT-n5262");
+    built = built && fixture_interface(root, "6-1:1.0", "02", "02", "00", "00", "cdc_acm");
+    built = built && fixture_dir(root, "6-1:1.0/tty");
+    built = built && fixture_dir(root, "6-1:1.0/tty/ttyACM0");
+    built = built && fixture_interface(root, "6-1:1.1", "0a", "00", "00", "01", "cdc_acm");
+    /* 7-1: a PL2303 bridge, on a driver no list here names - its tty is what makes it a port. */
+    built = built && fixture_device(root, "7-1", "067b", "2303", "USB-Serial Controller");
+    built = built && fixture_interface(root, "7-1:1.0", "ff", "00", "00", "00", "pl2303x");
+    built = built && fixture_dir(root, "7-1:1.0/ttyUSB1");
+    /* 8-1: a composite device with two CDC functions, control/data 0/1 and 2/3. */
+    built = built && fixture_device(root, "8-1", "1209", "0001", "Dual CDC");
+    built = built && fixture_interface(root, "8-1:1.0", "02", "02", "00", "00", NULL);
+    built = built && fixture_interface(root, "8-1:1.1", "0a", "00", "00", "01", NULL);
+    built = built && fixture_interface(root, "8-1:1.2", "02", "02", "00", "02", NULL);
+    built = built && fixture_interface(root, "8-1:1.3", "0a", "00", "00", "03", NULL);
     INKWELL_TEST_FAIL_IF_CLEANUP(!built, (void)inkwell_test_remove_tree(root),
                                  "could not lay out the fixture tree");
 
     inkwell_serial_set_sysfs_root(root);
-    struct inkwell_serial_port_info ports[8];
-    const size_t count = inkwell_serial_scan(ports, 8U);
+    struct inkwell_serial_port_info ports[16];
+    const size_t count = inkwell_serial_scan(ports, 16U);
     const size_t capped = inkwell_serial_scan(ports, 1U);
     inkwell_serial_set_sysfs_root(NULL);
     (void)inkwell_test_remove_tree(root);
 
     INKWELL_TEST_FAIL_IF(capped != 1U, "the scan should stop at the capacity it was given");
-    INKWELL_TEST_FAIL_IF(count != 3U, "the scan should offer the three serial interfaces");
+    INKWELL_TEST_FAIL_IF(count != 7U, "the scan should offer one port per serial function");
 
     const struct inkwell_serial_port_info *native = find_by_id(ports, count, "2-1:1.1");
     const struct inkwell_serial_port_info *boot = find_by_id(ports, count, "3-1:1.1");
@@ -186,6 +203,27 @@ INKWELL_TEST_CASE(serial_scan_reads_the_usb_tree, unit) {
                          "the device's numbers should come off its own directory");
     INKWELL_TEST_FAIL_IF(strcmp(bridge->name, "CP2102 USB to UART Bridge") != 0,
                          "the name should be the USB product string");
+
+    const struct inkwell_serial_port_info *acm = find_by_id(ports, count, "6-1:1.1");
+    INKWELL_TEST_FAIL_IF(find_by_id(ports, count, "6-1:1.0") != NULL,
+                         "a CDC control interface is half of a port, not a port of its own");
+    INKWELL_TEST_FAIL_IF(acm == NULL || !acm->bound || strcmp(acm->path, "/dev/ttyACM0") != 0,
+                         "cdc_acm's tty hangs off the control interface and is the data one's");
+    INKWELL_TEST_FAIL_IF(acm != NULL && acm->needs_line_state,
+                         "cdc_acm drives DTR itself; no usbfs request is needed");
+
+    const struct inkwell_serial_port_info *pl2303 = find_by_id(ports, count, "7-1:1.0");
+    INKWELL_TEST_FAIL_IF(pl2303 == NULL || pl2303->kind != INKWELL_SERIAL_BRIDGE ||
+                             strcmp(pl2303->path, "/dev/ttyUSB1") != 0,
+                         "a published tty is a port whichever driver published it");
+
+    const struct inkwell_serial_port_info *first = find_by_id(ports, count, "8-1:1.1");
+    const struct inkwell_serial_port_info *second = find_by_id(ports, count, "8-1:1.3");
+    INKWELL_TEST_FAIL_IF(first == NULL || second == NULL, "both CDC functions are ports");
+    INKWELL_TEST_FAIL_IF(first != NULL && first->control_interface != 0,
+                         "the first function's control interface is 0");
+    INKWELL_TEST_FAIL_IF(second != NULL && second->control_interface != 2,
+                         "each function's line state goes to its own control interface");
 }
 
 INKWELL_TEST_CASE(serial_scan_without_a_tree_finds_nothing, unit) {
@@ -211,13 +249,17 @@ INKWELL_TEST_CASE(serial_mock_stands_in_for_the_system, unit) {
     mock.ports = &port;
     mock.port_count = 1U;
     mock.bound_path = "/dev/ttyUSB7";
+    mock.bind_pending_polls = 2U;
     mock.open_fd = pair[1];
     inkwell_serial_mock_enable(&mock);
 
     struct inkwell_serial_port_info found[4];
     memset(found, 0, sizeof found);
     const size_t count = inkwell_serial_scan(found, 4U);
-    const int bound = count == 1U ? inkwell_serial_bind(&found[0]) : -1;
+    const int waiting = count == 1U ? inkwell_serial_bind(&found[0]) : -1;
+    const bool unbound_while_waiting = !found[0].bound && found[0].path[0] == '\0';
+    (void)inkwell_serial_bind(&found[0]);
+    const int bound = inkwell_serial_bind(&found[0]);
     const int line = inkwell_serial_set_line_state(&found[0], true, true);
     const int fd = inkwell_serial_open(found[0].path, 115200U);
     const size_t binds = inkwell_serial_mock_bind_calls();
@@ -226,7 +268,8 @@ INKWELL_TEST_CASE(serial_mock_stands_in_for_the_system, unit) {
     const char hello[] = "hi";
     const bool carried = fd >= 0 && write(fd, hello, 2) == 2;
     char got[2] = {0};
-    const bool arrived = carried && read(pair[0], got, sizeof got) == 2 && memcmp(got, "hi", 2) == 0;
+    const bool arrived =
+        carried && read(pair[0], got, sizeof got) == 2 && memcmp(got, "hi", 2) == 0;
     inkwell_serial_close(fd);
 
     mock.open_result = -EACCES;
@@ -238,10 +281,13 @@ INKWELL_TEST_CASE(serial_mock_stands_in_for_the_system, unit) {
 
     INKWELL_TEST_FAIL_IF(count != 1U || strcmp(found[0].id, "1-1:1.1") != 0,
                          "the scan should report the scripted port");
-    INKWELL_TEST_FAIL_IF(bound != 0 || !found[0].bound || strcmp(found[0].path, "/dev/ttyUSB7") != 0,
+    INKWELL_TEST_FAIL_IF(bound != 0 || !found[0].bound ||
+                             strcmp(found[0].path, "/dev/ttyUSB7") != 0,
                          "a bind should publish the scripted path");
+    INKWELL_TEST_FAIL_IF(waiting != -EAGAIN || !unbound_while_waiting,
+                         "a bind still waiting on its tty answers -EAGAIN and publishes nothing");
     INKWELL_TEST_FAIL_IF(line != 0, "the line state should answer the scripted result");
-    INKWELL_TEST_FAIL_IF(binds != 1U || lines != 1U, "each call should be counted once");
+    INKWELL_TEST_FAIL_IF(binds != 3U || lines != 1U, "each call should be counted once");
     INKWELL_TEST_FAIL_IF(!arrived, "an open should hand back the scripted descriptor");
     INKWELL_TEST_FAIL_IF(refused != -EACCES, "a scripted open failure should be returned");
 }
@@ -256,6 +302,8 @@ INKWELL_TEST_CASE(serial_open_makes_the_tty_raw, unit) {
     snprintf(path, sizeof path, "%s", ptsname(master));
 
     const int wrong = inkwell_serial_open(path, 12345U);
+    const int slow = inkwell_serial_open(path, 4800U);
+    inkwell_serial_close(slow);
     const int fd = inkwell_serial_open(path, 115200U);
     struct termios tio;
     memset(&tio, 0, sizeof tio);
@@ -265,6 +313,7 @@ INKWELL_TEST_CASE(serial_open_makes_the_tty_raw, unit) {
     close(master);
 
     INKWELL_TEST_FAIL_IF(wrong != -EINVAL, "a rate termios has no constant for is refused");
+    INKWELL_TEST_FAIL_IF(slow < 0, "every rate termios has a constant for opens");
     INKWELL_TEST_FAIL_IF(!read_back, "the tty should open at 115200");
     INKWELL_TEST_FAIL_IF((flags & O_NONBLOCK) == 0, "the tty should be non-blocking");
     INKWELL_TEST_FAIL_IF(cfgetospeed(&tio) != B115200, "the rate should be the one asked for");

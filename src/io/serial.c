@@ -20,7 +20,6 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <termios.h>
-#include <time.h>
 #include <unistd.h>
 
 /* usbfs is Linux's. On a Mac the scan reads the I/O Registry instead (serial_iokit.c);
@@ -63,20 +62,18 @@ static const char *sysfs_usb_root(void) {
 #define INKWELL_CDC_REQUEST_TYPE 0x21U
 #define INKWELL_CDC_SET_CONTROL_LINE_STATE 0x22U
 
-/* How long to wait for the generic driver to publish a tty after a new_id write. */
-#define INKWELL_SERIAL_BIND_TIMEOUT_MS 1000U
-#define INKWELL_SERIAL_BIND_POLL_MS 50U
-
-/* usbserial drivers whose ports are worth offering even when the interface class is
-   vendor-specific, which is what the UART-bridge chips report. */
-static const char *const k_serial_drivers[] = {"cp210x",   "ch341",   "ch341-uart",
-                                               "ftdi_sio", "generic", "cdc_acm"};
+/* usbserial drivers whose interfaces are worth offering before their tty has appeared. An
+   interface that has published a tty is a port whichever driver published it; this list is only
+   for the moment before, and for a driver whose tty sits somewhere the scan does not look. */
+static const char *const k_serial_drivers[] = {"cp210x", "ch341",   "ch341-uart", "ftdi_sio",
+                                               "pl2303", "generic", "cdc_acm"};
 
 struct inkwell_serial_mock_state {
     bool enabled;
     struct inkwell_serial_mock_config config;
     size_t bind_calls;
     size_t line_state_calls;
+    unsigned bind_pending_left;
 };
 
 static struct inkwell_serial_mock_state g_mock_state;
@@ -86,25 +83,23 @@ void inkwell_serial_mock_enable(const struct inkwell_serial_mock_config *config)
     g_mock_state.enabled = true;
     if (config != NULL) {
         g_mock_state.config = *config;
+        g_mock_state.bind_pending_left = config->bind_pending_polls;
     } else {
         g_mock_state.config.open_fd = -1;
     }
 }
 
-void inkwell_serial_mock_disable(void) { memset(&g_mock_state, 0, sizeof g_mock_state); }
-
-size_t inkwell_serial_mock_bind_calls(void) { return g_mock_state.bind_calls; }
-
-size_t inkwell_serial_mock_line_state_calls(void) { return g_mock_state.line_state_calls; }
-
-#if defined(__linux__)
-static void serial_sleep_ms(unsigned ms) {
-    struct timespec ts;
-    ts.tv_sec = (time_t)(ms / 1000U);
-    ts.tv_nsec = (long)(ms % 1000U) * 1000000L;
-    (void)nanosleep(&ts, NULL);
+void inkwell_serial_mock_disable(void) {
+    memset(&g_mock_state, 0, sizeof g_mock_state);
 }
-#endif
+
+size_t inkwell_serial_mock_bind_calls(void) {
+    return g_mock_state.bind_calls;
+}
+
+size_t inkwell_serial_mock_line_state_calls(void) {
+    return g_mock_state.line_state_calls;
+}
 
 /* Reads a one-line sysfs attribute with the trailing newline stripped. */
 static int read_sysfs_string(const char *dir, const char *attr, char *out, size_t out_len) {
@@ -232,16 +227,28 @@ static bool split_interface_name(const char *name, char *device_out, size_t devi
  * disagree about which device they were reading.
  */
 struct serial_device_facts {
-    /* bInterfaceNumber of the CDC control interface (class 02 subclass 02), or -1 when this is
-       a UART bridge with nothing to set the line state on. */
+    /* bInterfaceNumber of the CDC control interface (class 02 subclass 02) that goes with the
+       data interface asked about, or -1 when there is none to set the line state on. */
     int control_interface;
+    /* Its sysfs name: cdc_acm publishes the tty under the control interface, not the data one. */
+    char control_name[64];
     /* A mass-storage Bulk-Only interface sits on the same device: this is a UF2 bootloader. */
     bool has_mass_storage;
 };
 
-static void read_device_facts(const char *device_name, struct serial_device_facts *out) {
+/*
+ * `data_number` is the bInterfaceNumber of the CDC-Data interface the facts are for, or -1. A
+ * composite device can carry several CDC functions, and each one's control interface is the one
+ * just below its data interface (0/1, 2/3) - the layout every CDC function descriptor set this
+ * scan has met uses, and the one an Interface Association groups. The first control interface is
+ * the answer only when no such neighbour exists.
+ */
+static void read_device_facts(const char *device_name, long data_number,
+                              struct serial_device_facts *out) {
     out->control_interface = -1;
+    out->control_name[0] = '\0';
     out->has_mass_storage = false;
+    bool paired = false;
 
     DIR *dir = opendir(sysfs_usb_root());
     if (dir == NULL) {
@@ -271,9 +278,13 @@ static void read_device_facts(const char *device_name, struct serial_device_fact
 
         if (iface_class == INKWELL_USB_CLASS_COMM && iface_subclass == INKWELL_USB_SUBCLASS_ACM) {
             unsigned long iface_number = 0U;
-            if (out->control_interface < 0 &&
-                read_sysfs_number(iface_dir, "bInterfaceNumber", 16, &iface_number) == 0) {
+            if (paired || read_sysfs_number(iface_dir, "bInterfaceNumber", 16, &iface_number) < 0) {
+                continue;
+            }
+            paired = data_number >= 0 && (long)iface_number + 1L == data_number;
+            if (paired || out->control_interface < 0) {
                 out->control_interface = (int)iface_number;
+                inkwell_str_copy(out->control_name, sizeof out->control_name, entry->d_name);
             }
             continue;
         }
@@ -350,20 +361,40 @@ size_t inkwell_serial_scan(struct inkwell_serial_port_info *out, size_t capacity
             continue;
         }
 
-        char driver[64] = {0};
-        const bool has_driver = sysfs_driver(iface_dir, driver, sizeof driver);
-        const bool cdc_data = iface_class == INKWELL_USB_CLASS_CDC_DATA;
-        if (!cdc_data && !(has_driver && is_serial_driver(driver))) {
+        /* A CDC control interface is half of a port whose other half is its data interface,
+           which is where the port is reported - even though cdc_acm hangs the tty off this
+           half. */
+        if (iface_class == INKWELL_USB_CLASS_COMM) {
             continue;
         }
 
+        char driver[64] = {0};
+        const bool has_driver = sysfs_driver(iface_dir, driver, sizeof driver);
+        const bool cdc_data = iface_class == INKWELL_USB_CLASS_CDC_DATA;
+        char tty[sizeof out->path] = {0};
+        const bool has_tty = find_interface_tty(iface_dir, tty, sizeof tty);
+        if (!cdc_data && !has_tty && !(has_driver && is_serial_driver(driver))) {
+            continue;
+        }
+
+        unsigned long data_number = 0U;
+        const bool numbered =
+            cdc_data && read_sysfs_number(iface_dir, "bInterfaceNumber", 16, &data_number) == 0;
         struct serial_device_facts facts;
-        read_device_facts(device_name, &facts);
+        read_device_facts(device_name, numbered ? (long)data_number : -1L, &facts);
 
         struct inkwell_serial_port_info *info = &out[count];
         memset(info, 0, sizeof *info);
         inkwell_str_copy(info->id, sizeof info->id, entry->d_name);
-        info->bound = find_interface_tty(iface_dir, info->path, sizeof info->path);
+        info->bound = has_tty;
+        inkwell_str_copy(info->path, sizeof info->path, tty);
+        if (!info->bound && cdc_data && facts.control_name[0] != '\0') {
+            char control_dir[PATH_MAX];
+            if (snprintf(control_dir, sizeof control_dir, "%s/%s", sysfs_usb_root(),
+                         facts.control_name) < (int)sizeof control_dir) {
+                info->bound = find_interface_tty(control_dir, info->path, sizeof info->path);
+            }
+        }
         info->control_interface = facts.control_interface;
         info->needs_line_state =
             info->control_interface >= 0 && (!has_driver || strcmp(driver, "cdc_acm") != 0);
@@ -414,6 +445,11 @@ int inkwell_serial_bind(struct inkwell_serial_port_info *device) {
         if (g_mock_state.config.bind_result < 0) {
             return g_mock_state.config.bind_result;
         }
+        if (!device->bound && g_mock_state.bind_pending_left > 0U) {
+            g_mock_state.bind_pending_left -= 1U;
+            device->bind_requested = true;
+            return -EAGAIN;
+        }
         if (!device->bound) {
             const char *path = g_mock_state.config.bound_path != NULL
                                    ? g_mock_state.config.bound_path
@@ -430,50 +466,52 @@ int inkwell_serial_bind(struct inkwell_serial_port_info *device) {
 #if !defined(__linux__)
     return -ENOTSUP;
 #else
-
-    FILE *new_id = fopen(INKWELL_SERIAL_GENERIC_NEW_ID, "we");
-    if (new_id == NULL) {
-        inkwell_log_warn("serial", "Cannot open %s: %s", INKWELL_SERIAL_GENERIC_NEW_ID,
-                         strerror(errno));
-        return -errno;
-    }
-    /* The generic driver rejects the control interface ("no bulk out") and takes the data one. */
-    const int printed =
-        fprintf(new_id, "%04x %04x\n", (unsigned)device->vendor_id, (unsigned)device->product_id);
-    const int flushed = fclose(new_id);
-    if (printed < 0 || flushed != 0) {
-        inkwell_log_warn("serial", "new_id write for %04x:%04x failed: %s", device->vendor_id,
-                         device->product_id, strerror(errno));
-        return -EIO;
-    }
-    inkwell_log_info("serial", "Bound %04x:%04x to the generic usbserial driver", device->vendor_id,
-                     device->product_id);
-
     char iface_dir[PATH_MAX];
     if (snprintf(iface_dir, sizeof iface_dir, "%s/%s", sysfs_usb_root(), device->id) >=
         (int)sizeof iface_dir) {
         return -ENAMETOOLONG;
     }
 
-    for (unsigned waited = 0U; waited < INKWELL_SERIAL_BIND_TIMEOUT_MS;
-         waited += INKWELL_SERIAL_BIND_POLL_MS) {
-        if (find_interface_tty(iface_dir, device->path, sizeof device->path)) {
-            device->bound = true;
-            device->needs_line_state = device->control_interface >= 0;
-            inkwell_log_info("serial", "%s is now %s", device->id, device->path);
-            return 0;
+    /*
+     * One write, then only looking. The driver publishes the tty when it probes, which is
+     * usually before the write returns and occasionally not - and sleeping here until it does
+     * would stall everything else on the loop, so a caller that gets -EAGAIN asks again later
+     * and decides for itself how long is too long.
+     */
+    if (!device->bind_requested) {
+        FILE *new_id = fopen(INKWELL_SERIAL_GENERIC_NEW_ID, "we");
+        if (new_id == NULL) {
+            inkwell_log_warn("serial", "Cannot open %s: %s", INKWELL_SERIAL_GENERIC_NEW_ID,
+                             strerror(errno));
+            return -errno;
         }
-        serial_sleep_ms(INKWELL_SERIAL_BIND_POLL_MS);
+        /* The generic driver rejects the control interface ("no bulk out") and takes the data
+           one. */
+        const int printed = fprintf(new_id, "%04x %04x\n", (unsigned)device->vendor_id,
+                                    (unsigned)device->product_id);
+        const int flushed = fclose(new_id);
+        if (printed < 0 || flushed != 0) {
+            inkwell_log_warn("serial", "new_id write for %04x:%04x failed: %s", device->vendor_id,
+                             device->product_id, strerror(errno));
+            return -EIO;
+        }
+        device->bind_requested = true;
+        inkwell_log_info("serial", "Bound %04x:%04x to the generic usbserial driver",
+                         device->vendor_id, device->product_id);
     }
 
-    inkwell_log_warn("serial", "No tty appeared for %s after %u ms", device->id,
-                     INKWELL_SERIAL_BIND_TIMEOUT_MS);
-    return -ENODEV;
+    if (!find_interface_tty(iface_dir, device->path, sizeof device->path)) {
+        return -EAGAIN;
+    }
+    device->bound = true;
+    device->needs_line_state = device->control_interface >= 0;
+    inkwell_log_info("serial", "%s is now %s", device->id, device->path);
+    return 0;
 #endif
 }
 
 int inkwell_serial_set_line_state(const struct inkwell_serial_port_info *device, bool dtr,
-                                   bool rts) {
+                                  bool rts) {
     if (device == NULL) {
         return -EINVAL;
     }
@@ -540,12 +578,59 @@ int inkwell_serial_set_line_state(const struct inkwell_serial_port_info *device,
 
 /* The termios constant for a rate, or B0 for one it has none for. */
 static speed_t serial_speed(unsigned baud) {
+    /* POSIX's list, then the higher rates each platform defines for itself. */
     static const struct {
         unsigned baud;
         speed_t speed;
     } k_speeds[] = {
-        {9600U, B9600},     {19200U, B19200},   {38400U, B38400},
-        {57600U, B57600},   {115200U, B115200}, {230400U, B230400},
+        {50U, B50},           {75U, B75},     {110U, B110},   {134U, B134},     {150U, B150},
+        {200U, B200},         {300U, B300},   {600U, B600},   {1200U, B1200},   {1800U, B1800},
+        {2400U, B2400},       {4800U, B4800}, {9600U, B9600}, {19200U, B19200}, {38400U, B38400},
+#ifdef B57600
+        {57600U, B57600},
+#endif
+#ifdef B115200
+        {115200U, B115200},
+#endif
+#ifdef B230400
+        {230400U, B230400},
+#endif
+#ifdef B460800
+        {460800U, B460800},
+#endif
+#ifdef B500000
+        {500000U, B500000},
+#endif
+#ifdef B576000
+        {576000U, B576000},
+#endif
+#ifdef B921600
+        {921600U, B921600},
+#endif
+#ifdef B1000000
+        {1000000U, B1000000},
+#endif
+#ifdef B1152000
+        {1152000U, B1152000},
+#endif
+#ifdef B1500000
+        {1500000U, B1500000},
+#endif
+#ifdef B2000000
+        {2000000U, B2000000},
+#endif
+#ifdef B2500000
+        {2500000U, B2500000},
+#endif
+#ifdef B3000000
+        {3000000U, B3000000},
+#endif
+#ifdef B3500000
+        {3500000U, B3500000},
+#endif
+#ifdef B4000000
+        {4000000U, B4000000},
+#endif
     };
     for (size_t i = 0; i < sizeof k_speeds / sizeof k_speeds[0]; ++i) {
         if (k_speeds[i].baud == baud) {
