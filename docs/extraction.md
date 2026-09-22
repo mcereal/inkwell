@@ -139,17 +139,24 @@ header checks live in `codec/esp_image.h`. Captured release bytes and their code
 with them. The device and release-manifest architecture-name mappings stay in mesh-client,
 which decides whether either flash path applies to a particular device.
 
-### 5. Storage, once there is a seam
+### 5. Durable storage primitives - record-file seam in place
 
-`src/ui/store/store_file.c` (1,522 lines) is two things wound together: a key/value file on a
-card with an append-only record codec, and a model of what a Meshtastic client remembers. The
-first is platform and every application wants it; the second is not. Six application includes say
-it is not ready. The same is true of `store_archive.c` (906 lines, 3).
+`base/record_file.h` now owns the common key/value line reader, escaping, append-and-close,
+and temporary-file replacement. A caller supplies callbacks for writing and reading its own
+records. The snapshot path syncs its bytes before rename; append and archive compaction keep
+their existing close and rename behavior. The reader discards an overlong line as a unit so its
+tail cannot be mistaken for another record.
 
-This is the one worth doing properly rather than quickly, because "a small durable store" is a
-thing an OS offers and a thing every application then depends on. Find the codec seam first -
-probably a record reader/writer over a file, with the field table staying up in the application -
-and move that.
+`store_file.c` and `store_archive.c` use that seam. Their key table, field lists, message codec,
+conversation routing, duplicate folding and retention policy stay in mesh-client: these describe
+what the application remembers, not how the platform keeps bytes. `store_keys.c` delegates text
+escaping to the same codec, leaving the names and bracket shapes in the application. The
+inkwell record-file suite covers replacement, append, escaping and overlong input; mesh-client's
+cache and archive suites cover the application format and behavior.
+
+The archive's targeted message deletion still streams through its own filter and rewrite. Its
+choice of which lines to keep depends on message and reaction fields, so it remains with the
+application until that filter can be expressed without exposing those fields to inkwell.
 
 ## The two questions that blocked several rows
 

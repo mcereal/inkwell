@@ -57,6 +57,7 @@ add_library(inkwell STATIC
     src/base/fd.c
     src/base/file.c
     src/base/log.c
+    src/base/record_file.c
     src/base/text.c
     src/base/time.c
     src/base/version.c
