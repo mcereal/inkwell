@@ -819,6 +819,12 @@ int inkwell_ble_backend_query(struct inkwell_ble_central *central, const char *a
       event.token = ours;
       event.which = which;
       event.value = which == 1U ? (connected && link != nil && link.resolved) : connected;
+      /* Discovery on a link that has already dropped will never finish; say so rather than
+         "not yet", which a caller would wait out to its own deadline. The connected query is the
+         one whose answer is "no". */
+      if (which == 1U && !connected) {
+          event.result = -ENOTCONN;
+      }
       [object post:&event];
     });
     *token = ours;
