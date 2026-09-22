@@ -1082,6 +1082,76 @@ cleanup:
     probe_stop(&probe);
 }
 
+/* A PINGREQ blocked behind a full socket is queued once, not once per loop turn. */
+INKWELL_TEST_CASE(mqtt_client_does_not_repeat_a_blocked_ping, unit) {
+    struct inkwell_loop loop;
+    if (inkwell_loop_init(&loop) != 0) {
+        record_failure(test_name, "the loop did not start");
+        return;
+    }
+    struct inkwell_mqtt_client client;
+    (void)inkwell_mqtt_client_init(&client, &loop);
+
+    int fds[2] = {-1, -1};
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0 ||
+        fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL, 0) | O_NONBLOCK) != 0) {
+        record_failure(test_name, "the socket pair did not start");
+        goto cleanup;
+    }
+
+    const int send_buffer = 4096;
+    (void)setsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &send_buffer, sizeof send_buffer);
+    static const uint8_t fill[4096] = {0U};
+    bool blocked = false;
+    for (unsigned attempt = 0U; attempt < 65536U; ++attempt) {
+        const ssize_t sent = send(fds[0], fill, sizeof fill, MSG_NOSIGNAL);
+        if (sent >= 0) {
+            continue;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            blocked = true;
+        }
+        break;
+    }
+    if (!blocked) {
+        record_failure(test_name, "the client socket did not become backpressured");
+        goto cleanup;
+    }
+
+    client.fd = fds[0];
+    fds[0] = -1; /* the client owns it from here */
+    client.state = INKWELL_MQTT_CLIENT_READY;
+    client.now_ms = 100U;
+    client.last_heard_ms = 100U;
+    client.next_ping_ms = 100U;
+    inkwell_mqtt_client_tick(&client, 100U);
+    const size_t queued = client.out_len;
+    if (queued != 2U || client.next_ping_ms <= client.now_ms) {
+        record_failure(test_name, "the blocked PINGREQ was not queued and rescheduled");
+        goto cleanup;
+    }
+
+    inkwell_mqtt_client_tick(&client, 101U);
+    if (client.out_len != queued || !inkwell_mqtt_client_is_ready(&client)) {
+        record_failure(test_name, "a second tick duplicated the blocked PINGREQ");
+        goto cleanup;
+    }
+    record_success(test_name);
+
+cleanup:
+    if (fds[0] >= 0) {
+        close(fds[0]);
+    }
+    if (fds[1] >= 0) {
+        close(fds[1]);
+    }
+    inkwell_mqtt_client_shutdown(&client);
+    inkwell_loop_shutdown(&loop);
+}
+
 /*
  * A broker that stops answering without closing anything.
  *

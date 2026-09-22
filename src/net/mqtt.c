@@ -1209,8 +1209,16 @@ void inkwell_mqtt_client_tick(struct inkwell_mqtt_client *proxy, uint64_t now_ms
     if (proxy->next_ping_ms != 0U && now_ms >= proxy->next_ping_ms) {
         uint8_t packet[2];
         const int len = inkwell_mqtt_encode_empty(packet, sizeof packet, INKWELL_MQTT_PINGREQ);
-        if (len > 0 && mqtt_queue(proxy, packet, (size_t)len) < 0) {
-            mqtt_fail_net(proxy, INKWELL_NET_CLOSED, 0);
+        if (len > 0) {
+            if (mqtt_queue(proxy, packet, (size_t)len) < 0) {
+                mqtt_fail_net(proxy, INKWELL_NET_CLOSED, 0);
+                return;
+            }
+            /* A queued ping is already this interval's keepalive even when the socket took no
+               bytes. Without advancing here, every tick while the socket is backpressured
+               appends another PINGREQ behind the first and eventually mistakes a full queue for
+               a dead connection. mqtt_flush() moves this deadline again when bytes do leave. */
+            proxy->next_ping_ms = now_ms + INKWELL_MQTT_CLIENT_PING_INTERVAL_MS;
         }
     }
 }
