@@ -6,13 +6,16 @@ says how to work in it.
 ## The one-paragraph version
 
 inkwell is the systems layer under [inkcell](https://github.com/mcereal/inkcell). C17, Linux
-(and macOS as a development host), no threads, one loop - epoll on Linux, kqueue on macOS. Four areas: `base/` (the leaves), `runtime/` (the loop, the
-signals, the crash report), `codec/` (bytes in, bytes out), `net/` (one hostname, one socket,
-one TLS session, one request). Arrows point down and `scripts/check-layers.py` holds them
-there. `make test` before every push.
+(and macOS as a development host), no threads, one loop - epoll on Linux, kqueue on macOS. Five
+areas: `base/` (the leaves), `runtime/` (the loop, the signals, the crash report), `codec/`
+(bytes in, bytes out), `net/` (one hostname, one socket, one TLS session, one request), `ble/`
+(one Bluetooth LE central). Arrows point down and `scripts/check-layers.py` holds them there.
+`make test` before every push.
 
-One optional dependency: Mbed TLS, a submodule. Without it `net/tls.h` refuses every session and
-everything else builds and tests exactly as it does with it.
+Two optional dependencies, both optional by presence. Mbed TLS is a submodule; without it
+`net/tls.h` refuses every session. libdbus-1 is a system package on Linux; without it
+`ble/central.h` refuses every call with -ENOSYS. Either way everything else builds and tests
+exactly as it does with it.
 
 ## Layout
 
@@ -74,10 +77,11 @@ header's source by *filename*, never by path.
   is both an unreadable diff and a digest mismatch, and it happened once. The same applies to
   `third_party/mbedtls`, where the pinned SHA is what a digest is for a vendored file; the
   configuration of it next door in `third_party/mbedtls-config/` is ours and is edited freely.
-- **A dependency may not be compulsory.** Mbed TLS is the only submodule here and `net/tls.c`
-  compiles to a refusing stub without it, so a plain `git clone` is still a complete, buildable,
-  testable inkwell. CI has a job that builds that way, because the claim is worth nothing if
-  nobody checks it. A second dependency, if it ever arrives, arrives the same way.
+- **A dependency may not be compulsory.** `net/tls.c` compiles to a refusing stub without the
+  Mbed TLS submodule, and `ble/none.c` stands in for BlueZ without libdbus-1, so a plain
+  `git clone` on a bare machine is still a complete, buildable, testable inkwell. CI has a job
+  that builds that way, because the claim is worth nothing if nobody checks it. A third
+  dependency, if it ever arrives, arrives the same way.
 
 ## Extracting something from mesh-client
 

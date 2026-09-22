@@ -44,6 +44,7 @@ Three questions, in this order.
 | `net/stream.h` | `mesh/transport/stream_link.h` | the frame parser, the session it feeds, and the two numbers that size the outbound queue |
 | `net/tls.h` | `mesh/core/tls_client.h` | which roots to trust, and where they came from - a generated table compiled into a binary is one product's answer to shipping without a certificate store |
 | `net/fetch.h` | `mesh/core/fetch.h` | the product's name and version, sent as `User-Agent`, and every state machine that decides what to do with what came back |
+| `ble/central.h` | `mesh/transport/ble_bluez.h` | the five service and characteristic UUIDs one firmware publishes, the lookup of all four at once, and every policy about when to scan, connect, pair and give up |
 
 ## Next, in the order the dependencies allow
 
@@ -101,19 +102,20 @@ which is not:
 Neither is urgent and neither is blocked. A handheld OS wants "open the serial device at this
 path with these settings" long before it wants a transport registry.
 
-### 3. BlueZ
+### 3. BlueZ - done, as `ble/central.h`
 
-`src/transport/ble/bluez_client.c` is 2,980 lines and includes exactly one application header -
-its own, which includes none. Re-measured against the corrected test above, including what the
-source calls: no `mesh_session_*`, no `mesh_app_*`, no `mesh_ui_*`, anywhere in it. Everything
-in it is D-Bus, BlueZ object paths, GATT characteristics and a pairing agent.
-It is the largest single piece of platform still sitting in the application, and for a handheld
-OS it is the most valuable: nothing else in the tree is a reusable Bluetooth stack.
+The BlueZ client came down as a new area, `ble/`, and it came down as an interface rather than as
+a file move. The old header named a device by its BlueZ object path, and the application built
+those paths itself (`<adapter>/dev_AA_BB_...`) - which is one stack's vocabulary leaking through
+every call. `ble/central.h` names a peripheral by its *address* and a characteristic by an opaque
+*handle*, so the object path is now a detail of `src/ble/bluez.c`.
 
-The seam is already described in mesh-client's own CLAUDE.md: the general client comes down here,
-and a lookup by one well-known service UUID stays up there. `include/mesh/transport/ble_bluez.h`
-is the file to split - it carries the generic client next to five Meshtastic UUID constants and a
-struct named after them.
+That is what makes a second backend possible at all. macOS's CoreBluetooth has no object paths
+and never reveals a hardware address - it names a peripheral by a UUID of its own - so the
+interface had to stop assuming either before one could be written. `central.c` holds everything
+that is the same on every stack (the argument checks, the request bookkeeping and deadlines, the
+test mock), and a backend is linked in at build time: `bluez.c` where libdbus-1 was found,
+`none.c` everywhere else. CoreBluetooth is the next one.
 
 ### 4. Binary formats
 

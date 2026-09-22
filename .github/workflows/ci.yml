@@ -29,13 +29,14 @@ jobs:
             cc: clang
             args: "-DINKWELL_ENABLE_ASAN=ON -DINKWELL_ENABLE_UBSAN=ON"
             submodules: recursive
-          # The same tree with no submodules at all, which is what `git clone` on its own gives
-          # and therefore what somebody evaluating this gets. Mbed TLS is the only optional
-          # dependency here and net/tls.c compiles to a stub without it, so this job holds the
-          # claim that the stub is real: it builds, it links, and every case that is not about
-          # TLS still runs. Without it that claim would be checked by nobody, and the first
-          # person to find out would be the one who cloned.
-          - name: no TLS (gcc)
+          # The same tree with no optional dependency at all: no submodules, which is what
+          # `git clone` on its own gives, and no libdbus-1 headers. Mbed TLS and D-Bus are the
+          # two optional dependencies here, and net/tls.c and ble/none.c are the stubs that
+          # stand in for them, so this job holds the claim that the stubs are real: it builds,
+          # it links, and every case that is not about TLS or BlueZ still runs. Without it that
+          # claim would be checked by nobody, and the first person to find out would be the one
+          # who cloned.
+          - name: no optional dependencies (gcc)
             cc: gcc
             args: ""
             submodules: ""
@@ -56,6 +57,12 @@ jobs:
       # libclang_rt.asan-x86_64.a rather than at anything to do with this code.
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y ninja-build clang libclang-rt-18-dev
+
+      # libdbus-1-dev is the BlueZ backend; dbus provides dbus-run-session, which the backend's
+      # D-Bus test runs under so that it can never find the system bus.
+      - name: Install D-Bus
+        if: matrix.submodules == 'recursive'
+        run: sudo apt-get install -y libdbus-1-dev dbus
 
       - name: Configure
         env:

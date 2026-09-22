@@ -83,6 +83,9 @@ add_library(inkwell STATIC
     src/net/resolve.c
     src/net/stream.c
     src/net/tls.c
+    # ble: a Bluetooth LE central over whichever stack the system has. The backend is added
+    # below, once the build knows which one that is.
+    src/ble/central.c
 )
 
 # Wuffs, for codec/png.c and codec/inflate.c. See third_party/wuffs/README.md for what it is and
@@ -185,6 +188,39 @@ else()
         "session and net/fetch.h reports itself unavailable. "
         "Run `git submodule update --init --recursive` to enable it.")
 endif()
+
+# The Bluetooth stack under ble/central.h, chosen here because a process has exactly one.
+#
+# On Linux that is BlueZ, reached over D-Bus, and optional by presence exactly as Mbed TLS is:
+# with libdbus-1's headers the BlueZ backend is built, without them none.c is, and every call
+# refuses with -ENOSYS - so a Linux box with no D-Bus development package still builds, links
+# and tests everything else, and a consumer reports Bluetooth unavailable rather than failing
+# to compile. On macOS nothing else compiles here yet and none.c stands in.
+#
+# PRIVATE, like Wuffs: ble/central.h says nothing in D-Bus's vocabulary, and a consumer has no
+# reason to reach libdbus through this target.
+set(INKWELL_BLE_BACKEND none)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(INKWELL_DBUS QUIET dbus-1)
+    endif()
+    if(INKWELL_DBUS_FOUND)
+        set(INKWELL_BLE_BACKEND bluez)
+        target_include_directories(inkwell PRIVATE ${INKWELL_DBUS_INCLUDE_DIRS})
+        # By name and directory rather than by the full path pkg-config resolves: a static
+        # device build passes -static and a cross prefix, and a resolved path to a shared
+        # libdbus-1 would defeat both where the bare name lets the linker pick the archive.
+        target_link_libraries(inkwell PRIVATE ${INKWELL_DBUS_LIBRARIES})
+        target_link_directories(inkwell INTERFACE ${INKWELL_DBUS_LIBRARY_DIRS})
+    else()
+        message(STATUS
+            "libdbus-1 is missing: building inkwell without a Bluetooth stack, so every call in "
+            "ble/central.h refuses with -ENOSYS. Install libdbus-1-dev to enable BlueZ.")
+    endif()
+endif()
+target_sources(inkwell PRIVATE src/ble/${INKWELL_BLE_BACKEND}.c)
+target_compile_definitions(inkwell PUBLIC INKWELL_BLE_BACKEND_${INKWELL_BLE_BACKEND})
 
 if(INKWELL_BUILD_TESTS)
     enable_testing()
