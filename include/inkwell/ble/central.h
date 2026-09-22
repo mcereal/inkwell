@@ -40,10 +40,13 @@
  * after its request was timed out or cancelled is discarded rather than completing whatever was
  * asked next.
  *
+ * Discovery on and off, a disconnect and set_trusted() are sent and not waited for: 0 means
+ * the stack was asked, and a refusal that comes back later is logged, not returned.
+ *
  * Some calls do block the loop, each for a bounded time: the first adapter, device or
  * characteristic lookup after the stack starts (one second - later ones read a copy the stack
- * keeps current), discovery on or off and a disconnect (five), and on BlueZ a subscribe (eight,
- * because StartNotify may start a bond). They are marked where they are declared.
+ * keeps current), and on BlueZ a subscribe (eight, because StartNotify may start a bond). They
+ * are marked where they are declared.
  *
  * Only one of each kind of request is in flight at a time - one read, one write, one connect,
  * one pair - which is what a single link needs and what keeps the bookkeeping here a handful of
@@ -203,6 +206,7 @@ void inkwell_ble_close(struct inkwell_ble_central *central);
 int inkwell_ble_check_ready(struct inkwell_ble_central *central);
 /* Picks the adapter to use and names it in `name`, for a log. -ENODEV when there is none. */
 int inkwell_ble_find_adapter(struct inkwell_ble_central *central, char *name, size_t name_len);
+/* Sent, not waited for. -ENETDOWN at once when the stack already knows the adapter is off. */
 int inkwell_ble_start_discovery(struct inkwell_ble_central *central);
 int inkwell_ble_stop_discovery(struct inkwell_ble_central *central);
 /* Every peripheral the stack holds that advertises `service_uuid`, compared without regard to
@@ -219,6 +223,7 @@ int inkwell_ble_connect_begin(struct inkwell_ble_central *central, const char *a
 int inkwell_ble_connect_poll(struct inkwell_ble_central *central, int *out_result);
 /* Forgets an in-flight connect (a late reply is then ignored). Safe when none is pending. */
 void inkwell_ble_connect_cancel(struct inkwell_ble_central *central);
+/* Sent, not waited for. */
 int inkwell_ble_disconnect(struct inkwell_ble_central *central, const char *address);
 
 /* Starts a pair and returns at once. -EBUSY if one is already in flight. Where the stack pairs
@@ -230,8 +235,8 @@ int inkwell_ble_pair_poll(struct inkwell_ble_central *central, int *out_result);
 /* Abandons an in-flight pair: rejects whatever the agent is holding and asks the stack to
    cancel. */
 void inkwell_ble_pair_cancel(struct inkwell_ble_central *central);
-/* Marks the peripheral trusted, so the stack reconnects to it without asking again. A no-op
-   where the stack has no such notion. */
+/* Marks the peripheral trusted, so the stack reconnects to it without asking again. Sent, not
+   waited for; a no-op where the stack has no such notion. */
 int inkwell_ble_set_trusted(struct inkwell_ble_central *central, const char *address, bool trusted);
 /* Drops the bond and everything the stack remembers about the peripheral. -ENOTSUP where an
    application may not (on macOS only System Settings can forget a device). */
@@ -312,9 +317,9 @@ void inkwell_ble_set_notification_handler(struct inkwell_ble_central *central,
  */
 struct inkwell_ble_mock_config {
     /*
-     * Routes the backend-specific half - reads, writes, property queries, and the adapter,
-     * device and characteristic lookups - to a real backend on this bus instead of the script,
-     * with everything else still scripted. BlueZ
+     * Routes the backend-specific half - reads, writes, property queries, the adapter, device
+     * and characteristic lookups, discovery, disconnect and trust - to a real backend on this
+     * bus instead of the script, with everything else still scripted. BlueZ
      * only: it exists so the D-Bus marshalling and the reply bookkeeping can be tested against
      * a fake org.bluez on an isolated bus under dbus-run-session. Never the system bus.
      */
