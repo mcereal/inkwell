@@ -89,6 +89,7 @@ add_library(inkwell STATIC
     src/net/tls.c
     # io: the USB serial ports the system has, and a tty opened raw on the loop's terms
     src/io/serial.c
+    src/io/usb_storage.c
     # ble: a Bluetooth LE central over whichever stack the system has. The backend is added
     # below, once the build knows which one that is.
     src/ble/central.c

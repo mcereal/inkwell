@@ -30,6 +30,7 @@ set(INKWELL_TEST_SUITES
     suites/codec_uf2.c
     suites/codec_zip.c
     suites/io_serial.c
+    suites/io_usb_storage.c
     suites/net_fetch.c
     suites/net_mqtt.c
     suites/net_reason.c

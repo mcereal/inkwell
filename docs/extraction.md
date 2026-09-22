@@ -47,6 +47,7 @@ Three questions, in this order.
 | `net/fetch.h` | `mesh/core/fetch.h` | the product's name and version, sent as `User-Agent`, and every state machine that decides what to do with what came back |
 | `net/mqtt.h` | `mesh/core/mqtt_proxy.h` | Meshtastic's broker defaults, client-id derivation, channel filters, publish policy, and the translated state/failure tables |
 | `io/serial.h` | `mesh/transport/serial_usb.h` | which ports are a radio and which a bootloader, the rate one firmware talks at, and the transport that connects to one |
+| `io/usb_storage.h` | `mesh/transport/usb_msc.h` | bootloader selection, UF2 validation, transfer timing, and the meaning of an early device reset |
 | `ble/central.h` | `mesh/transport/ble_bluez.h` | the five service and characteristic UUIDs one firmware publishes, the lookup of all four at once, and every policy about when to scan, connect, pair and give up |
 
 ## Next, in the order the dependencies allow
@@ -108,6 +109,13 @@ makes it. The TCP half is now `net/tcp.h`: it resolves a host, opens and tunes a
 socket, enforces the caller's connect deadline, and hands the connected descriptor up. It does
 not parse an application's target string, remember where to reconnect, or know what protocol
 will own that descriptor.
+
+USB mass storage has come down as `io/usb_storage.h`: it finds the block device belonging to
+a serial port's USB device, lists and unmounts its mountpoints, opens it exclusively, and writes
+bytes from a forked child with synced progress. The application still selects the bootloader,
+stages and checks the UF2 image, chooses when to start, and interprets an early device restart.
+The discovery and writer fixtures live in inkwell; mesh-client retains the end-to-end firmware
+handover tests.
 
 ### 3. BlueZ - done, as `ble/central.h`
 
