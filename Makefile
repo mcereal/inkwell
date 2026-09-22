@@ -27,7 +27,7 @@ test: debug
 # It is a variable, and `format-check` exists, because the workflow used to carry its own copy
 # of this list - so the exclusion landed here and CI went on checking the vendored file and
 # failed. One list, two targets, and nothing to keep in step.
-FORMAT_FILES = $$(git ls-files '*.c' '*.h' ':!:third_party/*')
+FORMAT_FILES = $$(git ls-files '*.c' '*.h' '*.m' ':!:third_party/*')
 CLANG_FORMAT ?= clang-format
 
 format:

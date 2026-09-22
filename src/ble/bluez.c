@@ -45,6 +45,9 @@
  */
 #define INKWELL_BLUEZ_ADAPTER_TIMEOUT_MS 5000
 
+/* A bond is made before a link is used (pair_begin), so a write has nothing to wait behind. */
+const unsigned inkwell_ble_backend_write_timeout_ms = 3000U;
+
 struct bluez_watch {
     DBusWatch *watch;
     int fd;

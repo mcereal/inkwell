@@ -17,9 +17,8 @@
 
 /* A read that has had no answer in this long is abandoned. */
 #define INKWELL_BLE_READ_TIMEOUT_MS 3000U
-#define INKWELL_BLE_WRITE_TIMEOUT_MS 3000U
 /*
- * Generous on purpose, and deliberately unlike the two above.
+ * Generous on purpose, and deliberately unlike the read's.
  *
  * This bounds an *asynchronous* property query. Nothing waits on the answer, so the deadline
  * does not decide how responsive anything is - it only decides when a request whose reply may
@@ -970,7 +969,7 @@ int inkwell_ble_write(struct inkwell_ble_central *central, const char *handle, c
     if (request->state != 0) {
         return pending_take(request);
     }
-    int result = pending_start(central, request, INKWELL_BLE_WRITE_TIMEOUT_MS);
+    int result = pending_start(central, request, inkwell_ble_backend_write_timeout_ms);
     if (result < 0) {
         return result;
     }

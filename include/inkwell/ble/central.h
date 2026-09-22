@@ -72,7 +72,8 @@ struct inkwell_ble_device {
     int16_t rssi;
     /* The stack holds a bond with it. A peripheral that encrypts its characteristics answers
        a subscribe with "not paired" until it has one, so a caller needs to be able to say so
-       before the user presses connect. */
+       before the user presses connect. Always true on CoreBluetooth, which bonds on demand
+       with a dialog of its own and never says whether it has: there is no pair step to take. */
     bool paired;
     /*
      * Whether the stack heard the peripheral in the current scan, which is the only evidence
@@ -219,8 +220,9 @@ int inkwell_ble_connect_poll(struct inkwell_ble_central *central, int *out_resul
 void inkwell_ble_connect_cancel(struct inkwell_ble_central *central);
 int inkwell_ble_disconnect(struct inkwell_ble_central *central, const char *address);
 
-/* Starts a pair and returns at once. -EBUSY if one is already in flight; -ENOTSUP where the
-   stack pairs on its own (CoreBluetooth bonds when an encrypted characteristic is first used). */
+/* Starts a pair and returns at once. -EBUSY if one is already in flight. Where the stack pairs
+   on its own (CoreBluetooth bonds when an encrypted characteristic is first used) there is
+   nothing to start, and the pair simply finishes on the next turn. */
 int inkwell_ble_pair_begin(struct inkwell_ble_central *central, const char *address);
 /* As connect_poll(). */
 int inkwell_ble_pair_poll(struct inkwell_ble_central *central, int *out_result);

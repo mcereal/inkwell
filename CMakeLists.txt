@@ -195,18 +195,30 @@ endif()
 # with libdbus-1's headers the BlueZ backend is built, without them none.c is, and every call
 # refuses with -ENOSYS - so a Linux box with no D-Bus development package still builds, links
 # and tests everything else, and a consumer reports Bluetooth unavailable rather than failing
-# to compile. On macOS nothing else compiles here yet and none.c stands in.
+# to compile.
 #
-# PRIVATE, like Wuffs: ble/central.h says nothing in D-Bus's vocabulary, and a consumer has no
-# reason to reach libdbus through this target.
+# On macOS it is CoreBluetooth, which is always there. That backend is Objective-C - the only
+# file in inkwell that is - built with ARC, and the one place a second thread exists: the
+# framework's own dispatch queue, which src/ble/corebluetooth.m keeps to copies and a wake.
+#
+# PRIVATE, like Wuffs: ble/central.h says nothing in D-Bus's or CoreBluetooth's vocabulary, and a
+# consumer has no reason to reach either through this target.
 set(INKWELL_BLE_BACKEND none)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+set(INKWELL_BLE_BACKEND_SOURCE src/ble/none.c)
+if(APPLE)
+    enable_language(OBJC)
+    set(INKWELL_BLE_BACKEND corebluetooth)
+    set(INKWELL_BLE_BACKEND_SOURCE src/ble/corebluetooth.m)
+    set_source_files_properties(src/ble/corebluetooth.m PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(inkwell PRIVATE "-framework CoreBluetooth" "-framework Foundation")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
         pkg_check_modules(INKWELL_DBUS QUIET dbus-1)
     endif()
     if(INKWELL_DBUS_FOUND)
         set(INKWELL_BLE_BACKEND bluez)
+        set(INKWELL_BLE_BACKEND_SOURCE src/ble/bluez.c)
         target_include_directories(inkwell PRIVATE ${INKWELL_DBUS_INCLUDE_DIRS})
         # By name and directory rather than by the full path pkg-config resolves: a static
         # device build passes -static and a cross prefix, and a resolved path to a shared
@@ -219,7 +231,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             "ble/central.h refuses with -ENOSYS. Install libdbus-1-dev to enable BlueZ.")
     endif()
 endif()
-target_sources(inkwell PRIVATE src/ble/${INKWELL_BLE_BACKEND}.c)
+target_sources(inkwell PRIVATE ${INKWELL_BLE_BACKEND_SOURCE})
 target_compile_definitions(inkwell PUBLIC INKWELL_BLE_BACKEND_${INKWELL_BLE_BACKEND})
 
 if(INKWELL_BUILD_TESTS)

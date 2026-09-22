@@ -10,8 +10,8 @@
  * has expired; it records the token its stack will reply under, and when the reply comes in it
  * matches it against the central's tokens and calls one of the completion helpers below.
  *
- * Exactly one backend is linked: bluez.c where D-Bus was found, and none.c everywhere else. Each
- * defines every function in the second half of this file.
+ * Exactly one backend is linked: bluez.c where D-Bus was found on Linux, corebluetooth.m on
+ * macOS, and none.c everywhere else. Each defines every function in the second half of this file.
  */
 
 #include "inkwell/ble/central.h"
@@ -28,6 +28,11 @@ void inkwell_ble_pair_finish(struct inkwell_ble_central *central, int result);
 void inkwell_ble_notify(struct inkwell_ble_central *central, const uint8_t *data, size_t len);
 
 /* ---- the backend, for central.c ---------------------------------------------------------- */
+
+/* How long a write may go unanswered. The stack's to say, because what a write can wait behind
+   differs: BlueZ bonds up front, CoreBluetooth encrypts a link on first use and may hold a
+   write while it does - or while the user answers its pairing dialog. */
+extern const unsigned inkwell_ble_backend_write_timeout_ms;
 
 /* `private_connection` and `bus_address` as inkwell_ble_open_private() and the mock's
    bus_address describe; a backend with no such notion ignores both. Allocates
