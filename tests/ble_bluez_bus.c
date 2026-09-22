@@ -439,6 +439,83 @@ static const char *test_sent_not_waited(DBusConnection *server, struct inkwell_l
     return NULL;
 }
 
+static void notified(const uint8_t *data, size_t len, void *userdata) {
+    (void)data;
+    if (len > 0U)
+        ++*(unsigned *)userdata;
+}
+
+/* A value on `path`, as bluetoothd sends a notification. */
+static void emit_value(DBusConnection *server, const char *path) {
+    DBusMessage *signal =
+        dbus_message_new_signal(path, "org.freedesktop.DBus.Properties", "PropertiesChanged");
+    const char *interface = "org.bluez.GattCharacteristic1";
+    const char *key = "Value";
+    const uint8_t bytes[] = {0x2a};
+    const uint8_t *ptr = bytes;
+    DBusMessageIter iter, changed, entry, variant, array, invalidated;
+    dbus_message_iter_init_append(signal, &iter);
+    dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &interface);
+    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sv}", &changed);
+    dbus_message_iter_open_container(&changed, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
+    dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &key);
+    dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "ay", &variant);
+    dbus_message_iter_open_container(&variant, DBUS_TYPE_ARRAY, "y", &array);
+    dbus_message_iter_append_fixed_array(&array, DBUS_TYPE_BYTE, &ptr, (int)sizeof bytes);
+    dbus_message_iter_close_container(&variant, &array);
+    dbus_message_iter_close_container(&entry, &variant);
+    dbus_message_iter_close_container(&changed, &entry);
+    dbus_message_iter_close_container(&iter, &changed);
+    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "s", &invalidated);
+    dbus_message_iter_close_container(&iter, &invalidated);
+    emit(server, signal);
+}
+
+/*
+ * StartNotify is sent and not waited for - the agent it can set off is answered by the same loop
+ * - and answers -EAGAIN until the reply: a refusal as the errno BlueZ's words map to, a success
+ * as 0, after which the characteristic's values reach the handler.
+ */
+static const char *test_subscribe(DBusConnection *server, struct inkwell_loop *loop,
+                                  struct inkwell_ble_central *client) {
+    unsigned values = 0U;
+    inkwell_ble_set_notification_handler(client, notified, &values);
+    const char *failure = NULL;
+    for (unsigned pass = 0U; pass < 2U && failure == NULL; ++pass) {
+        if (inkwell_ble_subscribe(client, CHARACTERISTIC_PATH) != -EAGAIN) {
+            failure = "subscribe did not yield";
+            break;
+        }
+        DBusMessage *call = request_named(server, loop, "StartNotify");
+        if (call == NULL || inkwell_ble_subscribe(client, CHARACTERISTIC_PATH) != -EAGAIN) {
+            failure = "StartNotify never reached the fake, or was answered without it";
+            if (call != NULL)
+                dbus_message_unref(call);
+            break;
+        }
+        DBusMessage *reply =
+            pass == 0U ? dbus_message_new_error(call, "org.bluez.Error.Failed", "Not paired")
+                       : dbus_message_new_method_return(call);
+        dbus_message_unref(call);
+        emit(server, reply);
+        int result = -EAGAIN;
+        for (unsigned turn = 0U; turn < 100U && result == -EAGAIN; ++turn) {
+            inkwell_loop_run(loop, 1);
+            result = inkwell_ble_subscribe(client, CHARACTERISTIC_PATH);
+        }
+        if (result != (pass == 0U ? -EACCES : 0))
+            failure = "the StartNotify reply was not returned as the right errno";
+    }
+    if (failure == NULL) {
+        emit_value(server, CHARACTERISTIC_PATH);
+        settle(server, loop, client);
+        if (values != 1U)
+            failure = "a value on the subscribed characteristic did not reach the handler";
+    }
+    inkwell_ble_set_notification_handler(client, NULL, NULL);
+    return failure;
+}
+
 /*
  * The default agent is asked about every pairing on the host, not only ours. A RequestPasskey for
  * a device this central is not pairing must be refused on the bus and never become a prompt.
@@ -586,6 +663,9 @@ int main(void) {
         failure = test_sent_not_waited(server, &loop, &client);
     }
     if (failure == NULL) {
+        failure = test_subscribe(server, &loop, &client);
+    }
+    if (failure == NULL) {
         failure = client_name[0] != '\0'
                       ? test_agent_refuses_strangers(server, &loop, &client, client_name)
                       : "never learned the central's bus name";
@@ -603,6 +683,6 @@ int main(void) {
         return 1;
     }
     puts("Isolated D-Bus: nonblocking send, input responsiveness, reply parsing, timeout and "
-         "agent ownership, object tree, unwaited calls passed.");
+         "agent ownership, object tree, unwaited calls, subscribe passed.");
     return 0;
 }

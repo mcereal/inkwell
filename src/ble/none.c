@@ -11,6 +11,7 @@
  */
 
 const unsigned inkwell_ble_backend_write_timeout_ms = 3000U;
+const unsigned inkwell_ble_backend_subscribe_timeout_ms = 3000U;
 
 int inkwell_ble_backend_open(struct inkwell_ble_central *central, bool private_connection,
                              const char *bus_address) {
@@ -163,9 +164,11 @@ int inkwell_ble_backend_mtu(struct inkwell_ble_central *central, const char *han
     return -ENOSYS;
 }
 
-int inkwell_ble_backend_subscribe(struct inkwell_ble_central *central, const char *handle) {
+int inkwell_ble_backend_subscribe(struct inkwell_ble_central *central, const char *handle,
+                                  uint32_t *token) {
     (void)central;
     (void)handle;
+    (void)token;
     return -ENOSYS;
 }
 

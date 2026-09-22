@@ -45,8 +45,7 @@
  *
  * Some calls do block the loop, each for a bounded time: the first adapter, device or
  * characteristic lookup after the stack starts (one second - later ones read a copy the stack
- * keeps current), and on BlueZ a subscribe (eight, because StartNotify may start a bond). They
- * are marked where they are declared.
+ * keeps current), and on BlueZ the MTU lookup (one second) and forget (five).
  *
  * Only one of each kind of request is in flight at a time - one read, one write, one connect,
  * one pair - which is what a single link needs and what keeps the bookkeeping here a handful of
@@ -149,8 +148,8 @@ struct inkwell_ble_central {
     void (*requests_ready)(void *userdata);
     void *userdata;
 
-    /* [0] write, [1] services-resolved, [2] connected. */
-    struct inkwell_ble_pending requests[3];
+    /* [0] write, [1] services-resolved, [2] connected, [3] subscribe. */
+    struct inkwell_ble_pending requests[4];
     uint32_t read_token;
     int read_state; /* 0 idle, 1 pending, 2 done */
     int read_result;
@@ -165,6 +164,8 @@ struct inkwell_ble_central {
     inkwell_ble_notification_callback notification_callback;
     void *notification_userdata;
     char notify_handle[INKWELL_BLE_HANDLE_MAX];
+    /* The characteristic a subscribe in flight is for; notify_handle once it is confirmed. */
+    char subscribe_handle[INKWELL_BLE_HANDLE_MAX];
 
     uint32_t connect_token;
     int connect_state; /* 0 idle, 1 pending, 2 done (see connect_result) */
@@ -281,8 +282,16 @@ int inkwell_ble_find_characteristic(struct inkwell_ble_central *central, const c
  */
 int inkwell_ble_characteristic_mtu(struct inkwell_ble_central *central, const char *handle,
                                    uint16_t *out_mtu);
-/* Turns on notifications from one characteristic; each arrives at the notification handler.
-   One subscription at a time. */
+/*
+ * Turns on notifications from one characteristic; each arrives at the notification handler.
+ * One subscription at a time.
+ *
+ * As write(): starts it and answers -EAGAIN, and later calls answer -EAGAIN until the stack has
+ * confirmed, then 0 or a negative errno - -EACCES when the peripheral wants a bond first. It
+ * waits on a peripheral that may start a pairing to answer, and that may put a question in front
+ * of the user, so the deadline is the stack's: eight seconds on BlueZ, thirty on CoreBluetooth,
+ * where the answer can be behind macOS's pairing dialog.
+ */
 int inkwell_ble_subscribe(struct inkwell_ble_central *central, const char *handle);
 /* A write with response. Starts it and answers -EAGAIN; later calls answer -EAGAIN until the
    reply is in and then return it, 0 or a negative errno. A caller keeps what it is writing at
@@ -358,6 +367,8 @@ struct inkwell_ble_mock_config {
     unsigned *agent_register_calls;
     int write_result;
     int subscribe_result;
+    /* Subscribe calls that answer -EAGAIN before one answers subscribe_result. */
+    unsigned subscribe_pending_polls;
     /* services_resolved() polls that report false before the mock flips to true (0 = resolved
        on the first poll, i.e. the stack had the GATT database cached). */
     unsigned services_resolved_after_polls;

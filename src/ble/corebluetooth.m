@@ -57,9 +57,9 @@ const unsigned inkwell_ble_backend_write_timeout_ms = 30000U;
 
 /* How long a peripheral stays "in range" after it was last heard. */
 #define CB_IN_RANGE_MS 15000U
-/* How long subscribe() waits for the stack to confirm. Bounded, like BlueZ's StartNotify: an
-   encrypted characteristic answers at once with an error while macOS asks the user. */
-#define CB_SUBSCRIBE_TIMEOUT_MS 8000U
+/* How long a subscribe may go unanswered. As a write's: turning notifications on is a write to
+   the peripheral, and on an encrypted characteristic it can wait on macOS's pairing dialog. */
+const unsigned inkwell_ble_backend_subscribe_timeout_ms = 30000U;
 
 enum cb_event_kind {
     CB_EVENT_CONNECT,
@@ -67,6 +67,7 @@ enum cb_event_kind {
     CB_EVENT_WRITE,
     CB_EVENT_READ,
     CB_EVENT_QUERY,
+    CB_EVENT_SUBSCRIBE,
     CB_EVENT_NOTIFY,
     CB_EVENT_LOG_INFO, /* `data` is the line */
     CB_EVENT_LOG_WARN,
@@ -206,11 +207,16 @@ static IWPending *retire(NSMutableArray<IWPending *> *queue, CBCharacteristic *c
 @property(nonatomic, strong) NSMutableDictionary<NSUUID *, IWLink *> *links;
 @property(nonatomic, strong) NSMutableArray<NSData *> *events;
 @property(nonatomic, strong) CBCharacteristic *notifying;
-@property(nonatomic, strong) dispatch_semaphore_t subscribeDone;
-@property(nonatomic) int subscribeResult;
+/* The subscribe in flight: its characteristic and the token its answer is posted under. */
+@property(nonatomic, strong) CBCharacteristic *subscribing;
+@property(nonatomic) uint32_t subscribeToken;
+/* The token of the subscribe that turned `notifying` on, so one the central has already given
+   up on can be turned back off. */
+@property(nonatomic) uint32_t notifyingToken;
 @property(nonatomic) BOOL scanning;
 @property(nonatomic) BOOL closed;
 @property(nonatomic) int wakeFd;
+- (void)finishSubscribe:(int)result;
 @end
 
 @implementation IWCentral
@@ -454,17 +460,30 @@ static IWPending *retire(NSMutableArray<IWPending *> *queue, CBCharacteristic *c
     didUpdateNotificationStateForCharacteristic:(CBCharacteristic *)characteristic
                                           error:(NSError *)error {
     (void)peripheral;
-    if (self.subscribeDone == nil) {
+    if (self.subscribeToken == 0U || characteristic != self.subscribing) {
         return;
     }
-    self.subscribeResult = error_to_errno(error);
+    const int result = error_to_errno(error);
     if (error != nil) {
         [self log:CB_EVENT_LOG_WARN what:"Subscribe refused" error:error];
     }
-    if (self.subscribeResult == 0 && characteristic.isNotifying) {
+    if (result == 0 && characteristic.isNotifying) {
         self.notifying = characteristic;
+        self.notifyingToken = self.subscribeToken;
     }
-    dispatch_semaphore_signal(self.subscribeDone);
+    [self finishSubscribe:result];
+}
+
+/* Posts the answer to the subscribe in flight and forgets it. */
+- (void)finishSubscribe:(int)result {
+    struct cb_event event;
+    memset(&event, 0, offsetof(struct cb_event, data));
+    event.kind = CB_EVENT_SUBSCRIBE;
+    event.token = self.subscribeToken;
+    event.result = result;
+    self.subscribeToken = 0U;
+    self.subscribing = nil;
+    [self post:&event];
 }
 
 /* ---- lookups, on the queue ---- */
@@ -923,44 +942,35 @@ int inkwell_ble_backend_mtu(struct inkwell_ble_central *central, const char *han
     return 0;
 }
 
-int inkwell_ble_backend_subscribe(struct inkwell_ble_central *central, const char *handle) {
+int inkwell_ble_backend_subscribe(struct inkwell_ble_central *central, const char *handle,
+                                  uint32_t *token) {
     IWCentral *object = object_of(central);
+    const uint32_t ours = next_token(backend_of(central));
     NSString *handle_string = string_of(handle);
-    dispatch_semaphore_t done = dispatch_semaphore_create(0);
-    __block bool started = false;
+    __block int result = 0;
     dispatch_sync(object.queue, ^{
       CBPeripheral *peripheral = nil;
       CBCharacteristic *characteristic = [object characteristicFor:handle_string
                                                         peripheral:&peripheral];
       if (characteristic == nil) {
+          result = peripheral != nil && peripheral.state != CBPeripheralStateConnected ? -ENOTCONN
+                                                                                       : -ENOENT;
           return;
       }
+      object.subscribing = characteristic;
+      object.subscribeToken = ours;
       if (characteristic.isNotifying) {
+          /* Already on - a subscribe that outlived its caller's timeout, say. Answered as the
+             stack would, on the next turn. */
           object.notifying = characteristic;
-          object.subscribeResult = 0;
-          dispatch_semaphore_signal(done);
-          started = true;
+          object.notifyingToken = ours;
+          [object finishSubscribe:0];
           return;
       }
-      object.subscribeDone = done;
-      object.subscribeResult = -ETIMEDOUT;
       [peripheral setNotifyValue:YES forCharacteristic:characteristic];
-      started = true;
     });
-    if (!started) {
-        return -ENOENT;
-    }
-    const long waited = dispatch_semaphore_wait(
-        done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)CB_SUBSCRIBE_TIMEOUT_MS * NSEC_PER_MSEC));
-    __block int result = -ETIMEDOUT;
-    dispatch_sync(object.queue, ^{
-      if (waited == 0) {
-          result = object.subscribeResult;
-      }
-      object.subscribeDone = nil;
-    });
-    if (result < 0) {
-        inkwell_log_warn("ble", "Subscribe failed on %s: %d", handle, result);
+    if (result == 0) {
+        *token = ours;
     }
     return result;
 }
@@ -1070,6 +1080,25 @@ static void apply(struct inkwell_ble_central *central, const struct cb_event *ev
             inkwell_ble_pending_finish(&central->requests[event->which], event->result);
         }
         break;
+    case CB_EVENT_SUBSCRIBE:
+        if (central->requests[3].state == 1 && central->requests[3].token == event->token) {
+            inkwell_ble_subscribe_finish(central, event->result);
+        } else if (event->result == 0) {
+            /* Confirmed after the central timed it out or cancelled it: the caller was told it
+               failed, so the characteristic must not go on notifying behind its back. */
+            IWCentral *object = object_of(central);
+            const uint32_t stale = event->token;
+            dispatch_async(object.queue, ^{
+              CBCharacteristic *characteristic = object.notifying;
+              if (characteristic != nil && object.notifyingToken == stale) {
+                  object.notifying = nil;
+                  object.notifyingToken = 0U;
+                  [characteristic.service.peripheral setNotifyValue:NO
+                                                  forCharacteristic:characteristic];
+              }
+            });
+        }
+        break;
     case CB_EVENT_READ:
         if (central->read_state == 1 && central->read_token == event->token) {
             if (event->result == 0) {
@@ -1080,7 +1109,11 @@ static void apply(struct inkwell_ble_central *central, const struct cb_event *ev
         }
         break;
     case CB_EVENT_NOTIFY:
-        inkwell_ble_notify(central, event->data, event->len);
+        /* Only while a subscribe the central accepted stands: a value posted between a stale
+           confirmation and its undoing above is dropped here. */
+        if (central->notify_handle[0] != '\0') {
+            inkwell_ble_notify(central, event->data, event->len);
+        }
         break;
     case CB_EVENT_LOG_INFO:
         inkwell_log_info("ble", "%s", (const char *)event->data);
