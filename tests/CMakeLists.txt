@@ -29,6 +29,7 @@ set(INKWELL_TEST_SUITES
     suites/codec_zip.c
     suites/io_serial.c
     suites/net_fetch.c
+    suites/net_mqtt.c
     suites/net_reason.c
     suites/net_resolve.c
     suites/net_stream.c

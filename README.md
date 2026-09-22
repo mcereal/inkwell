@@ -44,7 +44,7 @@ So the foundation moved down here, and inkcell stands on it.
 | `base/` | The floor: a monotonic clock and a wall clock you can distrust, a levelled log that bounds its own file, `$PREFIX_`-namespaced environment knobs, whole-file reads, UTF-8 that counts characters rather than bytes. Includes nothing, including from each other's area. |
 | `runtime/` | One epoll loop with a bounded number of fd sources, no threads anywhere, and `SIGINT`/`SIGTERM`/`SIGHUP` delivered through a signalfd so a shutdown runs the ordinary path instead of the default kill action. |
 | `codec/` | Bytes in, bytes out: base64 in both alphabets, SHA-256, a non-allocating JSON reader, an HTTP/1.1 request formatter and response parser that takes its input in whatever sized pieces the network hands it, and a zip central-directory walker that works on a window of a file rather than the whole thing. A codec parses; it does not know what the bytes are for. |
-| `net/` | One hostname turned into an address by forking a child that is allowed to block, because `getaddrinfo()` has no non-blocking form and `getaddrinfo_a()` starts threads. Reported back through the loop, never from the call that started it. Then a byte stream over a descriptor, a TLS session on top of it that reports `-EAGAIN` all the way up rather than waiting, and one HTTPS request over that - all on the same loop as everything else, none of it blocking, and none of it holding an opinion about who it is talking to. |
+| `net/` | One hostname turned into an address by a child that may block; a byte stream over a descriptor; TLS that reports `-EAGAIN` rather than waiting; one HTTPS request; and one bounded MQTT 3.1.1 client with subscriptions, keepalive, and reconnect backoff. All run on the same loop and hold no application policy. |
 | `io/` | The USB serial ports the system has - sysfs on Linux, the I/O Registry on macOS - with what the USB tree says about each (a bridge chip or the device's own USB, a mass-storage interface beside it or not), and a tty opened raw and non-blocking for the loop. For a kernel without CDC-ACM, the generic-driver bind and the usbfs line-state request that make a native-USB device talk anyway. |
 
 Everything here is C17, freestanding of any framework, and allocates as little as it can get
@@ -101,7 +101,7 @@ add_subdirectory(third_party/inkwell)
 target_link_libraries(your_app PRIVATE inkwell::inkwell)
 ```
 
-**TLS is the one optional part.** `net/tls.h` and the `net/fetch.h` that stands on it need
+**TLS is the one optional part.** `net/tls.h` and the HTTPS and MQTT clients that stand on it need
 Mbed TLS, which is a submodule at `third_party/mbedtls`. Clone with `--recurse-submodules`, or
 `git submodule update --init --recursive` afterwards, and it is compiled in. Without it both
 headers still exist and every symbol still links: a session refuses to start with `-ENOTSUP` and
@@ -134,11 +134,10 @@ new suite file goes in `INKWELL_TEST_SUITES` in `tests/CMakeLists.txt`.
 ## Status
 
 Early. The foundation, the loop, the leaf codecs, the resolver, the byte stream, the TLS
-session and the HTTPS client are here. Still to come out of mesh-client, roughly in the order
+session, the HTTPS client, and the MQTT client are here. Still to come out of mesh-client,
+roughly in the order
 the dependencies allow:
 
-- **an MQTT client on the loop** — `codec/mqtt.h` is the 3.1.1 wire format already; what is left
-  is the connection that keeps one alive, backs off, and reports why it could not.
 - **the transports** — a non-blocking TCP connect policy, now that the byte stream under it is
   here. The serial ports under the other one are `io/serial.h`.
 - **`bt/`** — a BlueZ GATT client over D-Bus: discovery, bonding, an `org.bluez.Agent1` that can

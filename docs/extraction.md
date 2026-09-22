@@ -44,6 +44,7 @@ Three questions, in this order.
 | `net/stream.h` | `mesh/transport/stream_link.h` | the frame parser, the session it feeds, and the two numbers that size the outbound queue |
 | `net/tls.h` | `mesh/core/tls_client.h` | which roots to trust, and where they came from - a generated table compiled into a binary is one product's answer to shipping without a certificate store |
 | `net/fetch.h` | `mesh/core/fetch.h` | the product's name and version, sent as `User-Agent`, and every state machine that decides what to do with what came back |
+| `net/mqtt.h` | `mesh/core/mqtt_proxy.h` | Meshtastic's broker defaults, client-id derivation, channel filters, publish policy, and the translated state/failure tables |
 | `io/serial.h` | `mesh/transport/serial_usb.h` | which ports are a radio and which a bootloader, the rate one firmware talks at, and the transport that connects to one |
 | `ble/central.h` | `mesh/transport/ble_bluez.h` | the five service and characteristic UUIDs one firmware publishes, the lookup of all four at once, and every policy about when to scan, connect, pair and give up |
 
@@ -51,7 +52,8 @@ Three questions, in this order.
 
 ### 1. The network stack
 
-**`tls_client` and `fetch` have come down as `net/tls.h` and `net/fetch.h`.** Both went the way
+**`tls_client`, `fetch`, and the MQTT client have come down as `net/tls.h`, `net/fetch.h`, and
+`net/mqtt.h`.** The first two went the way
 `codec/png.h` did: the mechanism came here and the number stayed up there. For TLS the number was
 the trust anchors, which are now registered by the application rather than linked against; for
 the fetcher it was the `User-Agent`, which is the product's name and never was this layer's to
@@ -65,12 +67,12 @@ first thing a clone has to go and get - and that is why it is optional by presen
 by a flag, and why CI carries a job that builds without it. A platform layer may have a
 dependency; it may not make everyone who clones it pay for one.
 
-| Candidate | Lines | Application includes | What the seam is |
-|---|---|---|---|
-| `src/core/net/mqtt_proxy.c` | 1142 | 4 | the string ids it reports errors as - `net/reason.h` is what it reports instead |
-
-`codec/mqtt.h` is already here and the vocabulary question is answered, so `mqtt_proxy` is now
-the one row left in this tranche.
+The MQTT client followed the same seam. It owns one bounded MQTT 3.1.1 session: resolve,
+connect, optional TLS, subscribe, publish, keepalive, and reconnect backoff. The application
+still derives the broker and credentials from `MQTTConfig`, constructs Meshtastic channel and
+direct-message filters, decides which radio messages to publish, and turns state and failure
+records into translated sentences. The loopback broker tests moved with the state machine;
+mesh-client's policy and wording tests stayed with the application.
 
 **One thing was deliberately left undone.** `enum inkwell_fetch_outcome` came down unchanged, and
 its `NETWORK` member folds four things `net/reason.h` can tell apart - an unknown host, a lookup
