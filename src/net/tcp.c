@@ -112,6 +112,9 @@ static void tcp_configure_socket(int fd, const struct inkwell_tcp_connect_option
     (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &enabled, sizeof enabled);
 #if defined(TCP_KEEPIDLE)
     tcp_set_unsigned_option(fd, TCP_KEEPIDLE, options->keepalive_idle_s);
+#elif defined(TCP_KEEPALIVE)
+    /* Darwin's name for the same idle interval. */
+    tcp_set_unsigned_option(fd, TCP_KEEPALIVE, options->keepalive_idle_s);
 #endif
 #if defined(TCP_KEEPINTVL)
     tcp_set_unsigned_option(fd, TCP_KEEPINTVL, options->keepalive_interval_s);

@@ -8,6 +8,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <stdbool.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -90,7 +91,12 @@ INKWELL_TEST_CASE(tcp_connector_connects_a_literal, unit) {
     struct inkwell_tcp_connector connector;
     (void)inkwell_tcp_connector_init(&connector, &loop);
     struct tcp_probe probe = {.fd = -1};
-    const struct inkwell_tcp_connect_options options = {.timeout_ms = 1000U, .no_delay = true};
+    const struct inkwell_tcp_connect_options options = {
+        .timeout_ms = 1000U,
+        .no_delay = true,
+        .keepalive = true,
+        .keepalive_idle_s = 30U,
+    };
     struct inkwell_net_failure failure;
 
     if (inkwell_tcp_connector_start(&connector, "127.0.0.1", port, &options, tcp_probe_done, &probe,
@@ -100,6 +106,27 @@ INKWELL_TEST_CASE(tcp_connector_connects_a_literal, unit) {
         record_failure(test_name, "the connector did not return a connected descriptor");
         goto cleanup;
     }
+    int keepalive = 0;
+    socklen_t keepalive_len = (socklen_t)sizeof keepalive;
+    if (getsockopt(probe.fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, &keepalive_len) != 0 ||
+        keepalive == 0) {
+        record_failure(test_name, "the connected socket did not enable keepalive");
+        goto cleanup;
+    }
+#if defined(TCP_KEEPIDLE) || defined(TCP_KEEPALIVE)
+    int idle = 0;
+    socklen_t idle_len = (socklen_t)sizeof idle;
+#if defined(TCP_KEEPIDLE)
+    const int idle_option = TCP_KEEPIDLE;
+#else
+    const int idle_option = TCP_KEEPALIVE;
+#endif
+    if (getsockopt(probe.fd, IPPROTO_TCP, idle_option, &idle, &idle_len) != 0 || idle != 30) {
+        record_failure(test_name,
+                       "the connected socket did not use the requested keepalive idle interval");
+        goto cleanup;
+    }
+#endif
     const int accepted = accept(listener, NULL, NULL);
     if (accepted < 0) {
         record_failure(test_name, "the listener did not receive the connection");
