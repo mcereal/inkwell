@@ -83,6 +83,8 @@ add_library(inkwell STATIC
     src/net/resolve.c
     src/net/stream.c
     src/net/tls.c
+    # io: the USB serial ports the system has, and a tty opened raw on the loop's terms
+    src/io/serial.c
     # ble: a Bluetooth LE central over whichever stack the system has. The backend is added
     # below, once the build knows which one that is.
     src/ble/central.c
@@ -204,6 +206,13 @@ endif()
 # PRIVATE, like Wuffs: ble/central.h says nothing in D-Bus's or CoreBluetooth's vocabulary, and a
 # consumer has no reason to reach either through this target.
 set(INKWELL_BLE_BACKEND none)
+# The serial scan's macOS half reads the I/O Registry. PRIVATE for the same reason as the
+# Bluetooth frameworks below: io/serial.h says nothing in IOKit's vocabulary.
+if(APPLE)
+    target_sources(inkwell PRIVATE src/io/serial_iokit.c)
+    target_link_libraries(inkwell PRIVATE "-framework IOKit" "-framework CoreFoundation")
+endif()
+
 set(INKWELL_BLE_BACKEND_SOURCE src/ble/none.c)
 if(APPLE)
     enable_language(OBJC)

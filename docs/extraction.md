@@ -44,6 +44,7 @@ Three questions, in this order.
 | `net/stream.h` | `mesh/transport/stream_link.h` | the frame parser, the session it feeds, and the two numbers that size the outbound queue |
 | `net/tls.h` | `mesh/core/tls_client.h` | which roots to trust, and where they came from - a generated table compiled into a binary is one product's answer to shipping without a certificate store |
 | `net/fetch.h` | `mesh/core/fetch.h` | the product's name and version, sent as `User-Agent`, and every state machine that decides what to do with what came back |
+| `io/serial.h` | `mesh/transport/serial_usb.h` | which ports are a radio and which a bootloader, the rate one firmware talks at, and the transport that connects to one |
 | `ble/central.h` | `mesh/transport/ble_bluez.h` | the five service and characteristic UUIDs one firmware publishes, the lookup of all four at once, and every policy about when to scan, connect, pair and give up |
 
 ## Next, in the order the dependencies allow
@@ -96,10 +97,11 @@ which is not:
 
 | Candidate | What is general | What stays |
 |---|---|---|
-| `src/transport/serial/serial_usb.c` | the sysfs scan, the termios setup, the DTR assert | which USB ids are a radio |
 | `src/transport/tcp/tcp_transport.c` | the connect-with-a-deadline over `net/resolve` and `net/stream` | the registry, the handshake, the auto-connect policy |
 
-Neither is urgent and neither is blocked. A handheld OS wants "open the serial device at this
+The serial half has come down as `io/serial.h`. The scan reports what the USB tree says - a
+bridge or the device's own USB, a drive beside it or not - and the application decides what that
+makes it. TCP is not urgent and not blocked. A handheld OS wants "open the serial device at this
 path with these settings" long before it wants a transport registry.
 
 ### 3. BlueZ - done, as `ble/central.h`

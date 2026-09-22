@@ -1,0 +1,715 @@
+#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
+
+#include "inkwell/io/serial.h"
+
+#include "serial_internal.h"
+
+#include "inkwell/base/ioctl.h"
+#include "inkwell/base/log.h"
+#include "inkwell/base/text.h"
+
+#include <ctype.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <termios.h>
+#include <unistd.h>
+
+/* usbfs is Linux's. On a Mac the scan reads the I/O Registry instead (serial_iokit.c);
+   elsewhere it finds no tree and so no port. The two calls that need sysfs or usbfs refuse off
+   Linux, and termios opens a port the same way everywhere. */
+#if defined(__linux__)
+#include <linux/usbdevice_fs.h>
+#endif
+
+#define INKWELL_SERIAL_SYSFS_USB_DEFAULT "/sys/bus/usb/devices"
+#define INKWELL_SERIAL_GENERIC_NEW_ID "/sys/bus/usb-serial/drivers/generic/new_id"
+
+/*
+ * Where the USB tree is read from. Settable so that the judgement in the scan - bridge or
+ * native, a drive beside it or not - can be tested against a fixture tree laid out exactly as
+ * the Brick's sysfs was measured, rather than only through the mock, which replaces the scan
+ * whole and so tests everything about it except the reading.
+ */
+static char g_sysfs_root[256];
+
+void inkwell_serial_set_sysfs_root(const char *root) {
+    inkwell_str_copy(g_sysfs_root, sizeof g_sysfs_root, root != NULL ? root : "");
+}
+
+static const char *sysfs_usb_root(void) {
+    return g_sysfs_root[0] != '\0' ? g_sysfs_root : INKWELL_SERIAL_SYSFS_USB_DEFAULT;
+}
+
+/* USB interface classes we care about. */
+#define INKWELL_USB_CLASS_COMM 0x02U
+#define INKWELL_USB_SUBCLASS_ACM 0x02U
+#define INKWELL_USB_CLASS_CDC_DATA 0x0AU
+/* Mass storage, SCSI transparent command set, Bulk-Only Transport - what every UF2 bootloader
+   presents beside its CDC pair, and what the kernel's usb-storage driver binds. */
+#define INKWELL_USB_CLASS_MASS_STORAGE 0x08U
+#define INKWELL_USB_SUBCLASS_SCSI 0x06U
+#define INKWELL_USB_PROTOCOL_BULK_ONLY 0x50U
+
+/* CDC SET_CONTROL_LINE_STATE (USB CDC 1.1, 6.2.14). */
+#define INKWELL_CDC_REQUEST_TYPE 0x21U
+#define INKWELL_CDC_SET_CONTROL_LINE_STATE 0x22U
+
+/* usbserial drivers whose interfaces are worth offering before their tty has appeared. An
+   interface that has published a tty is a port whichever driver published it; this list is only
+   for the moment before, and for a driver whose tty sits somewhere the scan does not look. */
+static const char *const k_serial_drivers[] = {"cp210x", "ch341",   "ch341-uart", "ftdi_sio",
+                                               "pl2303", "generic", "cdc_acm"};
+
+struct inkwell_serial_mock_state {
+    bool enabled;
+    struct inkwell_serial_mock_config config;
+    size_t bind_calls;
+    size_t line_state_calls;
+    unsigned bind_pending_left;
+};
+
+static struct inkwell_serial_mock_state g_mock_state;
+
+void inkwell_serial_mock_enable(const struct inkwell_serial_mock_config *config) {
+    memset(&g_mock_state, 0, sizeof g_mock_state);
+    g_mock_state.enabled = true;
+    if (config != NULL) {
+        g_mock_state.config = *config;
+        g_mock_state.bind_pending_left = config->bind_pending_polls;
+    } else {
+        g_mock_state.config.open_fd = -1;
+    }
+}
+
+void inkwell_serial_mock_disable(void) {
+    memset(&g_mock_state, 0, sizeof g_mock_state);
+}
+
+size_t inkwell_serial_mock_bind_calls(void) {
+    return g_mock_state.bind_calls;
+}
+
+size_t inkwell_serial_mock_line_state_calls(void) {
+    return g_mock_state.line_state_calls;
+}
+
+/* Reads a one-line sysfs attribute with the trailing newline stripped. */
+static int read_sysfs_string(const char *dir, const char *attr, char *out, size_t out_len) {
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof path, "%s/%s", dir, attr) >= (int)sizeof path) {
+        return -ENAMETOOLONG;
+    }
+    FILE *file = fopen(path, "re");
+    if (file == NULL) {
+        return -errno;
+    }
+    if (fgets(out, (int)out_len, file) == NULL) {
+        fclose(file);
+        return -EIO;
+    }
+    fclose(file);
+    size_t len = strlen(out);
+    while (len > 0U && (out[len - 1U] == '\n' || out[len - 1U] == '\r')) {
+        out[--len] = '\0';
+    }
+    return 0;
+}
+
+static int read_sysfs_number(const char *dir, const char *attr, int base, unsigned long *out) {
+    char text[64];
+    int result = read_sysfs_string(dir, attr, text, sizeof text);
+    if (result < 0) {
+        return result;
+    }
+    char *end = NULL;
+    unsigned long value = strtoul(text, &end, base);
+    if (end == text) {
+        return -EINVAL;
+    }
+    *out = value;
+    return 0;
+}
+
+/* The driver bound to a sysfs device, from the basename of its `driver` symlink. */
+static bool sysfs_driver(const char *dir, char *out, size_t out_len) {
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof path, "%s/driver", dir) >= (int)sizeof path) {
+        return false;
+    }
+    char target[PATH_MAX];
+    ssize_t len = readlink(path, target, sizeof target - 1U);
+    if (len < 0) {
+        return false;
+    }
+    target[len] = '\0';
+    const char *base = strrchr(target, '/');
+    /* Explicit precision: sysfs paths are PATH_MAX, the field they land in is not. */
+    inkwell_str_copy(out, out_len, base != NULL ? base + 1 : target);
+    return true;
+}
+
+/* "/dev/ttyUSB0" for an interface that has one. cdc_acm publishes tty/ttyACM0, usb-serial
+   publishes a ttyUSB0 port directory; check for both shapes. */
+static bool find_interface_tty(const char *iface_dir, char *out, size_t out_len) {
+    DIR *dir = opendir(iface_dir);
+    if (dir == NULL) {
+        return false;
+    }
+
+    bool found = false;
+    const struct dirent *entry = NULL;
+    while (!found && (entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, "tty") == 0) {
+            char tty_dir[PATH_MAX];
+            if (snprintf(tty_dir, sizeof tty_dir, "%s/tty", iface_dir) >= (int)sizeof tty_dir) {
+                continue;
+            }
+            DIR *inner = opendir(tty_dir);
+            if (inner == NULL) {
+                continue;
+            }
+            const struct dirent *tty_entry = NULL;
+            while ((tty_entry = readdir(inner)) != NULL) {
+                if (strncmp(tty_entry->d_name, "tty", 3) == 0) {
+                    snprintf(out, out_len, "/dev/%.*s", (int)(out_len - sizeof "/dev/"),
+                             tty_entry->d_name);
+                    found = true;
+                    break;
+                }
+            }
+            closedir(inner);
+        } else if (strncmp(entry->d_name, "tty", 3) == 0 && entry->d_name[3] != '\0') {
+            snprintf(out, out_len, "/dev/%.*s", (int)(out_len - sizeof "/dev/"), entry->d_name);
+            found = true;
+        }
+    }
+
+    closedir(dir);
+    return found;
+}
+
+static bool is_serial_driver(const char *driver) {
+    for (size_t i = 0; i < sizeof k_serial_drivers / sizeof k_serial_drivers[0]; ++i) {
+        if (strcmp(driver, k_serial_drivers[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* A sysfs name like "1-1:1.0" is an interface; "1-1" is the device it belongs to. */
+static bool split_interface_name(const char *name, char *device_out, size_t device_out_len) {
+    const char *colon = strchr(name, ':');
+    if (colon == NULL || colon == name) {
+        return false;
+    }
+    size_t len = (size_t)(colon - name);
+    if (len >= device_out_len) {
+        return false;
+    }
+    memcpy(device_out, name, len);
+    device_out[len] = '\0';
+    return true;
+}
+
+/*
+ * What the rest of a USB device looks like, read once for both of the questions the scan asks
+ * about siblings. It was two walks of the same directory - one for the control interface, one
+ * that would have been added for the drive - and two readings of one device is how they come to
+ * disagree about which device they were reading.
+ */
+struct serial_device_facts {
+    /* bInterfaceNumber of the CDC control interface (class 02 subclass 02) that goes with the
+       data interface asked about, or -1 when there is none to set the line state on. */
+    int control_interface;
+    /* Its sysfs name: cdc_acm publishes the tty under the control interface, not the data one. */
+    char control_name[64];
+    /* A mass-storage Bulk-Only interface sits on the same device: this is a UF2 bootloader. */
+    bool has_mass_storage;
+};
+
+/*
+ * `data_number` is the bInterfaceNumber of the CDC-Data interface the facts are for, or -1. A
+ * composite device can carry several CDC functions, and each one's control interface is the one
+ * just below its data interface (0/1, 2/3) - the layout every CDC function descriptor set this
+ * scan has met uses, and the one an Interface Association groups. The first control interface is
+ * the answer only when no such neighbour exists.
+ */
+static void read_device_facts(const char *device_name, long data_number,
+                              struct serial_device_facts *out) {
+    out->control_interface = -1;
+    out->control_name[0] = '\0';
+    out->has_mass_storage = false;
+    bool paired = false;
+
+    DIR *dir = opendir(sysfs_usb_root());
+    if (dir == NULL) {
+        return;
+    }
+
+    const struct dirent *entry = NULL;
+    while ((entry = readdir(dir)) != NULL) {
+        char owner[64];
+        if (!split_interface_name(entry->d_name, owner, sizeof owner) ||
+            strcmp(owner, device_name) != 0) {
+            continue;
+        }
+
+        char iface_dir[PATH_MAX];
+        if (snprintf(iface_dir, sizeof iface_dir, "%s/%s", sysfs_usb_root(), entry->d_name) >=
+            (int)sizeof iface_dir) {
+            continue;
+        }
+
+        unsigned long iface_class = 0U;
+        unsigned long iface_subclass = 0U;
+        if (read_sysfs_number(iface_dir, "bInterfaceClass", 16, &iface_class) < 0 ||
+            read_sysfs_number(iface_dir, "bInterfaceSubClass", 16, &iface_subclass) < 0) {
+            continue;
+        }
+
+        if (iface_class == INKWELL_USB_CLASS_COMM && iface_subclass == INKWELL_USB_SUBCLASS_ACM) {
+            unsigned long iface_number = 0U;
+            if (paired || read_sysfs_number(iface_dir, "bInterfaceNumber", 16, &iface_number) < 0) {
+                continue;
+            }
+            paired = data_number >= 0 && (long)iface_number + 1L == data_number;
+            if (paired || out->control_interface < 0) {
+                out->control_interface = (int)iface_number;
+                inkwell_str_copy(out->control_name, sizeof out->control_name, entry->d_name);
+            }
+            continue;
+        }
+
+        if (iface_class == INKWELL_USB_CLASS_MASS_STORAGE &&
+            iface_subclass == INKWELL_USB_SUBCLASS_SCSI) {
+            /* The protocol byte is checked rather than assumed: 0x50 is Bulk-Only, and the
+               older CBI transports are not something to mistake for a UF2 drive. */
+            unsigned long iface_protocol = 0U;
+            if (read_sysfs_number(iface_dir, "bInterfaceProtocol", 16, &iface_protocol) == 0 &&
+                iface_protocol == INKWELL_USB_PROTOCOL_BULK_ONLY) {
+                out->has_mass_storage = true;
+            }
+        }
+    }
+
+    closedir(dir);
+}
+
+static size_t mock_scan(struct inkwell_serial_port_info *out, size_t capacity) {
+    if (g_mock_state.config.scan_result < 0 || g_mock_state.config.ports == NULL) {
+        return 0U;
+    }
+    size_t count = g_mock_state.config.port_count;
+    if (count > capacity) {
+        count = capacity;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        out[i] = g_mock_state.config.ports[i];
+    }
+    return count;
+}
+
+size_t inkwell_serial_scan(struct inkwell_serial_port_info *out, size_t capacity) {
+    if (out == NULL || capacity == 0U) {
+        return 0U;
+    }
+    if (g_mock_state.enabled) {
+        return mock_scan(out, capacity);
+    }
+#if defined(__APPLE__)
+    /* A Mac has no sysfs; its USB tree is the I/O Registry. The fixture seam still reads sysfs,
+       so the judgement below is tested on every host. */
+    if (g_sysfs_root[0] == '\0') {
+        return inkwell_serial_scan_iokit(out, capacity);
+    }
+#endif
+
+    DIR *dir = opendir(sysfs_usb_root());
+    if (dir == NULL) {
+        inkwell_log_debug("serial", "No USB sysfs at %s: %s", sysfs_usb_root(), strerror(errno));
+        return 0U;
+    }
+
+    size_t count = 0U;
+    const struct dirent *entry = NULL;
+    while (count < capacity && (entry = readdir(dir)) != NULL) {
+        char device_name[64];
+        if (!split_interface_name(entry->d_name, device_name, sizeof device_name)) {
+            continue; /* a device, not an interface */
+        }
+
+        char iface_dir[PATH_MAX];
+        char device_dir[PATH_MAX];
+        if (snprintf(iface_dir, sizeof iface_dir, "%s/%s", sysfs_usb_root(), entry->d_name) >=
+                (int)sizeof iface_dir ||
+            snprintf(device_dir, sizeof device_dir, "%s/%s", sysfs_usb_root(), device_name) >=
+                (int)sizeof device_dir) {
+            continue;
+        }
+
+        unsigned long iface_class = 0U;
+        if (read_sysfs_number(iface_dir, "bInterfaceClass", 16, &iface_class) < 0) {
+            continue;
+        }
+
+        /* A CDC control interface is half of a port whose other half is its data interface,
+           which is where the port is reported - even though cdc_acm hangs the tty off this
+           half. */
+        if (iface_class == INKWELL_USB_CLASS_COMM) {
+            continue;
+        }
+
+        char driver[64] = {0};
+        const bool has_driver = sysfs_driver(iface_dir, driver, sizeof driver);
+        const bool cdc_data = iface_class == INKWELL_USB_CLASS_CDC_DATA;
+        char tty[sizeof out->path] = {0};
+        const bool has_tty = find_interface_tty(iface_dir, tty, sizeof tty);
+        if (!cdc_data && !has_tty && !(has_driver && is_serial_driver(driver))) {
+            continue;
+        }
+
+        unsigned long data_number = 0U;
+        const bool numbered =
+            cdc_data && read_sysfs_number(iface_dir, "bInterfaceNumber", 16, &data_number) == 0;
+        struct serial_device_facts facts;
+        read_device_facts(device_name, numbered ? (long)data_number : -1L, &facts);
+
+        struct inkwell_serial_port_info *info = &out[count];
+        memset(info, 0, sizeof *info);
+        inkwell_str_copy(info->id, sizeof info->id, entry->d_name);
+        info->bound = has_tty;
+        inkwell_str_copy(info->path, sizeof info->path, tty);
+        if (!info->bound && cdc_data && facts.control_name[0] != '\0') {
+            char control_dir[PATH_MAX];
+            if (snprintf(control_dir, sizeof control_dir, "%s/%s", sysfs_usb_root(),
+                         facts.control_name) < (int)sizeof control_dir) {
+                info->bound = find_interface_tty(control_dir, info->path, sizeof info->path);
+            }
+        }
+        info->control_interface = facts.control_interface;
+        info->needs_line_state =
+            info->control_interface >= 0 && (!has_driver || strcmp(driver, "cdc_acm") != 0);
+
+        /*
+         * The interface class is what separates the two kinds, not the driver: the generic
+         * usbserial driver binds a native device's CDC-Data interface as readily as cp210x binds
+         * a bridge's vendor-class one, so asking "which driver claimed it" would call a bound
+         * native port a bridge. A drive only means anything on the native side - a bridge's USB
+         * says nothing about its far end - which is why it is only read there.
+         */
+        info->kind = cdc_data ? INKWELL_SERIAL_NATIVE : INKWELL_SERIAL_BRIDGE;
+        info->mass_storage = cdc_data && facts.has_mass_storage;
+
+        unsigned long value = 0U;
+        if (read_sysfs_number(device_dir, "idVendor", 16, &value) == 0) {
+            info->vendor_id = (uint16_t)value;
+        }
+        if (read_sysfs_number(device_dir, "idProduct", 16, &value) == 0) {
+            info->product_id = (uint16_t)value;
+        }
+        if (read_sysfs_number(device_dir, "busnum", 10, &value) == 0) {
+            info->busnum = (uint8_t)value;
+        }
+        if (read_sysfs_number(device_dir, "devnum", 10, &value) == 0) {
+            info->devnum = (uint8_t)value;
+        }
+        if (read_sysfs_string(device_dir, "product", info->name, sizeof info->name) < 0 ||
+            info->name[0] == '\0') {
+            snprintf(info->name, sizeof info->name, "USB serial %04x:%04x", info->vendor_id,
+                     info->product_id);
+        }
+
+        ++count;
+    }
+
+    closedir(dir);
+    return count;
+}
+
+int inkwell_serial_bind(struct inkwell_serial_port_info *device) {
+    if (device == NULL) {
+        return -EINVAL;
+    }
+
+    if (g_mock_state.enabled) {
+        g_mock_state.bind_calls += 1U;
+        if (g_mock_state.config.bind_result < 0) {
+            return g_mock_state.config.bind_result;
+        }
+        if (!device->bound && g_mock_state.bind_pending_left > 0U) {
+            g_mock_state.bind_pending_left -= 1U;
+            device->bind_requested = true;
+            return -EAGAIN;
+        }
+        if (!device->bound) {
+            const char *path = g_mock_state.config.bound_path != NULL
+                                   ? g_mock_state.config.bound_path
+                                   : "/dev/ttyUSB0";
+            snprintf(device->path, sizeof device->path, "%s", path);
+            device->bound = true;
+        }
+        return 0;
+    }
+
+    if (device->bound && device->path[0] != '\0') {
+        return 0;
+    }
+#if !defined(__linux__)
+    return -ENOTSUP;
+#else
+    char iface_dir[PATH_MAX];
+    if (snprintf(iface_dir, sizeof iface_dir, "%s/%s", sysfs_usb_root(), device->id) >=
+        (int)sizeof iface_dir) {
+        return -ENAMETOOLONG;
+    }
+
+    /*
+     * One write, then only looking. The driver publishes the tty when it probes, which is
+     * usually before the write returns and occasionally not - and sleeping here until it does
+     * would stall everything else on the loop, so a caller that gets -EAGAIN asks again later
+     * and decides for itself how long is too long.
+     */
+    if (!device->bind_requested) {
+        FILE *new_id = fopen(INKWELL_SERIAL_GENERIC_NEW_ID, "we");
+        if (new_id == NULL) {
+            inkwell_log_warn("serial", "Cannot open %s: %s", INKWELL_SERIAL_GENERIC_NEW_ID,
+                             strerror(errno));
+            return -errno;
+        }
+        /* The generic driver rejects the control interface ("no bulk out") and takes the data
+           one. */
+        const int printed = fprintf(new_id, "%04x %04x\n", (unsigned)device->vendor_id,
+                                    (unsigned)device->product_id);
+        const int flushed = fclose(new_id);
+        if (printed < 0 || flushed != 0) {
+            inkwell_log_warn("serial", "new_id write for %04x:%04x failed: %s", device->vendor_id,
+                             device->product_id, strerror(errno));
+            return -EIO;
+        }
+        device->bind_requested = true;
+        inkwell_log_info("serial", "Bound %04x:%04x to the generic usbserial driver",
+                         device->vendor_id, device->product_id);
+    }
+
+    if (!find_interface_tty(iface_dir, device->path, sizeof device->path)) {
+        return -EAGAIN;
+    }
+    device->bound = true;
+    device->needs_line_state = device->control_interface >= 0;
+    inkwell_log_info("serial", "%s is now %s", device->id, device->path);
+    return 0;
+#endif
+}
+
+int inkwell_serial_set_line_state(const struct inkwell_serial_port_info *device, bool dtr,
+                                  bool rts) {
+    if (device == NULL) {
+        return -EINVAL;
+    }
+
+    if (g_mock_state.enabled) {
+        g_mock_state.line_state_calls += 1U;
+        return g_mock_state.config.line_state_result;
+    }
+
+    if (device->control_interface < 0) {
+        return -ENOTSUP;
+    }
+
+#if !defined(__linux__)
+    (void)dtr;
+    (void)rts;
+    return -ENOTSUP;
+#else
+    char usbfs_path[PATH_MAX];
+    snprintf(usbfs_path, sizeof usbfs_path, "/dev/bus/usb/%03u/%03u", (unsigned)device->busnum,
+             (unsigned)device->devnum);
+
+    const int fd = open(usbfs_path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        inkwell_log_warn("serial", "Cannot open %s: %s", usbfs_path, strerror(errno));
+        return -errno;
+    }
+
+    /* The control interface has no driver (the generic one refused it), so claiming it is what
+       lets usbfs deliver the request. */
+    unsigned int iface = (unsigned int)device->control_interface;
+    bool claimed = ioctl(fd, inkwell_ioctl_request_of(USBDEVFS_CLAIMINTERFACE), &iface) == 0;
+    if (!claimed) {
+        inkwell_log_debug("serial", "Claim of interface %u on %s failed: %s", iface, usbfs_path,
+                          strerror(errno));
+    }
+
+    struct usbdevfs_ctrltransfer transfer;
+    memset(&transfer, 0, sizeof transfer);
+    transfer.bRequestType = INKWELL_CDC_REQUEST_TYPE;
+    transfer.bRequest = INKWELL_CDC_SET_CONTROL_LINE_STATE;
+    transfer.wValue = (uint16_t)((dtr ? 0x01U : 0U) | (rts ? 0x02U : 0U));
+    transfer.wIndex = (uint16_t)device->control_interface;
+    transfer.wLength = 0U;
+    transfer.timeout = 1000U;
+    transfer.data = NULL;
+
+    int result = 0;
+    if (ioctl(fd, inkwell_ioctl_request_of(USBDEVFS_CONTROL), &transfer) < 0) {
+        result = -errno;
+        inkwell_log_warn("serial", "SET_CONTROL_LINE_STATE on %s failed: %s", usbfs_path,
+                         strerror(errno));
+    } else {
+        inkwell_log_info("serial", "Asserted DTR on %s interface %u", usbfs_path, iface);
+    }
+
+    if (claimed) {
+        (void)ioctl(fd, inkwell_ioctl_request_of(USBDEVFS_RELEASEINTERFACE), &iface);
+    }
+    close(fd);
+    return result;
+#endif
+}
+
+/* The termios constant for a rate, or B0 for one it has none for. */
+static speed_t serial_speed(unsigned baud) {
+    /* POSIX's list, then the higher rates each platform defines for itself. */
+    static const struct {
+        unsigned baud;
+        speed_t speed;
+    } k_speeds[] = {
+        {50U, B50},           {75U, B75},     {110U, B110},   {134U, B134},     {150U, B150},
+        {200U, B200},         {300U, B300},   {600U, B600},   {1200U, B1200},   {1800U, B1800},
+        {2400U, B2400},       {4800U, B4800}, {9600U, B9600}, {19200U, B19200}, {38400U, B38400},
+#ifdef B57600
+        {57600U, B57600},
+#endif
+#ifdef B115200
+        {115200U, B115200},
+#endif
+#ifdef B230400
+        {230400U, B230400},
+#endif
+#ifdef B460800
+        {460800U, B460800},
+#endif
+#ifdef B500000
+        {500000U, B500000},
+#endif
+#ifdef B576000
+        {576000U, B576000},
+#endif
+#ifdef B921600
+        {921600U, B921600},
+#endif
+#ifdef B1000000
+        {1000000U, B1000000},
+#endif
+#ifdef B1152000
+        {1152000U, B1152000},
+#endif
+#ifdef B1500000
+        {1500000U, B1500000},
+#endif
+#ifdef B2000000
+        {2000000U, B2000000},
+#endif
+#ifdef B2500000
+        {2500000U, B2500000},
+#endif
+#ifdef B3000000
+        {3000000U, B3000000},
+#endif
+#ifdef B3500000
+        {3500000U, B3500000},
+#endif
+#ifdef B4000000
+        {4000000U, B4000000},
+#endif
+    };
+    for (size_t i = 0; i < sizeof k_speeds / sizeof k_speeds[0]; ++i) {
+        if (k_speeds[i].baud == baud) {
+            return k_speeds[i].speed;
+        }
+    }
+    return B0;
+}
+
+int inkwell_serial_open(const char *path, unsigned baud) {
+    const speed_t speed = serial_speed(baud);
+    if (path == NULL || path[0] == '\0' || speed == B0) {
+        return -EINVAL;
+    }
+
+    if (g_mock_state.enabled) {
+        if (g_mock_state.config.open_result < 0) {
+            return g_mock_state.config.open_result;
+        }
+        if (g_mock_state.config.open_fd < 0) {
+            return -ENOENT;
+        }
+        const int duplicated = dup(g_mock_state.config.open_fd);
+        return duplicated < 0 ? -errno : duplicated;
+    }
+
+    const int fd = open(path, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        return -errno;
+    }
+
+    struct termios tio;
+    if (tcgetattr(fd, &tio) < 0) {
+        const int saved = errno;
+        close(fd);
+        return -saved;
+    }
+
+    cfmakeraw(&tio);
+    /* Meaningless over USB CDC; a UART bridge needs a real one. */
+    cfsetispeed(&tio, speed);
+    cfsetospeed(&tio, speed);
+    tio.c_cflag |= (tcflag_t)(CLOCAL | CREAD);
+    tio.c_cflag &= (tcflag_t)~CRTSCTS;
+    tio.c_iflag &= (tcflag_t) ~(IXON | IXOFF | IXANY);
+    /*
+     * VMIN=1, not 0. With VMIN=0 a tty read() returns 0 as soon as the buffer is empty, which is
+     * indistinguishable from the EOF an unplugged device gives; with VMIN=1 an empty buffer on an
+     * O_NONBLOCK fd is a proper EAGAIN and 0 means the port really went away.
+     *
+     * Something downstream depends on this now: inkwell's stream turns a zero-length read into
+     * -ENOTCONN, and says so by `enum inkwell_stream_kind` in inkwell/net/stream.h. With VMIN=0
+     * a link would drop itself the first time the device went quiet.
+     */
+    tio.c_cc[VMIN] = 1;
+    tio.c_cc[VTIME] = 0;
+
+    if (tcsetattr(fd, TCSANOW, &tio) < 0) {
+        const int saved = errno;
+        close(fd);
+        return -saved;
+    }
+    (void)tcflush(fd, TCIOFLUSH);
+    return fd;
+}
+
+void inkwell_serial_close(int fd) {
+    if (fd >= 0) {
+        close(fd);
+    }
+}
+
+int inkwell_serial_set_dtr(int fd, bool on) {
+    if (fd < 0) {
+        return -EINVAL;
+    }
+    int bits = TIOCM_DTR;
+    if (ioctl(fd, inkwell_ioctl_request_of(on ? TIOCMBIS : TIOCMBIC), &bits) < 0) {
+        return -errno;
+    }
+    return 0;
+}

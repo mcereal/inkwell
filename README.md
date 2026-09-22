@@ -45,6 +45,7 @@ So the foundation moved down here, and inkcell stands on it.
 | `runtime/` | One epoll loop with a bounded number of fd sources, no threads anywhere, and `SIGINT`/`SIGTERM`/`SIGHUP` delivered through a signalfd so a shutdown runs the ordinary path instead of the default kill action. |
 | `codec/` | Bytes in, bytes out: base64 in both alphabets, SHA-256, a non-allocating JSON reader, an HTTP/1.1 request formatter and response parser that takes its input in whatever sized pieces the network hands it, and a zip central-directory walker that works on a window of a file rather than the whole thing. A codec parses; it does not know what the bytes are for. |
 | `net/` | One hostname turned into an address by forking a child that is allowed to block, because `getaddrinfo()` has no non-blocking form and `getaddrinfo_a()` starts threads. Reported back through the loop, never from the call that started it. Then a byte stream over a descriptor, a TLS session on top of it that reports `-EAGAIN` all the way up rather than waiting, and one HTTPS request over that - all on the same loop as everything else, none of it blocking, and none of it holding an opinion about who it is talking to. |
+| `io/` | The USB serial ports the system has - sysfs on Linux, the I/O Registry on macOS - with what the USB tree says about each (a bridge chip or the device's own USB, a mass-storage interface beside it or not), and a tty opened raw and non-blocking for the loop. For a kernel without CDC-ACM, the generic-driver bind and the usbfs line-state request that make a native-USB device talk anyway. |
 
 Everything here is C17, freestanding of any framework, and allocates as little as it can get
 away with. There are no threads and there will not be any: the loop is the concurrency model.
@@ -138,12 +139,12 @@ the dependencies allow:
 
 - **an MQTT client on the loop** — `codec/mqtt.h` is the 3.1.1 wire format already; what is left
   is the connection that keeps one alive, backs off, and reports why it could not.
-- **the transports** — serial ports over termios and a non-blocking TCP connect policy, both now
-  that the byte stream under them is here.
+- **the transports** — a non-blocking TCP connect policy, now that the byte stream under it is
+  here. The serial ports under the other one are `io/serial.h`.
 - **`bt/`** — a BlueZ GATT client over D-Bus: discovery, bonding, an `org.bluez.Agent1` that can
   answer a PIN prompt from inside the application, characteristic reads and writes, all
   asynchronous on the loop. About 3,200 lines, of which exactly four are Meshtastic-specific.
-- **`io/`** — serial ports, USB device enumeration from sysfs, and USB mass-storage mounting.
+- **the rest of `io/`** — finding and mounting the USB mass-storage drive a device publishes.
 - **`store/`** — the key/value file and the append-only log that let an application remember
   things across runs.
 
