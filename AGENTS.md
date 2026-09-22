@@ -57,7 +57,9 @@ header's source by *filename*, never by path.
 ## Rules that compile fine when broken
 
 - **`base/` includes nothing of inkwell's.** It is the floor.
-- **No threads.** Anything that would block gets a descriptor and a callback instead.
+- **No threads.** Anything that would block gets a descriptor and a callback instead. The one
+  exception is not ours: CoreBluetooth delivers on a dispatch queue, and `src/ble/corebluetooth.m`
+  keeps that thread to copies and a wake - nothing it touches is shared with the loop.
 - **Only `runtime/` and `base/fd.c` say which kernel this is.** Everything else registers
   `INKWELL_LOOP_IN`/`_OUT`, never `EPOLLIN`, and asks `runtime/timer.h`, `runtime/wake.h` and
   `base/fd.h` for a timer, a wake, a pipe or a socket rather than calling `timerfd_create()`,

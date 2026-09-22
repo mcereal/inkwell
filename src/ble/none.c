@@ -10,6 +10,8 @@
  * reached through central.c - they refuse too, rather than trusting that.
  */
 
+const unsigned inkwell_ble_backend_write_timeout_ms = 3000U;
+
 int inkwell_ble_backend_open(struct inkwell_ble_central *central, bool private_connection,
                              const char *bus_address) {
     (void)central;

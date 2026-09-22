@@ -115,7 +115,7 @@ and never reveals a hardware address - it names a peripheral by a UUID of its ow
 interface had to stop assuming either before one could be written. `central.c` holds everything
 that is the same on every stack (the argument checks, the request bookkeeping and deadlines, the
 test mock), and a backend is linked in at build time: `bluez.c` where libdbus-1 was found,
-`none.c` everywhere else. CoreBluetooth is the next one.
+`corebluetooth.m` on macOS, `none.c` everywhere else.
 
 ### 4. Binary formats
 
