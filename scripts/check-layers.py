@@ -42,7 +42,8 @@ ALLOWED = {
     "ble": {"base", "runtime"},
     # The serial ports the system has, and a tty opened on them. A port is a descriptor the
     # caller hands to the loop or to net/stream.h itself; nothing here schedules anything.
-    "io": {"base"},
+    # Storage writes can register their progress pipe with the runtime loop.
+    "io": {"base", "runtime"},
 }
 
 INCLUDE = re.compile(r'^\s*#\s*include\s+["<]inkwell/([a-z0-9_]+)/')

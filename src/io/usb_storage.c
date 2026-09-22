@@ -1,0 +1,638 @@
+#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
+
+#include "inkwell/io/usb_storage.h"
+
+#include "inkwell/base/log.h"
+#include "inkwell/base/text.h"
+#include "inkwell/base/time.h"
+
+#include "inkwell/runtime/loop.h"
+
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+/* umount2() is Linux's spelling and unmount() the BSDs'. Nothing reaches it off Linux - there is
+   no /proc/mounts there to find a drive in - but it has to compile. */
+static int usb_msc_unmount(const char *point) {
+#if defined(__linux__)
+    return umount2(point, 0);
+#else
+    return unmount(point, 0);
+#endif
+}
+
+#define INKWELL_USB_STORAGE_SYSFS_BLOCK_DEFAULT "/sys/block"
+#define INKWELL_USB_STORAGE_PROC_MOUNTS_DEFAULT "/proc/mounts"
+#define INKWELL_USB_STORAGE_DEV_ROOT_DEFAULT "/dev"
+
+/*
+ * Both of these are readings rather than actions, so both get an environment seam and neither
+ * gets a mock: a fixture tree and a fixture mounts file exercise the real walk. The acting half
+ * needs none - an unmount is `umount2()` and the write takes a path, so a test hands it a
+ * temporary file and gets the whole of the real code path.
+ */
+static const char *sysfs_block_root(void) {
+    const char *const from_env = getenv("INKWELL_SYSFS_BLOCK");
+    return (from_env != NULL && from_env[0] != '\0') ? from_env
+                                                     : INKWELL_USB_STORAGE_SYSFS_BLOCK_DEFAULT;
+}
+
+static const char *proc_mounts_path(void) {
+    const char *const from_env = getenv("INKWELL_PROC_MOUNTS");
+    return (from_env != NULL && from_env[0] != '\0') ? from_env
+                                                     : INKWELL_USB_STORAGE_PROC_MOUNTS_DEFAULT;
+}
+
+/* Where a block device's node lives. The third seam, and the one that makes the *whole* transfer
+   testable rather than only its readings: with it pointed at a temporary directory the write
+   goes to a file, which is the same `open`, the same `write` and the same `fdatasync` a block
+   device takes. */
+static const char *dev_root(void) {
+    const char *const from_env = getenv("INKWELL_DEV_ROOT");
+    return (from_env != NULL && from_env[0] != '\0') ? from_env
+                                                     : INKWELL_USB_STORAGE_DEV_ROOT_DEFAULT;
+}
+
+/* How much goes out per write, and how much has to land before the count moves. 32 KB is about
+   a third of a second on this bus, which is a bar that moves smoothly and a cancel that is
+   never more than that far away. */
+#define INKWELL_USB_STORAGE_CHUNK 32768U
+/* The child's exit codes, so the parent can say which end failed rather than "status 1". */
+#define INKWELL_USB_STORAGE_EXIT_WRITE 11
+#define INKWELL_USB_STORAGE_EXIT_SYNC 12
+/* Silence that means the write has stopped rather than slowed. A stalled chunk on a bus that
+   moves 32 KB in a third of a second is not a slow chunk. */
+#define INKWELL_USB_STORAGE_IDLE_TIMEOUT_MS 30000U
+
+/* ---- finding the drive ---------------------------------------------------------------------
+ */
+
+/* "2-1:1.2" names an interface of the USB device "2-1"; the drive belongs to the device. */
+static bool usb_device_of(const char *interface_id, char *out, size_t out_len) {
+    if (interface_id == NULL || interface_id[0] == '\0') {
+        return false;
+    }
+    const char *const colon = strchr(interface_id, ':');
+    const size_t len = colon != NULL ? (size_t)(colon - interface_id) : strlen(interface_id);
+    if (len == 0U || len >= out_len) {
+        return false;
+    }
+    memcpy(out, interface_id, len);
+    out[len] = '\0';
+    return true;
+}
+
+/*
+ * A block device belongs to a USB device when the sysfs path it is a symlink to walks through
+ * that device's directory - `.../usb2/2-1/2-1:1.2/host0/target0:0:0/0:0:0:0/block/sda`.
+ *
+ * Matching on "/2-1/" rather than on "2-1" is what keeps "2-1" from matching "12-1" (no leading
+ * slash) or "2-1.4" (no trailing one), which are both real names on a bus with a hub on it.
+ */
+static bool block_belongs_to(const char *root, const char *name, const char *device_name) {
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof path, "%s/%s", root, name) >= (int)sizeof path) {
+        return false;
+    }
+    char target[PATH_MAX];
+    const ssize_t len = readlink(path, target, sizeof target - 1U);
+    if (len < 0) {
+        return false;
+    }
+    target[len] = '\0';
+
+    char needle[80];
+    if (snprintf(needle, sizeof needle, "/%s/", device_name) >= (int)sizeof needle) {
+        return false;
+    }
+    return strstr(target, needle) != NULL;
+}
+
+/* The whole device's size, in sectors of 512, from <root>/<name>/size. 0 when unreadable. */
+static uint64_t block_size_bytes(const char *root, const char *name) {
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof path, "%s/%s/size", root, name) >= (int)sizeof path) {
+        return 0U;
+    }
+    FILE *const file = fopen(path, "re");
+    if (file == NULL) {
+        return 0U;
+    }
+    unsigned long long sectors = 0ULL;
+    const bool ok = fscanf(file, "%llu", &sectors) == 1;
+    fclose(file);
+    return ok ? (uint64_t)sectors * 512ULL : 0U;
+}
+
+/*
+ * True when `source` is this drive: the whole device, or a partition of it.
+ *
+ * The device's hotplug script mounts `/dev/sda` itself, and the platform's `/sbin/block` may have
+ * mounted `/dev/sda1` first. Both have to come off, and neither `/dev/sdaa` nor `/dev/sdb` is
+ * either of them.
+ *
+ * A string is not enough to decide it. A hotplug script may mount a device using a second
+ * spelling such as `/dev//dev/sda`, which can still name the same block device even when path
+ * normalization does not. Comparing device numbers catches that mount before a raw write.
+ */
+static bool mount_source_is_device(const char *source, const char *device) {
+    struct stat mounted;
+    struct stat ours;
+    if (stat(source, &mounted) == 0 && stat(device, &ours) == 0) {
+        if (S_ISBLK(mounted.st_mode) && S_ISBLK(ours.st_mode)) {
+            if (mounted.st_rdev == ours.st_rdev) {
+                return true;
+            }
+        } else if (mounted.st_dev == ours.st_dev && mounted.st_ino == ours.st_ino) {
+            /* Not a block device on either side, so the question is whether the two paths name
+               one file. This is the branch the suite reaches, because a test cannot make a
+               block device; the branch above is the one the device needs. */
+            return true;
+        }
+    }
+    /* And the string, which is what answers for a *partition* - `/dev/sda1` is a different
+       device number and still has to come off - and for the suite, whose drive is a file. */
+    const size_t len = strlen(device);
+    if (strncmp(source, device, len) != 0) {
+        return false;
+    }
+    const char *const tail = source + len;
+    if (tail[0] == '\0') {
+        return true;
+    }
+    for (const char *at = tail; *at != '\0'; ++at) {
+        if (*at < '0' || *at > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* /proc/mounts escapes a space in a path as \040 and three other characters the same way. */
+static void unescape_mount_path(char *path) {
+    char *out = path;
+    for (const char *in = path; *in != '\0'; ++in) {
+        if (in[0] == '\\' && in[1] >= '0' && in[1] <= '3' && in[2] >= '0' && in[2] <= '7' &&
+            in[3] >= '0' && in[3] <= '7') {
+            *out++ = (char)(((in[1] - '0') << 6) | ((in[2] - '0') << 3) | (in[3] - '0'));
+            in += 3;
+            continue;
+        }
+        *out++ = *in;
+    }
+    *out = '\0';
+}
+
+static void read_mounts(struct inkwell_usb_storage_target *target) {
+    FILE *const file = fopen(proc_mounts_path(), "re");
+    if (file == NULL) {
+        return;
+    }
+    char line[512];
+    while (fgets(line, sizeof line, file) != NULL) {
+        char source[128];
+        char point[INKWELL_USB_STORAGE_PATH_MAX];
+        if (sscanf(line, "%127s %127s", source, point) != 2) {
+            continue;
+        }
+        unescape_mount_path(source);
+        unescape_mount_path(point);
+        if (!mount_source_is_device(source, target->device)) {
+            continue;
+        }
+        if (target->mount_count >= INKWELL_USB_STORAGE_MOUNTS_MAX) {
+            target->too_many_mounts = true;
+            break;
+        }
+        inkwell_str_copy(target->mounts[target->mount_count],
+                         sizeof target->mounts[target->mount_count], point);
+        target->mount_count += 1U;
+    }
+    fclose(file);
+}
+
+int inkwell_usb_storage_find(const struct inkwell_serial_port_info *device,
+                             struct inkwell_usb_storage_target *out) {
+    if (device == NULL || out == NULL) {
+        return -EINVAL;
+    }
+    memset(out, 0, sizeof *out);
+
+    char device_name[64];
+    if (!usb_device_of(device->id, device_name, sizeof device_name)) {
+        return -EINVAL;
+    }
+
+    const char *const root = sysfs_block_root();
+    DIR *const dir = opendir(root);
+    if (dir == NULL) {
+        return -errno;
+    }
+
+    char found[64] = {0};
+    const struct dirent *entry = NULL;
+    while (found[0] == '\0' && (entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') {
+            continue;
+        }
+        if (block_belongs_to(root, entry->d_name, device_name)) {
+            inkwell_str_copy(found, sizeof found, entry->d_name);
+        }
+    }
+    closedir(dir);
+
+    if (found[0] == '\0') {
+        /* The ordinary answer for about a second after the board re-enumerates: the interface
+           is there and `usb-storage` has not published the disk yet. */
+        return -ENOENT;
+    }
+
+    if (snprintf(out->device, sizeof out->device, "%s/%s", dev_root(), found) >=
+        (int)sizeof out->device) {
+        out->device[0] = '\0';
+        return -ENAMETOOLONG;
+    }
+    out->size_bytes = block_size_bytes(root, found);
+    read_mounts(out);
+    return 0;
+}
+
+/*
+ * Takes the drive off its mountpoints and *claims* it, returning a writable fd or -errno.
+ *
+ * The unmount alone is not enough, and that is a measurement rather than a worry: on 2026-09-10
+ * a device published `/dev/sda` and the transfer found it, unmounted nothing (there was nothing
+ * mounted yet) and started writing **130 ms before `/etc/hotplug.d/block/10-mount` ran at all**.
+ * The platform then mounted the drive during the write, allowing filesystem writeback to
+ * interleave with the raw bytes. Winning the race is not enough; the mount must be prevented
+ * for the duration of the write.
+ *
+ * `O_EXCL` on a block device is the fix: it is an exclusive claim rather than a flag about
+ * creation, and `mount` takes the same claim - so while this fd is open the platform's mount
+ * gets `-EBUSY` and simply does not happen, and if something already holds it we get `-EBUSY`
+ * here instead of writing into a filesystem's device. The retry is for the other order: a mount
+ * that landed between the unmount above and this open is one more unmount away.
+ *
+ * Nothing is created and nothing is tested first, and both of those are the same decision. A
+ * `stat()` ahead of the open would be answering about a *path* a moment before using it, and the
+ * device this opens is one that disappears for a living: the device resets and `/dev/sda`
+ * goes with it. With an `O_CREAT` behind that reading, a drive that vanished between being found
+ * and being opened comes back as a **regular file at `/dev/sda` holding the image** - which then
+ * stands in the way of the real device node on the next plug, so every transfer after it writes
+ * to a file. So the open is the only test: a drive that is not there is `-ENOENT`.
+ *
+ * `O_EXCL` without `O_CREAT` is ignored on a regular file, which is what lets the suite point
+ * this at one. The two flags must never meet: together they are the unrelated "fail if it
+ * exists", which is how the claim would have silently become a no-op.
+ */
+int inkwell_usb_storage_claim(const char *device_path) {
+    if (device_path == NULL || device_path[0] == '\0') {
+        return -EINVAL;
+    }
+
+    int err = 0;
+    for (unsigned attempt = 0; attempt < 3U; ++attempt) {
+        const int claimed = open(device_path, O_WRONLY | O_EXCL | O_CLOEXEC);
+        if (claimed >= 0) {
+            return claimed;
+        }
+        err = -errno;
+        if (err != -EBUSY) {
+            return err;
+        }
+        struct inkwell_usb_storage_target again;
+        memset(&again, 0, sizeof again);
+        inkwell_str_copy(again.device, sizeof again.device, device_path);
+        read_mounts(&again);
+        if (again.mount_count == 0U) {
+            /* Busy and mounted nowhere: something else on this system holds the device, and
+               that is not ours to take. */
+            return err;
+        }
+        inkwell_log_info("usb-storage", "%s was mounted again after it came off; taking it back",
+                         device_path);
+        const int off = inkwell_usb_storage_unmount(&again);
+        if (off != 0) {
+            return off;
+        }
+    }
+    return err;
+}
+
+int inkwell_usb_storage_unmount(struct inkwell_usb_storage_target *target) {
+    if (target == NULL) {
+        return -EINVAL;
+    }
+    if (target->too_many_mounts) {
+        /* Nothing is unmounted: a drive with more mountpoints than this can name is a drive
+           we would only half take off, and half is worse than none. */
+        return -E2BIG;
+    }
+    /* Backwards, because /proc/mounts lists them in the order they were mounted and the later
+       one can be stacked on top. Removing that mount exposes what it was hiding. */
+    while (target->mount_count > 0U) {
+        const char *const point = target->mounts[target->mount_count - 1U];
+        if (usb_msc_unmount(point) != 0 && errno != EINVAL && errno != ENOENT) {
+            const int err = -errno;
+            inkwell_log_error("usb-storage", "Could not unmount %s from %s: %s", target->device,
+                              point, strerror(-err));
+            return err;
+        }
+        inkwell_log_info("usb-storage", "Unmounted %s from %s", target->device, point);
+        target->mount_count -= 1U;
+    }
+    return 0;
+}
+
+/* ---- the write -----------------------------------------------------------------------------
+ */
+
+static void write_release_fd(struct inkwell_usb_storage_write *write) {
+    /* `<= 0`, for the reason the pid test below is: a zeroed struct holds 0, and 0 is stdin -
+       never a pipe this module opened. A `< 0` test here closes the client's own stdin the
+       first time a cancel arrives before a start. */
+    if (write->device_fd > 0) {
+        /* Letting go of the claim, which is the other half of taking it: from here the
+           platform may mount the drive again, and on a board that restarted there is nothing
+           left to mount. */
+        close(write->device_fd);
+        write->device_fd = -1;
+    }
+    if (write->progress_fd <= 0) {
+        return;
+    }
+    if (write->loop != NULL) {
+        (void)inkwell_loop_remove_fd(write->loop, write->progress_fd);
+    }
+    close(write->progress_fd);
+    write->progress_fd = -1;
+}
+
+/* One decimal byte count per line. A read can land mid-line, so the tail is carried. */
+static void write_consume(struct inkwell_usb_storage_write *write, const char *bytes, size_t len,
+                          uint64_t now_ms) {
+    for (size_t i = 0; i < len; ++i) {
+        if (bytes[i] != '\n') {
+            if (write->pending_len + 1U < sizeof write->pending) {
+                write->pending[write->pending_len++] = bytes[i];
+            }
+            continue;
+        }
+        write->pending[write->pending_len] = '\0';
+        char *end = NULL;
+        const unsigned long long value = strtoull(write->pending, &end, 10);
+        if (end != write->pending && value <= write->total && (uint64_t)value >= write->written) {
+            write->written = (uint64_t)value;
+            write->idle_deadline_ms = now_ms + INKWELL_USB_STORAGE_IDLE_TIMEOUT_MS;
+        }
+        write->pending_len = 0U;
+    }
+}
+
+/* Returns false at EOF. Never blocks: the fd is non-blocking. */
+static bool write_drain(struct inkwell_usb_storage_write *write, uint64_t now_ms) {
+    if (write->progress_fd <= 0) {
+        return false;
+    }
+    for (;;) {
+        char buffer[256];
+        const ssize_t got = read(write->progress_fd, buffer, sizeof buffer);
+        if (got > 0) {
+            write_consume(write, buffer, (size_t)got, now_ms);
+            continue;
+        }
+        if (got == 0) {
+            return false;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        return errno == EAGAIN || errno == EWOULDBLOCK;
+    }
+}
+
+static int write_on_progress(int fd, uint32_t events, void *userdata) {
+    (void)fd;
+    (void)events;
+    struct inkwell_usb_storage_write *const write = (struct inkwell_usb_storage_write *)userdata;
+    if (write != NULL) {
+        /* Draining only; reaping is the tick's, so nothing here can block. The clock is read
+           rather than passed because a count that arrived is what pushes the silence deadline
+           out, and the loop does not carry one. */
+        (void)write_drain(write, inkwell_time_monotonic_ms());
+    }
+    return 0;
+}
+
+/*
+ * The child. Everything in here runs after fork() in a single-threaded process, so it is
+ * limited to what is safe there: `write`, `open`, `fdatasync`, `_exit`.
+ *
+ * The fd is opened by the parent and inherited, because the claim that keeps the platform's
+ * hotplug mount off this device has to be held from before the fork - see
+ * inkwell_usb_storage_claim().
+ *
+ * `fdatasync` per chunk is the whole reason the byte count means anything. Buffered writes to a
+ * block device are absorbed by the page cache and return at memory speed, so an unsynced child
+ * would report 100% in a few milliseconds and then sit in `close()` for thirteen seconds - the
+ * progress bar lying in exactly the direction that makes a user pull the cable.
+ */
+static void write_child(const uint8_t *image, size_t len, int out, int pipe_fd) {
+    size_t at = 0U;
+    while (at < len) {
+        const size_t chunk =
+            len - at > INKWELL_USB_STORAGE_CHUNK ? INKWELL_USB_STORAGE_CHUNK : len - at;
+        size_t sent = 0U;
+        while (sent < chunk) {
+            const ssize_t put = write(out, image + at + sent, chunk - sent);
+            if (put > 0) {
+                sent += (size_t)put;
+                continue;
+            }
+            if (put < 0 && errno == EINTR) {
+                continue;
+            }
+            _exit(INKWELL_USB_STORAGE_EXIT_WRITE);
+        }
+        if (fdatasync(out) != 0) {
+            _exit(INKWELL_USB_STORAGE_EXIT_SYNC);
+        }
+        at += chunk;
+
+        char line[32];
+        const int line_len = snprintf(line, sizeof line, "%llu\n", (unsigned long long)at);
+        if (line_len > 0) {
+            /* A parent that stopped reading is not a reason to stop writing: the bytes are
+               what matters and the count is a courtesy. */
+            (void)!write(pipe_fd, line, (size_t)line_len);
+        }
+    }
+    _exit(0);
+}
+
+int inkwell_usb_storage_write_start(struct inkwell_usb_storage_write *write,
+                                    struct inkwell_loop *loop, const uint8_t *image, size_t len,
+                                    const char *device_path, uint64_t now_ms) {
+    if (write == NULL || image == NULL || len == 0U || device_path == NULL ||
+        device_path[0] == '\0') {
+        return -EINVAL;
+    }
+    if (write->state == INKWELL_USB_STORAGE_WRITE_RUNNING) {
+        return -EBUSY;
+    }
+
+    /* Before the pipe and before the fork: the whole point of the claim is that nothing else
+       can mount this device while the write is running, and a claim taken after the child is
+       already copying is a claim taken too late. */
+    const int device_fd = inkwell_usb_storage_claim(device_path);
+    if (device_fd < 0) {
+        return device_fd;
+    }
+
+    int fds[2];
+    if (pipe(fds) < 0) {
+        const int err = -errno;
+        close(device_fd);
+        return err;
+    }
+
+    const pid_t pid = fork();
+    if (pid < 0) {
+        const int err = -errno;
+        close(fds[0]);
+        close(fds[1]);
+        close(device_fd);
+        return err;
+    }
+    if (pid == 0) {
+        close(fds[0]);
+        write_child(image, len, device_fd, fds[1]);
+        _exit(INKWELL_USB_STORAGE_EXIT_WRITE); /* not reached */
+    }
+
+    close(fds[1]);
+    memset(write, 0, sizeof *write);
+    write->loop = loop;
+    write->state = INKWELL_USB_STORAGE_WRITE_RUNNING;
+    write->child = pid;
+    write->progress_fd = fds[0];
+    /* The parent keeps its own copy open for the length of the write: the child's copy dies
+       with the child, and the claim has to outlive a child that failed halfway. */
+    write->device_fd = device_fd;
+    write->total = (uint64_t)len;
+    write->idle_deadline_ms = now_ms + INKWELL_USB_STORAGE_IDLE_TIMEOUT_MS;
+
+    const int flags = fcntl(write->progress_fd, F_GETFL, 0);
+    if (flags >= 0) {
+        (void)fcntl(write->progress_fd, F_SETFL, flags | O_NONBLOCK);
+    }
+    if (loop != NULL && inkwell_loop_add_fd(loop, write->progress_fd, INKWELL_LOOP_IN,
+                                            write_on_progress, write) != 0) {
+        /* Not fatal: without the loop the tick still drains the pipe, it just does so at
+           whatever rate the caller ticks. */
+        write->loop = NULL;
+    }
+    return 0;
+}
+
+static void write_finish(struct inkwell_usb_storage_write *write, int status) {
+    write->child = -1;
+    write_release_fd(write);
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        write->written = write->total;
+        write->state = INKWELL_USB_STORAGE_WRITE_DONE;
+        write->error = 0;
+        return;
+    }
+    const int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    switch (code) {
+    case INKWELL_USB_STORAGE_EXIT_SYNC:
+        write->error = -EIO;
+        inkwell_log_error("usb-storage", "The drive stopped acknowledging writes");
+        break;
+    default:
+        write->error = -EIO;
+        inkwell_log_error("usb-storage", "The write ended after %llu of %llu bytes (status %d)",
+                          (unsigned long long)write->written, (unsigned long long)write->total,
+                          code);
+        break;
+    }
+    write->state = INKWELL_USB_STORAGE_WRITE_FAILED;
+}
+
+void inkwell_usb_storage_write_tick(struct inkwell_usb_storage_write *write, uint64_t now_ms) {
+    if (write == NULL || write->state != INKWELL_USB_STORAGE_WRITE_RUNNING) {
+        return;
+    }
+    /*
+     * `<= 0`, not `< 0`: a zeroed struct holds 0 where a pid goes, and kill() reads 0 as the whole
+     * process group. A cancelled, never-started writer must not signal its caller's process group.
+     */
+    if (write->child <= 0) {
+        return;
+    }
+
+    (void)write_drain(write, now_ms);
+
+    if (now_ms >= write->idle_deadline_ms) {
+        (void)kill(write->child, SIGKILL);
+        (void)waitpid(write->child, NULL, 0);
+        write->child = -1;
+        write_release_fd(write);
+        write->state = INKWELL_USB_STORAGE_WRITE_FAILED;
+        write->error = -ETIMEDOUT;
+        inkwell_log_error("usb-storage", "The write stalled at %llu of %llu bytes",
+                          (unsigned long long)write->written, (unsigned long long)write->total);
+        return;
+    }
+
+    int status = 0;
+    const pid_t reaped = waitpid(write->child, &status, WNOHANG);
+    if (reaped == write->child) {
+        /* Once more after the exit: the child's last count can still be in the pipe. */
+        (void)write_drain(write, now_ms);
+        write_finish(write, status);
+    } else if (reaped < 0) {
+        write->child = -1;
+        write_release_fd(write);
+        write->state = INKWELL_USB_STORAGE_WRITE_FAILED;
+        write->error = -ECHILD;
+    }
+}
+
+void inkwell_usb_storage_write_cancel(struct inkwell_usb_storage_write *write) {
+    if (write == NULL) {
+        return;
+    }
+    if (write->child > 0) {
+        (void)kill(write->child, SIGKILL);
+        (void)waitpid(write->child, NULL, 0);
+        write->child = -1;
+    }
+    write_release_fd(write);
+    write->state = INKWELL_USB_STORAGE_WRITE_IDLE;
+    write->error = 0;
+}
+
+unsigned inkwell_usb_storage_write_progress(const struct inkwell_usb_storage_write *write) {
+    if (write == NULL || write->total == 0U) {
+        return 0U;
+    }
+    if (write->state == INKWELL_USB_STORAGE_WRITE_DONE) {
+        return 100U;
+    }
+    const uint64_t percent = write->written * 100ULL / write->total;
+    /* Never 100 while the child is alive: the last chunk is not written until it is. */
+    return percent >= 100ULL ? 99U : (unsigned)percent;
+}
