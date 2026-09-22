@@ -38,6 +38,7 @@ Three questions, in this order.
 | `base/version.h` | `mesh/core/version.h` | which version *this build* is, and whether it was stamped by a release - a compile definition only a build system can answer |
 | `codec/mqtt.h` | `mesh/proto/mqtt_packet.h` | the topic derivation, which is a compatibility surface with one firmware rather than a wire format |
 | `codec/inflate.h` | `mesh/utils/inflate.h` | nothing; it was already general |
+| `codec/uf2.h`, `codec/esp_image.h` | `mesh/core/uf2.h`, `mesh/core/esp_image.h` | architecture-name to chip/family lookups for the device and release manifest |
 | `codec/png.h` | `mesh/map/tile_image.h` | the tile-sized wrapper, and the two static buffers a 256-square decode needs |
 | `runtime/crash.h` | `mesh/utils/crash.h` | the product's name, its issues URL, its note labels, and the sentence about what *its* log may contain |
 | `net/reason.h` | nothing - it is new | the table from a reason to a sentence, which is the application's whole half of this |
@@ -123,12 +124,12 @@ that is the same on every stack (the argument checks, the request bookkeeping an
 test mock), and a backend is linked in at build time: `bluez.c` where libdbus-1 was found,
 `corebluetooth.m` on macOS, `none.c` everywhere else.
 
-### 4. Binary formats
+### 4. Binary formats - done
 
-`uf2.c` (157 lines) and `esp_image.c` (79) each include only their own header. UF2 is
-Microsoft's and the ESP image header is Espressif's; neither has anything to do with a mesh. They
-are small, so they are not urgent - but they are `codec/` by every test above, and a platform
-that flashes a peripheral wants them.
+UF2 block parsing and whole-image validation live in `codec/uf2.h`; ESP application-image
+header checks live in `codec/esp_image.h`. Captured release bytes and their codec tests moved
+with them. The device and release-manifest architecture-name mappings stay in mesh-client,
+which decides whether either flash path applies to a particular device.
 
 ### 5. Storage, once there is a seam
 
