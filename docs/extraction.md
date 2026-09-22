@@ -99,12 +99,14 @@ which is not:
 
 | Candidate | What is general | What stays |
 |---|---|---|
-| `src/transport/tcp/tcp_transport.c` | the connect-with-a-deadline over `net/resolve` and `net/stream` | the registry, the handshake, the auto-connect policy |
+| `src/transport/tcp/tcp_transport.c` | `net/tcp.h`: the connect-with-a-deadline over `net/resolve` and `net/stream` | the registry, target syntax and remembered host, the handshake, the auto-connect policy |
 
 The serial half has come down as `io/serial.h`. The scan reports what the USB tree says - a
 bridge or the device's own USB, a drive beside it or not - and the application decides what that
-makes it. TCP is not urgent and not blocked. A handheld OS wants "open the serial device at this
-path with these settings" long before it wants a transport registry.
+makes it. The TCP half is now `net/tcp.h`: it resolves a host, opens and tunes a non-blocking
+socket, enforces the caller's connect deadline, and hands the connected descriptor up. It does
+not parse an application's target string, remember where to reconnect, or know what protocol
+will own that descriptor.
 
 ### 3. BlueZ - done, as `ble/central.h`
 
