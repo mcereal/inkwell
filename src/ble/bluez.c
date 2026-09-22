@@ -20,11 +20,12 @@
  * Three rules shape everything here.
  *
  * **Nothing that can take long blocks.** Connect, Pair, ReadValue, WriteValue and the two
- * property queries are sent and their replies matched by serial in process(). A listing or a
- * lookup reads a copy of bluetoothd's object tree that signals keep current, so the blocking
+ * property queries are sent and their replies matched by serial in process(). Discovery,
+ * Disconnect and Trusted are sent too, and their replies only logged (send_logged()). A listing
+ * or a lookup reads a copy of bluetoothd's object tree that signals keep current, so the blocking
  * GetManagedObjects behind it is made once per bluetoothd, not once per scan. What does still
- * block - that first fetch, StartNotify, the agent registration - is bounded by an explicit
- * timeout of a second or a few, never libdbus' 25 s default.
+ * block - that first fetch, StartNotify, the agent registration, RemoveDevice - is bounded by an
+ * explicit timeout of a second or a few, never libdbus' 25 s default.
  *
  * **Messages are popped here, not dispatched.** process() takes every message off the
  * connection itself, so libdbus' object tree never sees one; the pairing agent is dispatched by
@@ -39,13 +40,8 @@
 #define INKWELL_BLUEZ_AGENT_PATH "/org/inkwell/agent"
 #define INKWELL_BLUEZ_DEFAULT_ADAPTER "/org/bluez/hci0"
 #define INKWELL_BLUEZ_WATCHES 8U
-/*
- * The bound on the blocking calls that used to take libdbus' 25 s default: discovery on and off,
- * and Disconnect. bluetoothd answers each in milliseconds when it is well; this only caps how
- * long the loop stalls when it is not. Making them asynchronous is the real fix and a larger one:
- * their callers act on the answer in the same turn.
- */
-#define INKWELL_BLUEZ_ADAPTER_TIMEOUT_MS 5000
+/* Calls sent without waiting whose replies are still to be logged; see send_logged(). */
+#define INKWELL_BLUEZ_UNANSWERED 8U
 
 /* A bond is made before a link is used (pair_begin), so a write has nothing to wait behind. */
 const unsigned inkwell_ble_backend_write_timeout_ms = 3000U;
@@ -69,6 +65,8 @@ enum {
 struct bluez_object {
     char path[INKWELL_BLE_HANDLE_MAX];
     unsigned interfaces;
+    /* Adapter1: Powered, when bluetoothd has said it is false. */
+    bool powered_off;
     /* Device1 */
     char address[INKWELL_BLE_ADDRESS_MAX];
     char name[INKWELL_BLE_NAME_MAX];
@@ -80,6 +78,11 @@ struct bluez_object {
     size_t service_count;
     /* GattCharacteristic1 */
     char uuid[INKWELL_BLUEZ_UUID_LEN];
+};
+
+struct bluez_unanswered {
+    dbus_uint32_t serial;
+    const char *what;
 };
 
 struct bluez_backend {
@@ -95,6 +98,8 @@ struct bluez_backend {
     bool objects_loaded;
     /* A GetManagedObjects sent without waiting, or 0. */
     dbus_uint32_t objects_serial;
+    struct bluez_unanswered unanswered[INKWELL_BLUEZ_UNANSWERED];
+    size_t unanswered_next;
 };
 
 /* What keeps the object tree current, subscribed to in open(); see that section. */
@@ -102,6 +107,8 @@ static const char *const k_object_rules[] = {
     "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.ObjectManager'",
     "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',"
     "member='PropertiesChanged',arg0='org.bluez.Device1'",
+    "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',"
+    "member='PropertiesChanged',arg0='org.bluez.Adapter1'",
     "type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',"
     "member='NameOwnerChanged',arg0='org.bluez'",
 };
@@ -613,6 +620,14 @@ static int object_set_property(struct bluez_object *object, unsigned interface, 
     if (type == DBUS_TYPE_STRING) {
         dbus_message_iter_get_basic(variant, &text);
     }
+    if (interface == BLUEZ_ADAPTER) {
+        if (strcmp(name, "Powered") == 0 && type == DBUS_TYPE_BOOLEAN) {
+            dbus_bool_t powered = TRUE;
+            dbus_message_iter_get_basic(variant, &powered);
+            object->powered_off = powered == FALSE;
+        }
+        return 0;
+    }
     if (interface == BLUEZ_CHARACTERISTIC) {
         if (strcmp(name, "UUID") == 0 && text != NULL) {
             inkwell_str_copy(object->uuid, sizeof object->uuid, text);
@@ -883,16 +898,16 @@ static bool objects_handle_signal(struct inkwell_ble_central *central, DBusMessa
     return false;
 }
 
-/* A Device1 PropertiesChanged: `iter` is on the interface name. */
+/* A Device1 or Adapter1 PropertiesChanged: `iter` is on the interface name. */
 static void objects_properties_changed(struct bluez_backend *backend, const char *path,
-                                       DBusMessageIter *iter) {
+                                       unsigned interface, DBusMessageIter *iter) {
     struct bluez_object *object =
         backend->objects_loaded && path != NULL ? object_find(backend, path) : NULL;
-    if (object == NULL || (object->interfaces & BLUEZ_DEVICE) == 0U ||
-        !dbus_message_iter_next(iter) || dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_ARRAY) {
+    if (object == NULL || (object->interfaces & interface) == 0U || !dbus_message_iter_next(iter) ||
+        dbus_message_iter_get_arg_type(iter) != DBUS_TYPE_ARRAY) {
         return;
     }
-    if (object_set_properties(object, BLUEZ_DEVICE, iter) < 0) {
+    if (object_set_properties(object, interface, iter) < 0) {
         objects_clear(backend);
         return;
     }
@@ -905,7 +920,7 @@ static void objects_properties_changed(struct bluez_backend *backend, const char
          dbus_message_iter_next(&invalidated)) {
         const char *name = NULL;
         dbus_message_iter_get_basic(&invalidated, &name);
-        object_unset_property(object, BLUEZ_DEVICE, name);
+        object_unset_property(object, interface, name);
     }
 }
 
@@ -1034,6 +1049,30 @@ static int send_call(struct inkwell_ble_central *central, const char *path, cons
     return 0;
 }
 
+/*
+ * A call whose answer only matters when it is a refusal: sent and not waited for, so 0 means
+ * bluetoothd was asked. process() matches the reply and logs it if it is an error. Flushed
+ * because a caller may close the connection next - a disconnect on the way out is exactly that -
+ * and a message still queued would go with it.
+ */
+static int send_logged(struct inkwell_ble_central *central, DBusMessage *message,
+                       const char *what) {
+    struct bluez_backend *backend = backend_of(central);
+    dbus_uint32_t serial = 0U;
+    const dbus_bool_t sent = dbus_connection_send(backend->connection, message, &serial);
+    dbus_message_unref(message);
+    if (!sent) {
+        return -ENOMEM;
+    }
+    dbus_connection_flush(backend->connection);
+    /* Oldest first out: a reply that has not come back after eight more calls goes unlogged. */
+    struct bluez_unanswered *slot = &backend->unanswered[backend->unanswered_next];
+    backend->unanswered_next = (backend->unanswered_next + 1U) % INKWELL_BLUEZ_UNANSWERED;
+    slot->serial = serial;
+    slot->what = what;
+    return 0;
+}
+
 /* One call answered within `timeout_ms`, which the loop waits out: only for calls that are
    quick, rare, or both. */
 static int call_blocking(struct inkwell_ble_central *central, DBusMessage *message, int timeout_ms,
@@ -1065,14 +1104,19 @@ int inkwell_ble_backend_discovery(struct inkwell_ble_central *central, bool on) 
     const char *method = on ? "StartDiscovery" : "StopDiscovery";
     const char *adapter =
         central->adapter[0] != '\0' ? central->adapter : INKWELL_BLUEZ_DEFAULT_ADAPTER;
+    /* The one refusal worth a caller knowing about at once, and the copy already knows it. */
+    struct bluez_backend *backend = backend_of(central);
+    const struct bluez_object *object =
+        backend->objects_loaded ? object_find(backend, adapter) : NULL;
+    if (on && object != NULL && object->powered_off) {
+        return -ENETDOWN;
+    }
     DBusMessage *message =
         dbus_message_new_method_call("org.bluez", adapter, "org.bluez.Adapter1", method);
     if (message == NULL) {
         return -ENOMEM;
     }
-    const int result = call_blocking(central, message, INKWELL_BLUEZ_ADAPTER_TIMEOUT_MS, method);
-    /* Adapter errors were always reported as -EIO, and callers log the errno as a reason. */
-    return result < 0 ? -EIO : 0;
+    return send_logged(central, message, method);
 }
 
 int inkwell_ble_backend_connect(struct inkwell_ble_central *central, const char *address,
@@ -1104,8 +1148,9 @@ int inkwell_ble_backend_disconnect(struct inkwell_ble_central *central, const ch
     if (message == NULL) {
         return -ENOMEM;
     }
-    if (call_blocking(central, message, INKWELL_BLUEZ_ADAPTER_TIMEOUT_MS, "Disconnect") < 0) {
-        return -EIO;
+    const int result = send_logged(central, message, "Disconnect");
+    if (result < 0) {
+        return result;
     }
     if (central->notify_handle[0] != '\0') {
         char rule[256];
@@ -1170,7 +1215,7 @@ int inkwell_ble_backend_set_trusted(struct inkwell_ble_central *central, const c
                                      &variant);
     dbus_message_iter_append_basic(&variant, DBUS_TYPE_BOOLEAN, &value);
     dbus_message_iter_close_container(&iter, &variant);
-    return call_blocking(central, message, 2000, "Set Trusted");
+    return send_logged(central, message, "Set Trusted");
 }
 
 int inkwell_ble_backend_forget(struct inkwell_ble_central *central, const char *address) {
@@ -1245,16 +1290,7 @@ int inkwell_ble_backend_agent_register(struct inkwell_ble_central *central) {
         "org.bluez", "/org/bluez", "org.bluez.AgentManager1", "RequestDefaultAgent");
     if (request != NULL) {
         dbus_message_append_args(request, DBUS_TYPE_OBJECT_PATH, &path, DBUS_TYPE_INVALID);
-        dbus_error_init(&error);
-        DBusMessage *default_reply =
-            dbus_connection_send_with_reply_and_block(connection, request, 2000, &error);
-        dbus_message_unref(request);
-        if (default_reply != NULL) {
-            dbus_message_unref(default_reply);
-        } else if (dbus_error_is_set(&error)) {
-            inkwell_log_warn("ble", "RequestDefaultAgent failed: %s", error.message);
-            dbus_error_free(&error);
-        }
+        (void)send_logged(central, request, "RequestDefaultAgent");
     }
     inkwell_log_info("ble", "Pairing agent registered at %s", path);
     return 0;
@@ -1612,14 +1648,8 @@ int inkwell_ble_backend_subscribe(struct inkwell_ble_central *central, const cha
              "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',"
              "member='PropertiesChanged',path='%s'",
              handle);
-    DBusError error;
-    dbus_error_init(&error);
-    dbus_bus_add_match(connection, rule, &error);
-    if (dbus_error_is_set(&error)) {
-        inkwell_log_warn("ble", "Failed to add notification match for %s: %s", handle,
-                         error.message);
-        dbus_error_free(&error);
-    }
+    /* Without an error to fill, AddMatch is sent and not waited for. */
+    dbus_bus_add_match(connection, rule, NULL);
     dbus_connection_flush(connection);
     return 0;
 }
@@ -1719,8 +1749,9 @@ static void handle_properties_changed(struct inkwell_ble_central *central, DBusM
     }
     const char *interface_name = NULL;
     dbus_message_iter_get_basic(&iter, &interface_name);
-    if (interface_name != NULL && strcmp(interface_name, "org.bluez.Device1") == 0) {
-        objects_properties_changed(backend_of(central), object, &iter);
+    const unsigned kept = interface_bit(interface_name);
+    if (kept == BLUEZ_DEVICE || kept == BLUEZ_ADAPTER) {
+        objects_properties_changed(backend_of(central), object, kept, &iter);
         return;
     }
     if (central->notify_handle[0] == '\0' || strcmp(object, central->notify_handle) != 0) {
@@ -1801,6 +1832,16 @@ static void handle_message(struct inkwell_ble_central *central, DBusMessage *mes
         backend->objects_serial = 0U;
         (void)objects_load(backend, message);
         return;
+    }
+    for (size_t i = 0U; serial != 0U && i < INKWELL_BLUEZ_UNANSWERED; ++i) {
+        struct bluez_unanswered *slot = &backend->unanswered[i];
+        if (slot->serial == serial) {
+            slot->serial = 0U;
+            if (dbus_message_get_type(message) == DBUS_MESSAGE_TYPE_ERROR) {
+                (void)reply_error(message, slot->what);
+            }
+            return;
+        }
     }
     if (serial != 0U) {
         for (size_t i = 0; i < INKWELL_ARRAY_LEN(central->requests); ++i) {

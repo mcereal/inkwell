@@ -255,6 +255,23 @@ static void emit_interfaces(DBusConnection *server, bool added, const char *path
     emit(server, signal);
 }
 
+/* The adapter switched on or off, as bluetoothd reports it. */
+static void emit_powered(DBusConnection *server, bool powered) {
+    DBusMessage *signal = dbus_message_new_signal(
+        "/org/bluez/hci0", "org.freedesktop.DBus.Properties", "PropertiesChanged");
+    const char *interface = "org.bluez.Adapter1";
+    const dbus_bool_t value = powered ? TRUE : FALSE;
+    DBusMessageIter iter, changed, invalidated;
+    dbus_message_iter_init_append(signal, &iter);
+    dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &interface);
+    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sv}", &changed);
+    append_property(&changed, "Powered", DBUS_TYPE_BOOLEAN, &value);
+    dbus_message_iter_close_container(&iter, &changed);
+    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "s", &invalidated);
+    dbus_message_iter_close_container(&iter, &invalidated);
+    emit(server, signal);
+}
+
 /* A rename, and the RSSI going: what bluetoothd says when a device stops being heard. */
 static void emit_renamed_and_unheard(DBusConnection *server) {
     DBusMessage *signal = dbus_message_new_signal(DEVICE_PATH, "org.freedesktop.DBus.Properties",
@@ -369,6 +386,56 @@ static const char *test_object_tree(DBusConnection *server, struct inkwell_loop 
         return "a vanished bluetoothd's devices were still listed";
     if (!request_name(server))
         return "could not take org.bluez back";
+    return NULL;
+}
+
+/*
+ * Discovery, Disconnect and Trusted are sent and not waited for: each returns 0 while the fake
+ * has not answered - a blocking call would have timed out - and reaches it afterwards. A refusal
+ * that comes back later is logged and changes nothing. An adapter the copy knows is off refuses
+ * discovery at once.
+ */
+static const char *test_sent_not_waited(DBusConnection *server, struct inkwell_loop *loop,
+                                        struct inkwell_ble_central *client) {
+    /* test_object_tree() left bluetoothd restarted, with its tree still to be sent. */
+    DBusMessage *call = request_named(server, loop, "GetManagedObjects");
+    if (call == NULL)
+        return "no GetManagedObjects to answer";
+    DBusMessage *reply = dbus_message_new_method_return(call);
+    dbus_message_unref(call);
+    DBusMessageIter iter, objects;
+    dbus_message_iter_init_append(reply, &iter);
+    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{oa{sa{sv}}}", &objects);
+    append_object(&objects, "/org/bluez/hci0", "org.bluez.Adapter1", NULL);
+    dbus_message_iter_close_container(&iter, &objects);
+    emit(server, reply);
+    settle(server, loop, client);
+
+    static const char *const members[] = {"StartDiscovery", "StopDiscovery", "Disconnect", "Set"};
+    for (unsigned i = 0U; i < 4U; ++i) {
+        const int result = i == 0U   ? inkwell_ble_start_discovery(client)
+                           : i == 1U ? inkwell_ble_stop_discovery(client)
+                           : i == 2U ? inkwell_ble_disconnect(client, ADDRESS)
+                                     : inkwell_ble_set_trusted(client, ADDRESS, true);
+        if (result != 0)
+            return "a call that is only logged waited for its answer";
+        call = request_named(server, loop, members[i]);
+        if (call == NULL)
+            return "a call that is only logged never reached the fake";
+        DBusMessage *refusal = dbus_message_new_error(call, "org.bluez.Error.Failed", "refused");
+        dbus_message_unref(call);
+        emit(server, refusal);
+    }
+    settle(server, loop, client);
+
+    emit_powered(server, false);
+    settle(server, loop, client);
+    if (inkwell_ble_start_discovery(client) != -ENETDOWN)
+        return "discovery on an adapter that is off was not refused";
+    emit_powered(server, true);
+    settle(server, loop, client);
+    if (inkwell_ble_start_discovery(client) != 0)
+        return "discovery was still refused once the adapter was back on";
     return NULL;
 }
 
@@ -516,6 +583,9 @@ int main(void) {
         failure = test_object_tree(server, &loop, &client);
     }
     if (failure == NULL) {
+        failure = test_sent_not_waited(server, &loop, &client);
+    }
+    if (failure == NULL) {
         failure = client_name[0] != '\0'
                       ? test_agent_refuses_strangers(server, &loop, &client, client_name)
                       : "never learned the central's bus name";
@@ -533,6 +603,6 @@ int main(void) {
         return 1;
     }
     puts("Isolated D-Bus: nonblocking send, input responsiveness, reply parsing, timeout and "
-         "agent ownership, object tree passed.");
+         "agent ownership, object tree, unwaited calls passed.");
     return 0;
 }

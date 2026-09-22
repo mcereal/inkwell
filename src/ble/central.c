@@ -63,7 +63,8 @@ static bool mocked(void) {
 }
 
 /* Everything the mock answers when there is no bus behind it: reads, writes, property queries,
-   the lookups and the loop. With a bus address those go to the real backend. */
+   the lookups, discovery, disconnect, trust and the loop. With a bus address those go to the
+   real backend. */
 static bool scripted(void) {
     return g_mock.enabled && g_mock.config.bus_address == NULL;
 }
@@ -482,7 +483,7 @@ int inkwell_ble_start_discovery(struct inkwell_ble_central *central) {
     if (central == NULL) {
         return -EINVAL;
     }
-    if (mocked()) {
+    if (scripted()) {
         return mock_discovery(true);
     }
     if (!central->open) {
@@ -495,7 +496,7 @@ int inkwell_ble_stop_discovery(struct inkwell_ble_central *central) {
     if (central == NULL) {
         return -EINVAL;
     }
-    if (mocked()) {
+    if (scripted()) {
         return mock_discovery(false);
     }
     if (!central->open) {
@@ -602,7 +603,7 @@ int inkwell_ble_disconnect(struct inkwell_ble_central *central, const char *addr
     if (central == NULL || address == NULL) {
         return -EINVAL;
     }
-    if (mocked()) {
+    if (scripted()) {
         const int result = g_mock.config.disconnect_result;
         if (result == 0 && g_mock.central == central) {
             g_mock.central = NULL;
@@ -708,7 +709,7 @@ int inkwell_ble_set_trusted(struct inkwell_ble_central *central, const char *add
     if (central == NULL || address == NULL) {
         return -EINVAL;
     }
-    if (mocked()) {
+    if (scripted()) {
         return 0;
     }
     if (!central->open) {
