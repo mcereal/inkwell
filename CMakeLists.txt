@@ -69,6 +69,7 @@ add_library(inkwell STATIC
     src/runtime/wake.c
     # codec: bytes in, bytes out. They parse; they do not know what the bytes are for.
     src/codec/base64.c
+    src/codec/esp_image.c
     src/codec/http.c
     src/codec/inflate.c
     src/codec/json.c
@@ -76,6 +77,7 @@ add_library(inkwell STATIC
     src/codec/png.c
     src/codec/wuffs.c
     src/codec/sha256.c
+    src/codec/uf2.c
     src/codec/zip.c
     # net: one hostname, one socket, one session - all of it on the loop, none of it blocking
     src/net/fetch.c

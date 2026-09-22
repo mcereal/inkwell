@@ -12,6 +12,7 @@ copied at configure time and a fixture refreshed on disk is the one the next run
 | `zip_tail_nrf52840_2.7.26.bin` | the last 64 KiB of a real release zip - its central directory and end record | the tail only, not the archive |
 | `zip_tail_nrf52840_2.8.0.bin` | the same, from a later release whose directory is laid out differently | the tail only |
 | `zip_member_t114_mt_json_2.7.26.bin` | one member of a release zip, local header and deflated data, exactly as served | nothing - all of it |
+| `t114_2.7.26.uf2` | first two and last two 512-byte blocks of a real 2.7.26 nRF52840 image | four of 2,866 blocks |
 | `png_palette_256.png` | a 256-square 8-bit indexed PNG | nothing - all 9,391 bytes |
 | `png_truecolour_256.png` | a 256-square 24-bit RGB PNG | nothing - all 25,868 bytes |
 
@@ -39,3 +40,10 @@ header, a 53-byte name, a 28-byte extra field, and then the deflated data. The l
 must come out to are the ones that archive's central directory carries for it, which is the
 pairing `codec/zip.h` leaves to `codec/inflate.h` - so the case checks both halves of a real
 archive against each other rather than against a number typed into a test.
+
+## The UF2 image
+
+`t114_2.7.26.uf2` preserves blocks 0, 1, 2864 and 2865 of the captured image.
+The first two form a truncated file; all four form a broken sequence. The codec suite
+rewrites only the `numBlocks` field when it needs a complete one- or two-block image.
+The addresses, family and payload sizes remain the bytes published in the release.

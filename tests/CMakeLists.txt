@@ -20,12 +20,14 @@ set(INKWELL_TEST_SUITES
     suites/base_time.c
     suites/base_version.c
     suites/codec_base64.c
+    suites/codec_esp_image.c
     suites/codec_http.c
     suites/codec_inflate.c
     suites/codec_json.c
     suites/codec_mqtt.c
     suites/codec_png.c
     suites/codec_sha256.c
+    suites/codec_uf2.c
     suites/codec_zip.c
     suites/io_serial.c
     suites/net_fetch.c
