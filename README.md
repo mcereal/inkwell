@@ -44,7 +44,7 @@ So the foundation moved down here, and inkcell stands on it.
 | `base/` | The floor: a monotonic clock and a wall clock you can distrust, a levelled log that bounds its own file, `$PREFIX_`-namespaced environment knobs, whole-file reads, UTF-8 that counts characters rather than bytes. Includes nothing, including from each other's area. |
 | `runtime/` | One epoll loop with a bounded number of fd sources, no threads anywhere, and `SIGINT`/`SIGTERM`/`SIGHUP` delivered through a signalfd so a shutdown runs the ordinary path instead of the default kill action. |
 | `codec/` | Bytes in, bytes out: base64 in both alphabets, SHA-256, a non-allocating JSON reader, an HTTP/1.1 request formatter and response parser that takes its input in whatever sized pieces the network hands it, and a zip central-directory walker that works on a window of a file rather than the whole thing. A codec parses; it does not know what the bytes are for. |
-| `net/` | One hostname turned into an address by a child that may block; a byte stream over a descriptor; TLS that reports `-EAGAIN` rather than waiting; one HTTPS request; and one bounded MQTT 3.1.1 client with subscriptions, keepalive, and reconnect backoff. All run on the same loop and hold no application policy. |
+| `net/` | One hostname turned into an address by a child that may block; a non-blocking TCP connector with a deadline; a byte stream over a descriptor; TLS that reports `-EAGAIN` rather than waiting; one HTTPS request; and one bounded MQTT 3.1.1 client with subscriptions, keepalive, and reconnect backoff. All run on the same loop and hold no application policy. |
 | `io/` | The USB serial ports the system has - sysfs on Linux, the I/O Registry on macOS - with what the USB tree says about each (a bridge chip or the device's own USB, a mass-storage interface beside it or not), and a tty opened raw and non-blocking for the loop. For a kernel without CDC-ACM, the generic-driver bind and the usbfs line-state request that make a native-USB device talk anyway. |
 
 Everything here is C17, freestanding of any framework, and allocates as little as it can get
@@ -133,13 +133,10 @@ new suite file goes in `INKWELL_TEST_SUITES` in `tests/CMakeLists.txt`.
 
 ## Status
 
-Early. The foundation, the loop, the leaf codecs, the resolver, the byte stream, the TLS
-session, the HTTPS client, and the MQTT client are here. Still to come out of mesh-client,
-roughly in the order
-the dependencies allow:
+Early. The foundation, the loop, the leaf codecs, the resolver, the TCP connector, the byte
+stream, the TLS session, the HTTPS client, and the MQTT client are here. Still to come out of
+mesh-client, roughly in the order the dependencies allow:
 
-- **the transports** — a non-blocking TCP connect policy, now that the byte stream under it is
-  here. The serial ports under the other one are `io/serial.h`.
 - **`bt/`** — a BlueZ GATT client over D-Bus: discovery, bonding, an `org.bluez.Agent1` that can
   answer a PIN prompt from inside the application, characteristic reads and writes, all
   asynchronous on the loop. About 3,200 lines, of which exactly four are Meshtastic-specific.
