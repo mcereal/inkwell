@@ -140,7 +140,8 @@ INKWELL_TEST_CASE(usb_storage_writer_syncs_and_reports_bytes, unit) {
     for (size_t i = 0; i < sizeof image; ++i) {
         image[i] = (uint8_t)i;
     }
-    struct inkwell_usb_storage_write writer = {0};
+    struct inkwell_usb_storage_write writer;
+    inkwell_usb_storage_write_init(&writer);
     const int started = inkwell_usb_storage_write_start(&writer, NULL, image, sizeof image, path,
                                                         inkwell_time_monotonic_ms());
     INKWELL_TEST_FAIL_IF_CLEANUP(started != 0, fixture_close(&fixture), "write should start");
@@ -165,5 +166,42 @@ INKWELL_TEST_CASE(usb_storage_writer_syncs_and_reports_bytes, unit) {
     fixture_close(&fixture);
     INKWELL_TEST_FAIL_IF(!done, "write should finish with acknowledged progress");
     INKWELL_TEST_FAIL_IF(!equal, "every byte should land on the device");
+    record_success(test_name);
+}
+
+INKWELL_TEST_CASE(usb_storage_writer_releases_claim_on_fd_zero, unit) {
+    struct storage_fixture fixture;
+    INKWELL_TEST_FAIL_IF(!fixture_open(&fixture), "could not create storage fixture");
+    char path[128];
+    snprintf(path, sizeof path, "%s/drive", fixture.dev);
+    INKWELL_TEST_FAIL_IF_CLEANUP(!put_file(path, ""), fixture_close(&fixture),
+                                 "could not seed drive");
+
+    const int saved_stdin = dup(STDIN_FILENO);
+    INKWELL_TEST_FAIL_IF_CLEANUP(saved_stdin < 0, fixture_close(&fixture), "could not save stdin");
+    const uint8_t image[] = {1U, 2U, 3U, 4U};
+    struct inkwell_usb_storage_write writer;
+    inkwell_usb_storage_write_init(&writer);
+    close(STDIN_FILENO);
+    const int started = inkwell_usb_storage_write_start(&writer, NULL, image, sizeof image, path,
+                                                        inkwell_time_monotonic_ms());
+    const bool claimed_zero = started == 0 && writer.device_fd == STDIN_FILENO;
+    const uint64_t deadline = inkwell_time_monotonic_ms() + 3000U;
+    while (writer.state == INKWELL_USB_STORAGE_WRITE_RUNNING &&
+           inkwell_time_monotonic_ms() < deadline) {
+        inkwell_usb_storage_write_tick(&writer, inkwell_time_monotonic_ms());
+        const struct timespec pause = {.tv_sec = 0, .tv_nsec = 1000000L};
+        (void)nanosleep(&pause, NULL);
+    }
+    const bool done = writer.state == INKWELL_USB_STORAGE_WRITE_DONE;
+    const bool released =
+        writer.device_fd == -1 && fcntl(STDIN_FILENO, F_GETFD) == -1 && errno == EBADF;
+    inkwell_usb_storage_write_cancel(&writer);
+    const int restored = dup2(saved_stdin, STDIN_FILENO);
+    close(saved_stdin);
+    fixture_close(&fixture);
+    INKWELL_TEST_FAIL_IF(restored < 0, "could not restore stdin");
+    INKWELL_TEST_FAIL_IF(!claimed_zero, "the device claim should use descriptor zero");
+    INKWELL_TEST_FAIL_IF(!done || !released, "completion must release descriptor zero");
     record_success(test_name);
 }

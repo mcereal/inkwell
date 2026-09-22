@@ -63,6 +63,11 @@ struct inkwell_usb_storage_write {
     uint64_t idle_deadline_ms;
 };
 
+/* Initialize a writer before its first start, tick, cancel, or progress call. Call again only
+   after a previous write has finished or been cancelled; initializing a running writer would
+   discard its child and exclusive device claim. An initialized idle writer owns no descriptors. */
+void inkwell_usb_storage_write_init(struct inkwell_usb_storage_write *write);
+
 /* Fork a child to write bytes to an existing block device. Each chunk is synced before its
    progress is reported. The caller owns image until the writer finishes or is cancelled; a
    loop is optional, and tick must be called even when one is supplied to reap the child. */

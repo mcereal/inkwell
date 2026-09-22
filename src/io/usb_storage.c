@@ -358,18 +358,25 @@ int inkwell_usb_storage_unmount(struct inkwell_usb_storage_target *target) {
 /* ---- the write -----------------------------------------------------------------------------
  */
 
+void inkwell_usb_storage_write_init(struct inkwell_usb_storage_write *write) {
+    if (write == NULL) {
+        return;
+    }
+    memset(write, 0, sizeof *write);
+    write->child = -1;
+    write->progress_fd = -1;
+    write->device_fd = -1;
+}
+
 static void write_release_fd(struct inkwell_usb_storage_write *write) {
-    /* `<= 0`, for the reason the pid test below is: a zeroed struct holds 0, and 0 is stdin -
-       never a pipe this module opened. A `< 0` test here closes the client's own stdin the
-       first time a cancel arrives before a start. */
-    if (write->device_fd > 0) {
+    if (write->device_fd >= 0) {
         /* Letting go of the claim, which is the other half of taking it: from here the
            platform may mount the drive again, and on a board that restarted there is nothing
            left to mount. */
         close(write->device_fd);
         write->device_fd = -1;
     }
-    if (write->progress_fd <= 0) {
+    if (write->progress_fd < 0) {
         return;
     }
     if (write->loop != NULL) {
@@ -402,7 +409,7 @@ static void write_consume(struct inkwell_usb_storage_write *write, const char *b
 
 /* Returns false at EOF. Never blocks: the fd is non-blocking. */
 static bool write_drain(struct inkwell_usb_storage_write *write, uint64_t now_ms) {
-    if (write->progress_fd <= 0) {
+    if (write->progress_fd < 0) {
         return false;
     }
     for (;;) {
@@ -522,7 +529,7 @@ int inkwell_usb_storage_write_start(struct inkwell_usb_storage_write *write,
     }
 
     close(fds[1]);
-    memset(write, 0, sizeof *write);
+    inkwell_usb_storage_write_init(write);
     write->loop = loop;
     write->state = INKWELL_USB_STORAGE_WRITE_RUNNING;
     write->child = pid;
@@ -575,10 +582,7 @@ void inkwell_usb_storage_write_tick(struct inkwell_usb_storage_write *write, uin
     if (write == NULL || write->state != INKWELL_USB_STORAGE_WRITE_RUNNING) {
         return;
     }
-    /*
-     * `<= 0`, not `< 0`: a zeroed struct holds 0 where a pid goes, and kill() reads 0 as the whole
-     * process group. A cancelled, never-started writer must not signal its caller's process group.
-     */
+    /* An initialized idle writer has child -1. Never signal a process group through pid 0. */
     if (write->child <= 0) {
         return;
     }
