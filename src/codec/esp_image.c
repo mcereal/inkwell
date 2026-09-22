@@ -9,6 +9,7 @@
 #define ESP_IMAGE_CHIP_OFFSET 12U
 /* The fixed header is 24 bytes and the first segment's header 8 more, so an application's
    esp_app_desc_t - which ESP-IDF places at the very start of the first segment - begins at 32. */
+#define ESP_FIRST_SEGMENT_LEN_OFFSET 28U
 #define ESP_APP_DESC_OFFSET 32U
 #define ESP_APP_DESC_MAGIC 0xABCD5432UL
 
@@ -40,6 +41,13 @@ enum inkwell_esp_image_verdict inkwell_esp_image_validate(const uint8_t *bytes, 
         (uint16_t)(bytes[ESP_IMAGE_CHIP_OFFSET] | (uint16_t)bytes[ESP_IMAGE_CHIP_OFFSET + 1U] << 8);
     if (out->chip_id != expect_chip) {
         return INKWELL_ESP_IMAGE_WRONG_CHIP;
+    }
+    const uint32_t first_segment_len = (uint32_t)bytes[ESP_FIRST_SEGMENT_LEN_OFFSET] |
+                                       (uint32_t)bytes[ESP_FIRST_SEGMENT_LEN_OFFSET + 1U] << 8 |
+                                       (uint32_t)bytes[ESP_FIRST_SEGMENT_LEN_OFFSET + 2U] << 16 |
+                                       (uint32_t)bytes[ESP_FIRST_SEGMENT_LEN_OFFSET + 3U] << 24;
+    if (out->segments == 0U || first_segment_len < sizeof(uint32_t)) {
+        return INKWELL_ESP_IMAGE_NOT_AN_APP;
     }
     const uint32_t desc_magic = (uint32_t)bytes[ESP_APP_DESC_OFFSET] |
                                 (uint32_t)bytes[ESP_APP_DESC_OFFSET + 1U] << 8 |

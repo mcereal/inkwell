@@ -65,8 +65,8 @@ enum inkwell_uf2_verdict {
     INKWELL_UF2_OK = 0,
     /* Not a length that could be 512-byte records, or the first record has no magic. */
     INKWELL_UF2_NOT_UF2,
-    /* Records, but one of them is wrong: no magic mid-file, a payload longer than a block can
-       hold, or a `numBlocks` that changed halfway through. */
+    /* Records, but one of them is wrong: no magic mid-file, an oversized or unaligned payload,
+       an inconsistent `numBlocks`, or more records than declared. */
     INKWELL_UF2_MALFORMED,
     /* A UF2 for a different chip. The family does not match the caller's expected chip. */
     INKWELL_UF2_WRONG_FAMILY,

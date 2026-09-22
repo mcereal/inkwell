@@ -60,7 +60,7 @@ enum inkwell_uf2_verdict inkwell_uf2_validate(const uint8_t *image, size_t len,
                 verdict = i == 0U ? INKWELL_UF2_NOT_UF2 : INKWELL_UF2_MALFORMED;
                 break;
             }
-            if (block.payload_size > INKWELL_UF2_PAYLOAD_MAX) {
+            if (block.payload_size > INKWELL_UF2_PAYLOAD_MAX || (block.payload_size & 3U) != 0U) {
                 verdict = INKWELL_UF2_MALFORMED;
                 break;
             }
@@ -114,13 +114,8 @@ enum inkwell_uf2_verdict inkwell_uf2_validate(const uint8_t *image, size_t len,
             info.payload_bytes += block.payload_size;
         }
         if (verdict == INKWELL_UF2_OK && info.blocks != info.num_blocks) {
-            /*
-             * A file with more blocks than it declares is as broken as one with fewer, and the
-             * two are told apart nowhere else - but INCOMPLETE is the one a user can act on
-             * ("it did not all arrive"), and a longer file cannot happen without the count
-             * having changed, which was refused above. So the only way here is short.
-             */
-            verdict = INKWELL_UF2_INCOMPLETE;
+            verdict =
+                info.blocks < info.num_blocks ? INKWELL_UF2_INCOMPLETE : INKWELL_UF2_MALFORMED;
         }
     }
 

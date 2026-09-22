@@ -205,3 +205,26 @@ INKWELL_TEST_CASE(uf2_refuses_a_file_that_is_not_a_sequence, unit) {
                          "and so is a payload longer than the block carrying it");
     record_success(test_name);
 }
+
+INKWELL_TEST_CASE(uf2_refuses_surplus_blocks_and_unaligned_payloads, unit) {
+    size_t len = 0U;
+    char *const bytes = inkwell_test_data_read("t114_2.7.26.uf2", &len);
+    INKWELL_TEST_FAIL_IF_CLEANUP(bytes == NULL || len < 2U * INKWELL_UF2_BLOCK_SIZE, free(bytes),
+                                 "two captured UF2 blocks should be readable");
+
+    uint8_t pair[2U * INKWELL_UF2_BLOCK_SIZE];
+    memcpy(pair, bytes, sizeof pair);
+    free(bytes);
+    uf2_set_num_blocks(pair, 1U);
+    uf2_set_num_blocks(pair + INKWELL_UF2_BLOCK_SIZE, 1U);
+    INKWELL_TEST_FAIL_IF(inkwell_uf2_validate(pair, sizeof pair, 0U, NULL) != INKWELL_UF2_MALFORMED,
+                         "surplus blocks are malformed, not a truncated download");
+
+    uf2_set_num_blocks(pair, 2U);
+    uf2_set_num_blocks(pair + INKWELL_UF2_BLOCK_SIZE, 2U);
+    pair[16] = 1U;
+    pair[17] = 0U;
+    INKWELL_TEST_FAIL_IF(inkwell_uf2_validate(pair, sizeof pair, 0U, NULL) != INKWELL_UF2_MALFORMED,
+                         "a payload size that is not four-byte aligned is malformed");
+    record_success(test_name);
+}

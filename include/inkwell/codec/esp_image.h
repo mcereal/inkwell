@@ -45,8 +45,8 @@ enum inkwell_esp_image_verdict {
     INKWELL_ESP_IMAGE_BAD_MAGIC,
     /* An image, for another chip. The one this check is for. */
     INKWELL_ESP_IMAGE_WRONG_CHIP,
-    /* An image for this chip with no app descriptor where an application keeps one: a
-       bootloader, or the `.factory.bin`, which starts with the bootloader. */
+    /* An image for this chip with no first segment carrying an app descriptor: a
+       bootloader, a malformed segment layout, or the `.factory.bin`. */
     INKWELL_ESP_IMAGE_NOT_AN_APP,
 };
 

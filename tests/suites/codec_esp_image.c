@@ -42,3 +42,26 @@ INKWELL_TEST_CASE(esp_image_reads_a_real_header, unit) {
 
     record_success(test_name);
 }
+
+INKWELL_TEST_CASE(esp_image_refuses_missing_first_segment, unit) {
+    uint8_t image[64];
+    memset(image, 0, sizeof image);
+    memcpy(image, k_esp_header, sizeof k_esp_header);
+
+    image[1] = 0U;
+    INKWELL_TEST_FAIL_IF(inkwell_esp_image_validate(image, sizeof image, INKWELL_ESP_CHIP_ESP32_S3,
+                                                    NULL) != INKWELL_ESP_IMAGE_NOT_AN_APP,
+                         "zero segments cannot carry an application descriptor");
+
+    image[1] = 1U;
+    memset(image + 28U, 0, 4U);
+    INKWELL_TEST_FAIL_IF(inkwell_esp_image_validate(image, sizeof image, INKWELL_ESP_CHIP_ESP32_S3,
+                                                    NULL) != INKWELL_ESP_IMAGE_NOT_AN_APP,
+                         "an empty first segment cannot carry an application descriptor");
+
+    image[28] = 3U;
+    INKWELL_TEST_FAIL_IF(inkwell_esp_image_validate(image, sizeof image, INKWELL_ESP_CHIP_ESP32_S3,
+                                                    NULL) != INKWELL_ESP_IMAGE_NOT_AN_APP,
+                         "a first segment shorter than the magic word is invalid");
+    record_success(test_name);
+}
