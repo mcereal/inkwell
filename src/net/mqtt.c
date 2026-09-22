@@ -36,15 +36,18 @@ static int mqtt_fd_callback(int fd, uint32_t events, void *userdata);
 
 /* ------------------------------------------------------------------ small things */
 
-static void mqtt_set_state(struct inkwell_mqtt_client *proxy,
+static bool mqtt_set_state(struct inkwell_mqtt_client *proxy,
                            enum inkwell_mqtt_client_state state) {
     if (proxy->state == state) {
-        return;
+        return true;
     }
     proxy->state = state;
     if (proxy->on_state != NULL) {
+        const uint64_t generation = proxy->generation;
         proxy->on_state(proxy->userdata, state);
+        return proxy->generation == generation;
     }
+    return true;
 }
 
 /*
@@ -115,7 +118,9 @@ static void mqtt_back_off(struct inkwell_mqtt_client *proxy, const char *why, co
         delay = INKWELL_MQTT_CLIENT_BACKOFF_MAX_MS;
     }
     proxy->retry_at_ms = proxy->now_ms + delay;
-    mqtt_set_state(proxy, INKWELL_MQTT_CLIENT_WAITING);
+    if (!mqtt_set_state(proxy, INKWELL_MQTT_CLIENT_WAITING)) {
+        return;
+    }
     /* The address rather than the host when the host was never parsed out of it, which is
        exactly the case a bad address is. */
     const char *const subject = proxy->host[0] != '\0' ? proxy->host : proxy->config.address;
@@ -161,7 +166,7 @@ static void mqtt_fail_tls(struct inkwell_mqtt_client *proxy) {
 /* ------------------------------------------------------------------ the descriptor */
 
 /*
- * Which epoll events this connection wants right now.
+ * Which event-loop notifications this connection wants right now.
  *
  * Recomputed from the state rather than toggled, because the answer has three independent
  * sources - a connect in flight, a write queue with a remainder, and a TLS session blocked on
@@ -408,7 +413,9 @@ static bool mqtt_on_connack(struct inkwell_mqtt_client *proxy, const uint8_t *bo
     proxy->deadline_ms = 0U;
     proxy->stats.connections++;
     memset(&proxy->failure, 0, sizeof proxy->failure);
-    mqtt_set_state(proxy, INKWELL_MQTT_CLIENT_READY);
+    if (!mqtt_set_state(proxy, INKWELL_MQTT_CLIENT_READY)) {
+        return false;
+    }
     inkwell_log_info("mqtt", "Connected to %s as %s", proxy->host, proxy->config.client_id);
 
     /* A clean session means the broker remembers no subscriptions, so the whole set goes out
@@ -567,7 +574,9 @@ static bool mqtt_consume(struct inkwell_mqtt_client *proxy) {
             break; /* the body is still arriving */
         }
 
-        if (!mqtt_handle(proxy, &header, proxy->in + at + header.header_len)) {
+        const uint64_t generation = proxy->generation;
+        if (!mqtt_handle(proxy, &header, proxy->in + at + header.header_len) ||
+            proxy->generation != generation) {
             return false;
         }
         /*
@@ -625,7 +634,7 @@ static void mqtt_read_ready(struct inkwell_mqtt_client *proxy) {
                because it has something to send is woken by INKWELL_LOOP_OUT, and mqtt_fd_callback()
                reads the flag to know that a writable socket means *this* rather than the write
                queue. Without it the read is never retried, since nothing new arrives to raise
-               INKWELL_LOOP_IN and epoll reports a writable socket forever. */
+               INKWELL_LOOP_IN and the loop reports a writable socket forever. */
             proxy->read_wants_write = proxy->tls.state != NULL && proxy->tls.wants_write;
             mqtt_arm(proxy);
             return;
@@ -652,7 +661,7 @@ static void mqtt_read_ready(struct inkwell_mqtt_client *proxy) {
 
     /*
      * The budget ran out with the socket still readable - and, under TLS, possibly with
-     * plaintext already decrypted and sitting inside the session where epoll cannot see it. The
+     * plaintext already decrypted and sitting inside the session where the loop cannot see it. The
      * flag is what brings us back next turn; without it a TLS connection can wait forever on
      * bytes it has already received.
      */
@@ -740,7 +749,9 @@ static void mqtt_finish_connect(struct inkwell_mqtt_client *proxy) {
         return;
     }
     proxy->deadline_ms = proxy->now_ms + INKWELL_MQTT_CLIENT_HANDSHAKE_TIMEOUT_MS;
-    mqtt_set_state(proxy, INKWELL_MQTT_CLIENT_SECURING);
+    if (!mqtt_set_state(proxy, INKWELL_MQTT_CLIENT_SECURING)) {
+        return;
+    }
     mqtt_secure(proxy);
 }
 
@@ -752,7 +763,7 @@ static int mqtt_fd_callback(int fd, uint32_t events, void *userdata) {
     }
 
     if (proxy->state == INKWELL_MQTT_CLIENT_CONNECTING) {
-        /* EPOLLERR here is the ordinary refusal - nothing listening on that port - and
+        /* INKWELL_LOOP_ERR here is the ordinary refusal - nothing listening on that port - and
            getsockopt() is what turns it into the errno that says so. */
         if ((events & (uint32_t)(INKWELL_LOOP_OUT | INKWELL_LOOP_ERR | INKWELL_LOOP_HUP)) != 0U) {
             mqtt_finish_connect(proxy);
@@ -928,6 +939,7 @@ void inkwell_mqtt_client_shutdown(struct inkwell_mqtt_client *proxy) {
     if (proxy == NULL) {
         return;
     }
+    proxy->generation++;
     mqtt_close(proxy);
     inkwell_resolve_shutdown(&proxy->resolve);
     proxy->state = INKWELL_MQTT_CLIENT_OFF;
@@ -1025,6 +1037,7 @@ int inkwell_mqtt_client_start(struct inkwell_mqtt_client *proxy,
         return -EINVAL;
     }
 
+    proxy->generation++;
     mqtt_close(proxy);
     proxy->now_ms = now_ms;
     proxy->config = *config;
@@ -1070,6 +1083,7 @@ void inkwell_mqtt_client_stop(struct inkwell_mqtt_client *proxy) {
             (void)mqtt_raw_write(proxy, packet, (size_t)len);
         }
     }
+    proxy->generation++;
     mqtt_close(proxy);
     memset(&proxy->failure, 0, sizeof proxy->failure);
     proxy->failures = 0U;
@@ -1181,7 +1195,7 @@ void inkwell_mqtt_client_tick(struct inkwell_mqtt_client *proxy, uint64_t now_ms
     }
 
     /*
-     * Data already decrypted inside the TLS session, or a read budget that ran out. epoll has
+     * Data already decrypted inside the TLS session, or a read budget that ran out. The loop has
      * nothing left to report in the first case, so this is the only thing that comes back.
      *
      * GREETING as well as READY, because the CONNACK is read by that same function: a session

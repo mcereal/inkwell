@@ -465,6 +465,35 @@ static void probe_on_message(void *userdata, const char *topic, const uint8_t *p
     }
 }
 
+struct callback_restart {
+    struct inkwell_mqtt_client *client;
+    struct inkwell_mqtt_client_config config;
+    uint64_t now_ms;
+    unsigned calls;
+    int result;
+};
+
+static void restart_on_message(void *userdata, const char *topic, const uint8_t *payload,
+                               size_t len) {
+    (void)topic;
+    (void)payload;
+    (void)len;
+    struct callback_restart *restart = (struct callback_restart *)userdata;
+    restart->calls++;
+    restart->result = inkwell_mqtt_client_start(restart->client, &restart->config, NULL, NULL, NULL,
+                                                restart->now_ms);
+}
+
+static void restart_on_ready(void *userdata, enum inkwell_mqtt_client_state state) {
+    struct callback_restart *restart = (struct callback_restart *)userdata;
+    if (state != INKWELL_MQTT_CLIENT_READY || restart->calls != 0U) {
+        return;
+    }
+    restart->calls++;
+    restart->result = inkwell_mqtt_client_start(restart->client, &restart->config, NULL, NULL, NULL,
+                                                restart->now_ms);
+}
+
 /*
  * One turn of everything: the broker takes a connection if one is offered, the event loop
  * delivers whatever is ready, and the proxy's clock advances by a step.
@@ -976,6 +1005,114 @@ INKWELL_TEST_CASE(mqtt_client_delivers_what_the_broker_sends, unit) {
     }
     if (inkwell_mqtt_client_stats(&probe.proxy).received != 1U) {
         record_failure(test_name, "a delivered message should be counted");
+        goto cleanup;
+    }
+    record_success(test_name);
+
+cleanup:
+    probe_stop(&probe);
+}
+
+INKWELL_TEST_CASE(mqtt_client_message_callback_may_replace_connection, unit) {
+    struct proxy_probe probe;
+    if (!probe_start(&probe)) {
+        record_failure(test_name, "the harness did not start");
+        return;
+    }
+
+    struct callback_restart restart;
+    memset(&restart, 0, sizeof restart);
+    restart.client = &probe.proxy;
+    restart.result = -1;
+    probe_config(&restart.config, probe.broker.port);
+    snprintf(restart.config.client_id, sizeof restart.config.client_id, "replacement-message");
+
+    struct inkwell_mqtt_client_config config;
+    probe_config(&config, probe.broker.port);
+    if (inkwell_mqtt_client_start(&probe.proxy, &config, restart_on_message, NULL, &restart,
+                                  probe.now_ms) != 0) {
+        record_failure(test_name, "the proxy did not start");
+        goto cleanup;
+    }
+    struct inkwell_mqtt_header header;
+    const uint8_t *body = NULL;
+    if (!probe_until_packet(&probe, &header, &body, 100U) || header.type != INKWELL_MQTT_CONNECT) {
+        record_failure(test_name, "the first CONNECT did not arrive");
+        goto cleanup;
+    }
+    broker_connack(&probe.broker, INKWELL_MQTT_CONNACK_ACCEPTED);
+    if (!probe_until_state(&probe, INKWELL_MQTT_CLIENT_READY, 100U)) {
+        record_failure(test_name, "the first connection did not become ready");
+        goto cleanup;
+    }
+
+    uint8_t packet[128];
+    static const uint8_t payload[] = {0x42U};
+    const int len = inkwell_mqtt_encode_publish(packet, sizeof packet, "example/restart", payload,
+                                                sizeof payload, false);
+    if (len < 0) {
+        record_failure(test_name, "the fixture could not build a PUBLISH");
+        goto cleanup;
+    }
+    restart.now_ms = probe.now_ms;
+    broker_send(&probe.broker, packet, (size_t)len);
+    for (unsigned turn = 0U; turn < 100U && restart.calls == 0U; ++turn) {
+        probe_turn(&probe, 10U);
+    }
+    if (restart.calls != 1U || restart.result != 0) {
+        record_failure(test_name, "the message callback did not replace the connection");
+        goto cleanup;
+    }
+    if (probe.proxy.in_len > sizeof probe.proxy.in ||
+        strcmp(probe.proxy.config.client_id, "replacement-message") != 0) {
+        record_failure(test_name, "the old packet handler damaged the replacement connection");
+        goto cleanup;
+    }
+    record_success(test_name);
+
+cleanup:
+    probe_stop(&probe);
+}
+
+INKWELL_TEST_CASE(mqtt_client_state_callback_may_replace_connection, unit) {
+    struct proxy_probe probe;
+    if (!probe_start(&probe)) {
+        record_failure(test_name, "the harness did not start");
+        return;
+    }
+
+    struct callback_restart restart;
+    memset(&restart, 0, sizeof restart);
+    restart.client = &probe.proxy;
+    restart.result = -1;
+    probe_config(&restart.config, probe.broker.port);
+    snprintf(restart.config.client_id, sizeof restart.config.client_id, "replacement-state");
+
+    struct inkwell_mqtt_client_config config;
+    probe_config(&config, probe.broker.port);
+    if (inkwell_mqtt_client_start(&probe.proxy, &config, NULL, restart_on_ready, &restart,
+                                  probe.now_ms) != 0) {
+        record_failure(test_name, "the proxy did not start");
+        goto cleanup;
+    }
+    struct inkwell_mqtt_header header;
+    const uint8_t *body = NULL;
+    if (!probe_until_packet(&probe, &header, &body, 100U) || header.type != INKWELL_MQTT_CONNECT) {
+        record_failure(test_name, "the first CONNECT did not arrive");
+        goto cleanup;
+    }
+    restart.now_ms = probe.now_ms;
+    broker_connack(&probe.broker, INKWELL_MQTT_CONNACK_ACCEPTED);
+    for (unsigned turn = 0U; turn < 100U && restart.calls == 0U; ++turn) {
+        probe_turn(&probe, 10U);
+    }
+    if (restart.calls != 1U || restart.result != 0) {
+        record_failure(test_name, "the state callback did not replace the connection");
+        goto cleanup;
+    }
+    if (probe.proxy.in_len > sizeof probe.proxy.in ||
+        strcmp(probe.proxy.config.client_id, "replacement-state") != 0) {
+        record_failure(test_name, "the CONNACK handler damaged the replacement connection");
         goto cleanup;
     }
     record_success(test_name);

@@ -22,7 +22,7 @@ extern "C" {
  * This client deliberately knows nothing about the application protocol carried in a topic or
  * payload; its business is the MQTT session and the socket underneath it.
  *
- * **Everything is on the one epoll loop.** The socket is non-blocking, the name lookup is
+ * **Everything is on the one event loop.** The socket is non-blocking, the name lookup is
  * inkwell_resolve's forked child, and TLS is a state machine over the same descriptor. There is no
  * thread here and there is nowhere for one to go.
  *
@@ -116,8 +116,7 @@ enum inkwell_mqtt_client_state {
  * Getting to a host is `enum inkwell_net_reason` and is inkwell's, because every link that
  * reaches a network fails in the same ways. What is left over is this: the broker's own answer
  * to being asked for a session, and the two this refuses before it tries. Neither set carries a
- * word - the sentence for either is built in src/ui/tables/mqtt.c, which is the only place that
- * knows what language the reader has.
+ * word; the caller maps the record to whatever user-facing text its application needs.
  *
  * The refusals are kept apart rather than collapsed into "the broker said no" because they are
  * three different things to do next: a wrong password is a setting, a client that is not
@@ -204,7 +203,11 @@ struct inkwell_mqtt_client {
     struct inkwell_resolve resolve;
     int fd;
     bool fd_registered;
-    bool want_write; /* EPOLLOUT is armed because something is waiting to go out */
+    bool want_write; /* INKWELL_LOOP_OUT is armed because something is waiting to go out */
+
+    /* Changes whenever start(), stop(), or shutdown() replaces the active session. Packet
+       handlers use it to notice that a callback replaced the connection underneath them. */
+    uint64_t generation;
 
     /* Only started when config.tls_enabled; a plaintext connection never touches it, and
        `tls.state` being non-NULL is what every read and write branches on. */
@@ -216,7 +219,7 @@ struct inkwell_mqtt_client {
     size_t in_len;
     /*
      * The socket was still readable when the per-turn read budget ran out - or, under TLS,
-     * plaintext is already decrypted and sitting inside the session where epoll cannot see it
+     * plaintext is already decrypted and sitting inside the session where the loop cannot see it
      * and will never report it again. Either way the next tick() has to come back and read
      * rather than wait to be woken.
      */
@@ -227,12 +230,13 @@ struct inkwell_mqtt_client {
      * The two directions come apart under TLS: `mbedtls_ssl_read()` may have to send something
      * before it can return anything - refusing a renegotiation with an alert is the reachable
      * case, since this client never enables renegotiation and a TLS 1.2 broker is free to ask -
-     * and on a full socket that send is what reports WANT_WRITE. Waiting for EPOLLIN then waits
-     * for the wrong event: the peer is not going to speak again until we have spoken.
+     * and on a full socket that send is what reports WANT_WRITE. Waiting only for
+     * INKWELL_LOOP_IN would wait for the wrong event: the peer is not going to speak again until
+     * we have spoken.
      *
      * Kept apart from `tls.wants_write`, which belongs to whichever call blocked last and is
      * cleared by the next one that succeeds. A write finishing must not retract a read's claim
-     * on EPOLLOUT.
+     * on INKWELL_LOOP_OUT.
      */
     bool read_wants_write;
     /* Bytes of an oversized inbound body still to be read and discarded. The stream stays in
