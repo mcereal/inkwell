@@ -451,6 +451,9 @@ void inkwell_ble_backend_close(struct inkwell_ble_central *central) {
         backend->agent_pending = NULL;
     }
     if (backend->connection != NULL) {
+        /* What the watch has not drained yet - a Disconnect on the way out, say - goes now:
+           after this nothing drains it, and a private connection's queue closes with it. */
+        dbus_connection_flush(backend->connection);
         dbus_connection_set_watch_functions(backend->connection, NULL, NULL, NULL, NULL, NULL);
         if (backend->connection_private) {
             dbus_connection_close(backend->connection);
@@ -1051,9 +1054,10 @@ static int send_call(struct inkwell_ble_central *central, const char *path, cons
 
 /*
  * A call whose answer only matters when it is a refusal: sent and not waited for, so 0 means
- * bluetoothd was asked. process() matches the reply and logs it if it is an error. Flushed
- * because a caller may close the connection next - a disconnect on the way out is exactly that -
- * and a message still queued would go with it.
+ * bluetoothd was asked. process() matches the reply and logs it if it is an error. Not flushed:
+ * libdbus writes what the socket takes at once and the writable watch drains the rest, where a
+ * flush would wait out a backpressured bus on the loop. close() is what flushes, so a Disconnect
+ * sent on the way out still leaves.
  */
 static int send_logged(struct inkwell_ble_central *central, DBusMessage *message,
                        const char *what) {
@@ -1064,7 +1068,6 @@ static int send_logged(struct inkwell_ble_central *central, DBusMessage *message
     if (!sent) {
         return -ENOMEM;
     }
-    dbus_connection_flush(backend->connection);
     /* Oldest first out: a reply that has not come back after eight more calls goes unlogged. */
     struct bluez_unanswered *slot = &backend->unanswered[backend->unanswered_next];
     backend->unanswered_next = (backend->unanswered_next + 1U) % INKWELL_BLUEZ_UNANSWERED;
@@ -1159,7 +1162,6 @@ int inkwell_ble_backend_disconnect(struct inkwell_ble_central *central, const ch
                  "member='PropertiesChanged',path='%s'",
                  central->notify_handle);
         dbus_bus_remove_match(connection, rule, NULL);
-        dbus_connection_flush(connection);
     }
     return 0;
 }
@@ -1650,7 +1652,6 @@ int inkwell_ble_backend_subscribe(struct inkwell_ble_central *central, const cha
              handle);
     /* Without an error to fill, AddMatch is sent and not waited for. */
     dbus_bus_add_match(connection, rule, NULL);
-    dbus_connection_flush(connection);
     return 0;
 }
 
