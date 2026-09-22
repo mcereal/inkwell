@@ -37,6 +37,13 @@
 #define INKWELL_BLUEZ_AGENT_PATH "/org/inkwell/agent"
 #define INKWELL_BLUEZ_DEFAULT_ADAPTER "/org/bluez/hci0"
 #define INKWELL_BLUEZ_WATCHES 8U
+/*
+ * The bound on the blocking calls that used to take libdbus' 25 s default: discovery on and off,
+ * and Disconnect. bluetoothd answers each in milliseconds when it is well; this only caps how
+ * long the loop stalls when it is not. Making them asynchronous is the real fix and a larger one:
+ * their callers act on the answer in the same turn.
+ */
+#define INKWELL_BLUEZ_ADAPTER_TIMEOUT_MS 5000
 
 struct bluez_watch {
     DBusWatch *watch;
@@ -792,7 +799,7 @@ int inkwell_ble_backend_discovery(struct inkwell_ble_central *central, bool on) 
     if (message == NULL) {
         return -ENOMEM;
     }
-    const int result = call_blocking(central, message, DBUS_TIMEOUT_USE_DEFAULT, method);
+    const int result = call_blocking(central, message, INKWELL_BLUEZ_ADAPTER_TIMEOUT_MS, method);
     /* Adapter errors were always reported as -EIO, and callers log the errno as a reason. */
     return result < 0 ? -EIO : 0;
 }
@@ -826,7 +833,7 @@ int inkwell_ble_backend_disconnect(struct inkwell_ble_central *central, const ch
     if (message == NULL) {
         return -ENOMEM;
     }
-    if (call_blocking(central, message, DBUS_TIMEOUT_USE_DEFAULT, "Disconnect") < 0) {
+    if (call_blocking(central, message, INKWELL_BLUEZ_ADAPTER_TIMEOUT_MS, "Disconnect") < 0) {
         return -EIO;
     }
     if (central->notify_handle[0] != '\0') {
@@ -1049,6 +1056,29 @@ static void agent_ack(struct inkwell_ble_central *central, DBusMessage *call) {
     send_and_release(central, dbus_message_new_method_return(call));
 }
 
+/*
+ * Whether an agent call is about the bond this central has in flight.
+ *
+ * Being the *default* agent means BlueZ routes every question here - for pairings someone else
+ * started (a remote device pairing to this host, another client's Pair) and for services on other
+ * devices entirely. Answering one of those, or putting its PIN in front of the user as if it were
+ * ours, would approve a bond nobody here asked for. So only the pair in flight is answered.
+ */
+static bool agent_call_is_ours(struct inkwell_ble_central *central, const char *device) {
+    char ours[INKWELL_BLE_HANDLE_MAX];
+    return central->pair_state == 1 && device != NULL &&
+           device_path(central, central->pair_address, ours, sizeof ours) &&
+           strcmp(device, ours) == 0;
+}
+
+static void agent_refuse(struct inkwell_ble_central *central, DBusMessage *call, const char *member,
+                         const char *device) {
+    inkwell_log_warn("ble", "Refusing %s for %s: no pairing of ours is in flight", member,
+                     device != NULL ? device : "?");
+    send_and_release(central,
+                     dbus_message_new_error(call, "org.bluez.Error.Rejected", "Not requested"));
+}
+
 /* Holds an agent call that needs an answer from the user. BlueZ blocks the pairing until then
    (its own timeout is a minute, which is plenty to read a PIN off a screen and type it). */
 static void agent_defer(struct inkwell_ble_central *central, DBusMessage *call,
@@ -1113,18 +1143,30 @@ static bool handle_agent_call(struct inkwell_ble_central *central, DBusMessage *
 
     if (strcmp(member, "RequestPasskey") == 0) {
         dbus_message_get_args(message, NULL, DBUS_TYPE_OBJECT_PATH, &device, DBUS_TYPE_INVALID);
+        if (!agent_call_is_ours(central, device)) {
+            agent_refuse(central, message, member, device);
+            return true;
+        }
         inkwell_log_info("ble", "Pairing: %s is asking for its PIN", device != NULL ? device : "?");
         agent_defer(central, message, INKWELL_BLE_AGENT_REQUEST_PASSKEY, device, 0U);
         return true;
     }
     if (strcmp(member, "RequestPinCode") == 0) {
         dbus_message_get_args(message, NULL, DBUS_TYPE_OBJECT_PATH, &device, DBUS_TYPE_INVALID);
+        if (!agent_call_is_ours(central, device)) {
+            agent_refuse(central, message, member, device);
+            return true;
+        }
         agent_defer(central, message, INKWELL_BLE_AGENT_REQUEST_PINCODE, device, 0U);
         return true;
     }
     if (strcmp(member, "RequestConfirmation") == 0) {
         dbus_message_get_args(message, NULL, DBUS_TYPE_OBJECT_PATH, &device, DBUS_TYPE_UINT32,
                               &passkey, DBUS_TYPE_INVALID);
+        if (!agent_call_is_ours(central, device)) {
+            agent_refuse(central, message, member, device);
+            return true;
+        }
         /* Numeric comparison. The number is shown to the user rather than accepted blind: it
            is the only thing that says the bond is with the peripheral in your hand and not
            something else that answered the pairing. */
@@ -1138,15 +1180,8 @@ static bool handle_agent_call(struct inkwell_ble_central *central, DBusMessage *
         return true;
     }
     if (strcmp(member, "RequestAuthorization") == 0 || strcmp(member, "AuthorizeService") == 0) {
-        /*
-         * Being the *default* agent means these also arrive for pairings someone else started
-         * (a remote device pairing to this host) and for services on other devices entirely.
-         * Acknowledging those would authorize them silently, so only the bond this central has
-         * in flight is answered; anything else is refused.
-         *
-         * The two carry different argument lists, and get_args fails on a mismatch - which
-         * would leave `device` NULL and refuse the legitimate case along with the rest.
-         */
+        /* The two carry different argument lists, and get_args fails on a mismatch - which
+           would leave `device` NULL and refuse the legitimate case along with the rest. */
         if (strcmp(member, "AuthorizeService") == 0) {
             const char *uuid = NULL;
             dbus_message_get_args(message, NULL, DBUS_TYPE_OBJECT_PATH, &device, DBUS_TYPE_STRING,
@@ -1154,15 +1189,8 @@ static bool handle_agent_call(struct inkwell_ble_central *central, DBusMessage *
         } else {
             dbus_message_get_args(message, NULL, DBUS_TYPE_OBJECT_PATH, &device, DBUS_TYPE_INVALID);
         }
-        char ours[INKWELL_BLE_HANDLE_MAX];
-        const bool in_flight = central->pair_state == 1 && device != NULL &&
-                               device_path(central, central->pair_address, ours, sizeof ours) &&
-                               strcmp(device, ours) == 0;
-        if (!in_flight) {
-            inkwell_log_warn("ble", "Refusing %s for %s: no pairing of ours is in flight", member,
-                             device != NULL ? device : "?");
-            send_and_release(central, dbus_message_new_error(message, "org.bluez.Error.Rejected",
-                                                             "Not requested"));
+        if (!agent_call_is_ours(central, device)) {
+            agent_refuse(central, message, member, device);
             return true;
         }
         agent_ack(central, message);

@@ -166,6 +166,45 @@ static const char *test_operations(DBusConnection *server, struct inkwell_loop *
     return NULL;
 }
 
+/*
+ * The default agent is asked about every pairing on the host, not only ours. A RequestPasskey for
+ * a device this central is not pairing must be refused on the bus and never become a prompt.
+ */
+static const char *test_agent_refuses_strangers(DBusConnection *server, struct inkwell_loop *loop,
+                                                struct inkwell_ble_central *client,
+                                                const char *client_name) {
+    DBusMessage *ask = dbus_message_new_method_call(client_name, "/org/inkwell/agent",
+                                                    "org.bluez.Agent1", "RequestPasskey");
+    const char *device = "/org/bluez/hci0/dev_11_22_33_44_55_66";
+    dbus_message_append_args(ask, DBUS_TYPE_OBJECT_PATH, &device, DBUS_TYPE_INVALID);
+    dbus_uint32_t serial = 0U;
+    dbus_connection_send(server, ask, &serial);
+    dbus_connection_flush(server);
+    dbus_message_unref(ask);
+
+    const char *failure = "the agent never answered a stranger's RequestPasskey";
+    for (unsigned turn = 0U; turn < 100U; ++turn) {
+        inkwell_loop_run(loop, 0);
+        (void)inkwell_ble_process(client);
+        dbus_connection_read_write(server, 10);
+        DBusMessage *message;
+        while ((message = dbus_connection_pop_message(server)) != NULL) {
+            if (dbus_message_get_reply_serial(message) == serial) {
+                const char *error = dbus_message_get_error_name(message);
+                failure = error != NULL && strcmp(error, "org.bluez.Error.Rejected") == 0
+                              ? NULL
+                              : "a stranger's RequestPasskey was not rejected";
+                turn = 100U;
+            }
+            dbus_message_unref(message);
+        }
+    }
+    if (failure == NULL && inkwell_ble_agent_request(client, NULL)) {
+        failure = "a stranger's RequestPasskey became a prompt";
+    }
+    return failure;
+}
+
 int main(void) {
     const char *address = getenv("DBUS_SESSION_BUS_ADDRESS");
     if (address == NULL) {
@@ -199,6 +238,9 @@ int main(void) {
     uint8_t bytes[512];
     size_t length;
     DBusMessage *call = NULL;
+    /* The central's name on the bus, read off the first call it makes; the agent test calls
+       back on it. */
+    char client_name[64] = {0};
     for (unsigned pass = 0U; pass < 4U; ++pass) {
         if (inkwell_ble_read(&client, "/characteristic", bytes, sizeof bytes, &length) != -EAGAIN ||
             length != 0U) {
@@ -209,6 +251,9 @@ int main(void) {
         if (call == NULL) {
             failure = "queued read never reached the fake service";
             break;
+        }
+        if (client_name[0] == '\0' && dbus_message_get_sender(call) != NULL) {
+            snprintf(client_name, sizeof client_name, "%s", dbus_message_get_sender(call));
         }
         if (strcmp(dbus_message_get_signature(call), "a{sv}") != 0) {
             failure = "ReadValue options were not marshalled correctly";
@@ -261,6 +306,11 @@ int main(void) {
     if (failure == NULL) {
         failure = test_operations(server, &loop, &client, input_fd, &inputs);
     }
+    if (failure == NULL) {
+        failure = client_name[0] != '\0'
+                      ? test_agent_refuses_strangers(server, &loop, &client, client_name)
+                      : "never learned the central's bus name";
+    }
     inkwell_loop_remove_fd(&loop, input_fd);
     close(input_fd);
     inkwell_ble_close(&client);
@@ -273,7 +323,7 @@ int main(void) {
         fprintf(stderr, "%s\n", failure);
         return 1;
     }
-    puts("Isolated D-Bus: nonblocking send, input responsiveness, reply parsing and timeout "
-         "passed.");
+    puts("Isolated D-Bus: nonblocking send, input responsiveness, reply parsing, timeout and "
+         "agent ownership passed.");
     return 0;
 }

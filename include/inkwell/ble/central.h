@@ -32,9 +32,17 @@
  * of range, a pair waiting on a human typing a PIN - and nothing may hold the loop for that
  * long.
  *
- * Every request has a deadline and answers -ETIMEDOUT past it, whether or not the stack ever
- * replies; a reply that arrives after its request was timed out or cancelled is discarded rather
- * than completing whatever was asked next.
+ * A read, a write and the two property queries each have a deadline and answer -ETIMEDOUT past
+ * it, whether or not the stack ever replies. **A connect and a pair do not**, and the caller owns
+ * their clock: a pair waits on a human typing a PIN for as long as that takes, and how long a
+ * connect is worth waiting for is a policy. A caller gives up with connect_cancel() or
+ * pair_cancel(), which also frees the slot the next begin needs. Either way, a reply that arrives
+ * after its request was timed out or cancelled is discarded rather than completing whatever was
+ * asked next.
+ *
+ * Some calls do block the loop, each for a bounded time: a listing or characteristic lookup (one
+ * second), discovery on or off and a disconnect (five), and on BlueZ a subscribe (eight, because
+ * StartNotify may start a bond). They are marked where they are declared.
  *
  * Only one of each kind of request is in flight at a time - one read, one write, one connect,
  * one pair - which is what a single link needs and what keeps the bookkeeping here a handful of
@@ -201,7 +209,8 @@ int inkwell_ble_stop_discovery(struct inkwell_ble_central *central);
 int inkwell_ble_list_by_service(struct inkwell_ble_central *central, const char *service_uuid,
                                 struct inkwell_ble_device *devices, size_t capacity, size_t *count);
 
-/* Starts a connect and returns at once. -EBUSY if one is already in flight. */
+/* Starts a connect and returns at once. -EBUSY if one is already in flight. No deadline: see the
+   top of this file. */
 int inkwell_ble_connect_begin(struct inkwell_ble_central *central, const char *address);
 /* 1 when the reply has arrived (*out_result 0 or a negative errno), 0 while pending, -EINVAL if
    nothing is in flight. */
