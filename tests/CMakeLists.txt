@@ -14,6 +14,7 @@ set(INKWELL_TEST_SUPPORT
 )
 
 set(INKWELL_TEST_SUITES
+    suites/ble_central.c
     suites/base_log.c
     suites/base_text.c
     suites/base_time.c
@@ -52,6 +53,22 @@ target_compile_definitions(inkwell_tests PRIVATE
 
 add_test(NAME inkwell_unit COMMAND inkwell_tests)
 set_tests_properties(inkwell_unit PROPERTIES LABELS unit)
+
+# The BlueZ backend's D-Bus half, against a fake org.bluez on an isolated bus. Its own
+# executable because it needs dbus-run-session around it, and only where both the backend and
+# that tool exist: it must never find the system bus.
+if(INKWELL_BLE_BACKEND STREQUAL "bluez")
+    find_program(INKWELL_DBUS_RUN_SESSION dbus-run-session)
+    if(INKWELL_DBUS_RUN_SESSION)
+        add_executable(inkwell_ble_bluez_bus_tests ble_bluez_bus.c)
+        target_include_directories(inkwell_ble_bluez_bus_tests PRIVATE ${INKWELL_DBUS_INCLUDE_DIRS})
+        target_link_libraries(inkwell_ble_bluez_bus_tests PRIVATE inkwell inkwell_options
+                              ${INKWELL_DBUS_LIBRARIES})
+        add_test(NAME inkwell_ble_bluez_bus
+                 COMMAND ${INKWELL_DBUS_RUN_SESSION} -- $<TARGET_FILE:inkwell_ble_bluez_bus_tests>)
+        set_tests_properties(inkwell_ble_bluez_bus PROPERTIES LABELS integration TIMEOUT 15)
+    endif()
+endif()
 
 # The layering rule the compiler cannot see. See scripts/check-layers.py.
 find_package(Python3 COMPONENTS Interpreter)

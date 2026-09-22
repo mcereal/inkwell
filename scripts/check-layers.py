@@ -37,6 +37,9 @@ ALLOWED = {
     # One hostname, one socket, one session. It runs on the loop and speaks through a codec;
     # it does not know which application asked.
     "net": {"base", "runtime", "codec"},
+    # One Bluetooth LE central. Like net/, it runs on the loop and does not know which
+    # application asked; unlike net/, it has no bytes to parse, so it needs no codec.
+    "ble": {"base", "runtime"},
 }
 
 INCLUDE = re.compile(r'^\s*#\s*include\s+["<]inkwell/([a-z0-9_]+)/')
