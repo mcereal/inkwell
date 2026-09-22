@@ -143,7 +143,7 @@ which decides whether either flash path applies to a particular device.
 
 `base/record_file.h` now owns the common key/value line reader, escaping, append-and-close,
 and temporary-file replacement. A caller supplies callbacks for writing and reading its own
-records. The snapshot path syncs its bytes before rename; append and archive compaction keep
+records. The snapshot path syncs its bytes before rename and its directory afterward; append and archive compaction keep
 their existing close and rename behavior. The reader discards an overlong line as a unit so its
 tail cannot be mistaken for another record.
 

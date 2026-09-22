@@ -2,6 +2,7 @@
 #include "inkwell/base/record_file.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,11 +15,18 @@ int inkwell_record_read(FILE *file, char *line, size_t capacity, inkwell_record_
     }
     while (fgets(line, (int)capacity, file) != NULL) {
         const size_t length = strlen(line);
-        if (length > 0U && line[length - 1U] != '\n' && !feof(file)) {
-            int next;
-            while ((next = fgetc(file)) != '\n' && next != EOF) {
+        bool complete = length > 0U && line[length - 1U] == '\n';
+        if (!complete && length == capacity - 1U) {
+            /* The newline itself may be the first byte beyond the caller's buffer. */
+            int next = fgetc(file);
+            complete = next == '\n';
+            if (!complete && next != EOF) {
+                while ((next = fgetc(file)) != '\n' && next != EOF) {
+                }
             }
-            continue;
+        }
+        if (!complete) {
+            continue; /* an overlong line or an interrupted final append */
         }
         line[strcspn(line, "\r\n")] = '\0';
         if (line[0] == '\0' || line[0] == '#') {
@@ -68,6 +76,36 @@ void inkwell_record_unescape(char *value) {
     *write_ptr = '\0';
 }
 
+/* The name is durable only after the directory entry is synced too. */
+static int sync_parent_directory(const char *path) {
+    char *parent = strdup(path);
+    if (parent == NULL) {
+        return -ENOMEM;
+    }
+    char *slash = strrchr(parent, '/');
+    const char *directory = ".";
+    if (slash != NULL) {
+        if (slash == parent) {
+            slash[1] = '\0';
+        } else {
+            *slash = '\0';
+        }
+        directory = parent;
+    }
+    const int fd = open(directory, O_RDONLY);
+    int result = fd < 0 ? -errno : 0;
+    if (fd >= 0) {
+        if (fsync(fd) != 0) {
+            result = -errno;
+        }
+        if (close(fd) != 0 && result == 0) {
+            result = -errno;
+        }
+    }
+    free(parent);
+    return result;
+}
+
 int inkwell_record_replace(const char *path, char *temp, size_t temp_capacity,
                            inkwell_record_write_fn write_records, void *context, bool sync_data) {
     if (path == NULL || path[0] == '\0' || temp == NULL || temp_capacity == 0U ||
@@ -98,8 +136,9 @@ int inkwell_record_replace(const char *path, char *temp, size_t temp_capacity,
     }
     if (result != 0) {
         (void)unlink(temp);
+        return result;
     }
-    return result;
+    return sync_data ? sync_parent_directory(path) : 0;
 }
 
 int inkwell_record_append(const char *path, inkwell_record_write_fn write_records, void *context) {

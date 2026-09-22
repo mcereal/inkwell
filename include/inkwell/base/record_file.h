@@ -19,8 +19,8 @@ typedef void (*inkwell_record_visit_fn)(void *context, const char *key, char *va
 typedef void (*inkwell_record_write_fn)(FILE *file, void *context);
 
 /* Read newline-delimited key=value lines. The caller supplies the fixed line buffer. Blank
- * lines, comments and lines without '=' are ignored. An overlong line is discarded whole, so
- * its tail cannot become a forged record. Returns zero or a negative errno. */
+ * lines, comments and lines without '=' are ignored. An overlong or unterminated line is discarded
+ * whole, so its tail cannot become a forged record. Returns zero or a negative errno. */
 int inkwell_record_read(FILE *file, char *line, size_t capacity, inkwell_record_visit_fn visit,
                         void *context);
 
@@ -29,7 +29,7 @@ void inkwell_record_write_escaped(FILE *file, const char *value);
 void inkwell_record_unescape(char *value);
 
 /* Write beside path and rename only after a successful close. `sync_data` flushes the file to
- * storage before publishing it, for snapshots that must survive sudden power loss. A writer
+ * storage before publishing it, then syncs the containing directory. A writer
  * reports failures through ferror(file). The temporary path is caller-owned scratch space. */
 int inkwell_record_replace(const char *path, char *temp, size_t temp_capacity,
                            inkwell_record_write_fn write_records, void *context, bool sync_data);
