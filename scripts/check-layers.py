@@ -40,6 +40,9 @@ ALLOWED = {
     # One Bluetooth LE central. Like net/, it runs on the loop and does not know which
     # application asked; unlike net/, it has no bytes to parse, so it needs no codec.
     "ble": {"base", "runtime"},
+    # The serial ports the system has, and a tty opened on them. A port is a descriptor the
+    # caller hands to the loop or to net/stream.h itself; nothing here schedules anything.
+    "io": {"base"},
 }
 
 INCLUDE = re.compile(r'^\s*#\s*include\s+["<]inkwell/([a-z0-9_]+)/')

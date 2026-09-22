@@ -6,11 +6,11 @@ says how to work in it.
 ## The one-paragraph version
 
 inkwell is the systems layer under [inkcell](https://github.com/mcereal/inkcell). C17, Linux
-(and macOS as a development host), no threads, one loop - epoll on Linux, kqueue on macOS. Five
+(and macOS as a development host), no threads, one loop - epoll on Linux, kqueue on macOS. Six
 areas: `base/` (the leaves), `runtime/` (the loop, the signals, the crash report), `codec/`
 (bytes in, bytes out), `net/` (one hostname, one socket, one TLS session, one request), `ble/`
-(one Bluetooth LE central). Arrows point down and `scripts/check-layers.py` holds them there.
-`make test` before every push.
+(one Bluetooth LE central), `io/` (the serial ports the system has). Arrows point down and
+`scripts/check-layers.py` holds them there. `make test` before every push.
 
 Two optional dependencies, both optional by presence. Mbed TLS is a submodule; without it
 `net/tls.h` refuses every session. libdbus-1 is a system package on Linux; without it
