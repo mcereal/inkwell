@@ -67,7 +67,7 @@ INKWELL_TEST_CASE(loop_run_returns_under_a_hot_source, unit) {
     unsigned firings = 0U;
     if (inkwell_loop_add_fd(&loop, fd, INKWELL_LOOP_IN, rearming_timer_callback, &firings) < 0 ||
         inkwell_timer_arm_once(fd, 2U) < 0) {
-        close(fd);
+        inkwell_timer_close(fd);
         inkwell_loop_shutdown(&loop);
         record_failure(test_name, "could not arm the hot source");
         return;
@@ -78,7 +78,7 @@ INKWELL_TEST_CASE(loop_run_returns_under_a_hot_source, unit) {
     const uint64_t elapsed_ms = inkwell_time_monotonic_ms() - started_ms;
 
     inkwell_loop_remove_fd(&loop, fd);
-    close(fd);
+    inkwell_timer_close(fd);
     inkwell_loop_shutdown(&loop);
 
     INKWELL_TEST_FAIL_IF(result < 0, "inkwell_loop_run reported an error");
@@ -339,7 +339,7 @@ INKWELL_TEST_CASE(loop_request_stop_ends_an_unbounded_run, unit) {
     const uint64_t elapsed_ms = inkwell_time_monotonic_ms() - started_ms;
     if (fd >= 0) {
         inkwell_loop_remove_fd(&loop, fd);
-        close(fd);
+        inkwell_timer_close(fd);
     }
     const bool stopped = loop.stop_requested;
     inkwell_loop_shutdown(&loop);

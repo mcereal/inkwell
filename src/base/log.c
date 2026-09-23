@@ -13,7 +13,35 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#if defined(_WIN32)
+#include <io.h>
+#ifndef O_CLOEXEC
+#define O_CLOEXEC _O_NOINHERIT
+#endif
+#else
 #include <unistd.h>
+#endif
+
+#if defined(_WIN32)
+static ssize_t windows_pread(int fd, void *buffer, size_t count, off_t offset) {
+    if (_lseeki64(fd, (__int64)offset, SEEK_SET) < 0) {
+        return -1;
+    }
+    return (ssize_t)_read(fd, buffer, (unsigned)count);
+}
+
+static ssize_t windows_pwrite(int fd, const void *buffer, size_t count, off_t offset) {
+    if (_lseeki64(fd, (__int64)offset, SEEK_SET) < 0) {
+        return -1;
+    }
+    return (ssize_t)_write(fd, buffer, (unsigned)count);
+}
+
+#define pread windows_pread
+#define pwrite windows_pwrite
+#define ftruncate(fd, length) _chsize_s((fd), (__int64)(length))
+#define close _close
+#endif
 
 static enum inkwell_log_level g_log_level = INKWELL_LOG_LEVEL_INFO;
 
@@ -51,7 +79,11 @@ static void format_timestamp(char *buffer, size_t buffer_len) {
     }
 
     struct tm tm_result;
+#if defined(_WIN32)
+    if (gmtime_s(&tm_result, &ts.tv_sec) != 0) {
+#else
     if (gmtime_r(&ts.tv_sec, &tm_result) == NULL) {
+#endif
         snprintf(buffer, buffer_len, "0000-00-00T00:00:00.000Z");
         return;
     }
@@ -271,10 +303,10 @@ static off_t log_file_line_start(int fd, off_t from, off_t size) {
         }
         for (ssize_t i = 0; i < got; ++i) {
             if (chunk[i] == '\n') {
-                return at + i + 1;
+                return at + (off_t)i + 1;
             }
         }
-        at += got;
+        at += (off_t)got;
     }
     return -1;
 }
@@ -305,15 +337,15 @@ static off_t log_file_shift_to_front(int fd, off_t from, off_t size) {
         }
         ssize_t put_total = 0;
         while (put_total < got) {
-            const ssize_t put =
-                pwrite(fd, chunk + put_total, (size_t)(got - put_total), write_at + put_total);
+            const ssize_t put = pwrite(fd, chunk + put_total, (size_t)(got - put_total),
+                                       write_at + (off_t)put_total);
             if (put <= 0) {
                 return (off_t)-errno;
             }
             put_total += put;
         }
-        read_at += got;
-        write_at += got;
+        read_at += (off_t)got;
+        write_at += (off_t)got;
     }
     if (ftruncate(fd, write_at) != 0) {
         return (off_t)-errno;

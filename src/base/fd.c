@@ -4,12 +4,18 @@
 #include "inkwell/base/fd.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stddef.h>
+#if !defined(_WIN32)
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 int inkwell_fd_set_nonblocking_cloexec(int fd) {
+#if defined(_WIN32)
+    (void)fd;
+    return -ENOSYS;
+#else
     const int status = fcntl(fd, F_GETFL);
     if (status < 0 || fcntl(fd, F_SETFL, status | O_NONBLOCK) < 0) {
         return -errno;
@@ -19,13 +25,18 @@ int inkwell_fd_set_nonblocking_cloexec(int fd) {
         return -errno;
     }
     return 0;
+#endif
 }
 
 int inkwell_fd_pipe(int fds[2]) {
     if (fds == NULL) {
         return -EINVAL;
     }
-#if defined(__linux__)
+#if defined(_WIN32)
+    fds[0] = -1;
+    fds[1] = -1;
+    return -ENOSYS;
+#elif defined(__linux__)
     if (pipe2(fds, O_NONBLOCK | O_CLOEXEC) != 0) {
         return -errno;
     }
@@ -49,7 +60,12 @@ int inkwell_fd_pipe(int fds[2]) {
 }
 
 int inkwell_fd_socket(int domain, int type, int protocol) {
-#if defined(SOCK_NONBLOCK) && defined(SOCK_CLOEXEC)
+#if defined(_WIN32)
+    (void)domain;
+    (void)type;
+    (void)protocol;
+    return -ENOSYS;
+#elif defined(SOCK_NONBLOCK) && defined(SOCK_CLOEXEC)
     const int fd = socket(domain, type | SOCK_NONBLOCK | SOCK_CLOEXEC, protocol);
     if (fd < 0) {
         return -errno;

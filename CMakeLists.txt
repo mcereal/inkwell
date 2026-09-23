@@ -50,6 +50,15 @@ if(INKWELL_ENABLE_UBSAN)
     target_link_options(inkwell_options INTERFACE -fsanitize=undefined)
 endif()
 
+set(INKWELL_CRASH_SOURCE src/runtime/crash.c)
+set(INKWELL_SIGNALS_SOURCE src/runtime/signals.c)
+set(INKWELL_WINDOWS_RUNTIME_SOURCE)
+if(WIN32)
+    set(INKWELL_CRASH_SOURCE src/runtime/crash_windows.c)
+    set(INKWELL_SIGNALS_SOURCE src/runtime/signals_windows.c)
+    set(INKWELL_WINDOWS_RUNTIME_SOURCE src/runtime/windows_handle.c)
+endif()
+
 add_library(inkwell STATIC
     # base: the leaves. Nothing in inkwell includes upward into these, and they include nothing
     # of inkwell's but each other.
@@ -63,11 +72,12 @@ add_library(inkwell STATIC
     src/base/version.c
     # runtime: the one loop everything else is driven from, the signals that stop it, and the two
     # descriptors - a timer and a wake - that let something which is not I/O wait on it too
-    src/runtime/crash.c
+    ${INKWELL_CRASH_SOURCE}
     src/runtime/loop.c
-    src/runtime/signals.c
+    ${INKWELL_SIGNALS_SOURCE}
     src/runtime/timer.c
     src/runtime/wake.c
+    ${INKWELL_WINDOWS_RUNTIME_SOURCE}
     # codec: bytes in, bytes out. They parse; they do not know what the bytes are for.
     src/codec/base64.c
     src/codec/esp_image.c
@@ -122,7 +132,9 @@ add_library(inkwell::inkwell ALIAS inkwell)
 # _POSIX_C_SOURCE for signalfd, timerfd, eventfd, clock_gettime and the rest of the loop's
 # vocabulary. PUBLIC because a consumer that includes runtime/loop.h and then calls epoll
 # needs the same declarations visible.
-target_compile_definitions(inkwell PUBLIC _POSIX_C_SOURCE=200809L _DEFAULT_SOURCE)
+if(NOT WIN32)
+    target_compile_definitions(inkwell PUBLIC _POSIX_C_SOURCE=200809L _DEFAULT_SOURCE)
+endif()
 
 # macOS is a development host, not a target: the loop is kqueue there, the device-only halves of
 # the layers above compile out, and the same UI runs in a window. _POSIX_C_SOURCE on Darwin

@@ -6,7 +6,15 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <io.h>
+#include <windows.h>
+#define fileno _fileno
+#define fsync _commit
+#define unlink _unlink
+#else
 #include <unistd.h>
+#endif
 
 int inkwell_record_read(FILE *file, char *line, size_t capacity, inkwell_record_visit_fn visit,
                         void *context) {
@@ -78,6 +86,10 @@ void inkwell_record_unescape(char *value) {
 
 /* The name is durable only after the directory entry is synced too. */
 static int sync_parent_directory(const char *path) {
+#if defined(_WIN32)
+    (void)path;
+    return 0;
+#else
     char *parent = strdup(path);
     if (parent == NULL) {
         return -ENOMEM;
@@ -104,6 +116,7 @@ static int sync_parent_directory(const char *path) {
     }
     free(parent);
     return result;
+#endif
 }
 
 int inkwell_record_replace(const char *path, char *temp, size_t temp_capacity,
@@ -131,9 +144,16 @@ int inkwell_record_replace(const char *path, char *temp, size_t temp_capacity,
     if (fclose(file) != 0 && result == 0) {
         result = -errno;
     }
+#if defined(_WIN32)
+    const DWORD move_flags = MOVEFILE_REPLACE_EXISTING | (sync_data ? MOVEFILE_WRITE_THROUGH : 0U);
+    if (result == 0 && MoveFileExA(temp, path, move_flags) == 0) {
+        result = -EIO;
+    }
+#else
     if (result == 0 && rename(temp, path) != 0) {
         result = -errno;
     }
+#endif
     if (result != 0) {
         (void)unlink(temp);
         return result;
