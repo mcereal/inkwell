@@ -59,6 +59,12 @@ int inkwell_loop_add_fd(struct inkwell_loop *loop, int fd, uint32_t events,
 int inkwell_loop_update_fd(struct inkwell_loop *loop, int fd, uint32_t events);
 int inkwell_loop_remove_fd(struct inkwell_loop *loop, int fd);
 
+/* Watch a native socket on any host. Returns a nonnegative registration token, or negative errno.
+ * The token is used with update_fd/remove_fd and passed to the callback; it is not necessarily
+ * the socket itself. The caller owns the socket and must remove the watch before closing it. */
+int inkwell_loop_watch_socket(struct inkwell_loop *loop, uintptr_t socket, uint32_t events,
+                              inkwell_loop_callback callback, void *userdata);
+
 #if defined(_WIN32)
 /* Register a native Winsock SOCKET without narrowing its pointer-sized value to int. The
  * returned nonnegative token is passed to the callback and to update/remove_fd; the caller

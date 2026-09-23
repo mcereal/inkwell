@@ -350,3 +350,44 @@ INKWELL_TEST_CASE(loop_request_stop_ends_an_unbounded_run, unit) {
     INKWELL_TEST_FAIL_IF(elapsed_ms > 1000U, "the run did not end when asked to");
     record_success(test_name);
 }
+
+struct socket_watch_probe {
+    int token;
+    char byte;
+};
+
+static int socket_watch_callback(int token, uint32_t events, void *userdata) {
+    struct socket_watch_probe *probe = (struct socket_watch_probe *)userdata;
+    if ((events & INKWELL_LOOP_IN) != 0U) {
+        probe->token = token;
+        (void)recv(token, &probe->byte, 1, 0);
+    }
+    return 0;
+}
+
+INKWELL_TEST_CASE(loop_watches_native_socket_with_token, unit) {
+    int sockets[2] = {-1, -1};
+    INKWELL_TEST_FAIL_IF(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0,
+                         "socket pair should open");
+    struct inkwell_loop loop;
+    if (inkwell_loop_init(&loop) != 0) {
+        (void)close(sockets[0]);
+        (void)close(sockets[1]);
+        record_failure(test_name, "loop should initialize");
+        return;
+    }
+    struct socket_watch_probe probe = {.token = -1};
+    const int token = inkwell_loop_watch_socket(&loop, (uintptr_t)sockets[0], INKWELL_LOOP_IN,
+                                                socket_watch_callback, &probe);
+    const int ran =
+        token >= 0 && send(sockets[1], "x", 1, 0) == 1 ? inkwell_loop_run(&loop, 100) : -1;
+    if (token >= 0) {
+        (void)inkwell_loop_remove_fd(&loop, token);
+    }
+    inkwell_loop_shutdown(&loop);
+    (void)close(sockets[0]);
+    (void)close(sockets[1]);
+    INKWELL_TEST_FAIL_IF(token < 0 || ran != 0 || token != probe.token || probe.byte != 'x',
+                         "socket callback should receive its registration token");
+    record_success(test_name);
+}
