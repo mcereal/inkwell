@@ -50,32 +50,7 @@ _Static_assert(sizeof(struct resolve_record) <= sizeof(((struct inkwell_resolve 
 
 bool inkwell_resolve_literal(const char *host, uint16_t port, struct sockaddr_storage *out,
                              socklen_t *out_len) {
-    if (host == NULL || host[0] == '\0' || out == NULL || out_len == NULL) {
-        return false;
-    }
-    memset(out, 0, sizeof *out);
-
-    struct in_addr v4;
-    if (inet_pton(AF_INET, host, &v4) == 1) {
-        struct sockaddr_in *addr = (struct sockaddr_in *)out;
-        addr->sin_family = AF_INET;
-        addr->sin_port = htons(port);
-        addr->sin_addr = v4;
-        *out_len = (socklen_t)sizeof *addr;
-        return true;
-    }
-
-    struct in6_addr v6;
-    if (inet_pton(AF_INET6, host, &v6) == 1) {
-        struct sockaddr_in6 *addr = (struct sockaddr_in6 *)out;
-        addr->sin6_family = AF_INET6;
-        addr->sin6_port = htons(port);
-        addr->sin6_addr = v6;
-        *out_len = (socklen_t)sizeof *addr;
-        return true;
-    }
-
-    return false;
+    return inkwell_socket_parse_literal(host, port, out, out_len);
 }
 
 /* ------------------------------------------------------------------ the child */

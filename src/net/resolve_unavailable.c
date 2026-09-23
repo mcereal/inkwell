@@ -3,34 +3,9 @@
 #include <errno.h>
 #include <string.h>
 
-/* Numeric addresses require no background lookup and work before any socket is opened. */
 bool inkwell_resolve_literal(const char *host, uint16_t port, struct sockaddr_storage *out,
                              socklen_t *out_len) {
-    if (host == NULL || host[0] == '\0' || out == NULL || out_len == NULL) {
-        return false;
-    }
-    memset(out, 0, sizeof *out);
-
-    struct in_addr v4;
-    if (InetPtonA(AF_INET, host, &v4) == 1) {
-        struct sockaddr_in *address = (struct sockaddr_in *)out;
-        address->sin_family = AF_INET;
-        address->sin_port = htons(port);
-        address->sin_addr = v4;
-        *out_len = (socklen_t)sizeof *address;
-        return true;
-    }
-
-    struct in6_addr v6;
-    if (InetPtonA(AF_INET6, host, &v6) == 1) {
-        struct sockaddr_in6 *address = (struct sockaddr_in6 *)out;
-        address->sin6_family = AF_INET6;
-        address->sin6_port = htons(port);
-        address->sin6_addr = v6;
-        *out_len = (socklen_t)sizeof *address;
-        return true;
-    }
-    return false;
+    return inkwell_socket_parse_literal(host, port, out, out_len);
 }
 
 int inkwell_resolve_init(struct inkwell_resolve *resolve, struct inkwell_loop *loop) {
@@ -66,8 +41,8 @@ int inkwell_resolve_start(struct inkwell_resolve *resolve, const char *host, uin
     if (resolve == NULL || host == NULL || host[0] == '\0' || on_done == NULL) {
         return -EINVAL;
     }
-    /* A later Windows resolver will register its completion with the event loop. Until then,
-       refuse hostname work rather than blocking the UI thread with getaddrinfo(). */
+    /* A later asynchronous resolver will register its completion with the event loop. Until
+       then, refuse hostname work rather than blocking the caller with getaddrinfo(). */
     return -ENOTSUP;
 }
 

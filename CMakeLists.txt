@@ -60,7 +60,7 @@ if(WIN32)
     set(INKWELL_SIGNALS_SOURCE src/runtime/signals_windows.c)
     set(INKWELL_WINDOWS_RUNTIME_SOURCE src/runtime/windows_handle.c)
     set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_windows.c)
-    set(INKWELL_RESOLVE_SOURCE src/net/resolve_windows.c)
+    set(INKWELL_RESOLVE_SOURCE src/net/resolve_unavailable.c)
 endif()
 
 add_library(inkwell STATIC

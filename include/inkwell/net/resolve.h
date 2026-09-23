@@ -26,16 +26,12 @@
  * resolves one host because it is about to connect to one host.
  */
 
+#include "inkwell/base/fd.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
-#if defined(_WIN32)
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
-#include <sys/socket.h>
-#endif
 
 #ifdef __cplusplus
 extern "C" {

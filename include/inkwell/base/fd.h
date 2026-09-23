@@ -1,7 +1,17 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#if defined(_WIN32)
+/* Winsock must precede any windows.h include in a caller. */
+// clang-format off
+#include <winsock2.h>
+#include <ws2tcpip.h>
+// clang-format on
+#else
+#include <sys/socket.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,6 +58,11 @@ int inkwell_socket_send(inkwell_socket socket, const void *bytes, size_t len);
 int inkwell_socket_recv(inkwell_socket socket, void *bytes, size_t len);
 /* 0 when connected and healthy, or a negative errno from SO_ERROR. */
 int inkwell_socket_pending_error(inkwell_socket socket);
+
+/* Parse a numeric IPv4/IPv6 address and attach port without doing a blocking name lookup.
+ * A hostname or malformed literal returns false. This is safe before socket_open(). */
+bool inkwell_socket_parse_literal(const char *host, uint16_t port, struct sockaddr_storage *out,
+                                  socklen_t *out_len);
 
 #ifdef __cplusplus
 }
