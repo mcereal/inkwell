@@ -10,8 +10,7 @@
  * get away with.
  *
  * On POSIX the way out is to fork, let the child block, and read the answer back through the
- * event loop. Windows currently supports numeric literals only; hostname lookup refuses with
- * -ENOTSUP until a loop-integrated asynchronous resolver is available there.
+ * event loop. Windows uses GetAddrInfoEx with an overlapped event watched by the same loop.
  * The child does not exec. There is nothing to exec - `getent` is not on the Brick and busybox's
  * `nslookup` prints a different thing every version - and the resolver we want is the one this
  * binary is already linked against.
@@ -100,6 +99,10 @@ typedef void (*inkwell_resolve_done_fn)(void *userdata,
 struct inkwell_resolve {
     struct inkwell_loop *loop;
 
+    /* Native asynchronous resolver state. POSIX leaves this NULL and uses the child fields
+       below; Windows owns a GetAddrInfoEx request through it. */
+    void *backend;
+
     /* The running child, or -1. Only ever one. */
     pid_t child;
     int child_fd;
@@ -139,8 +142,8 @@ bool inkwell_resolve_busy(const struct inkwell_resolve *resolve);
 /*
  * Starts looking `host` up, with `port` written into whatever comes back.
  *
- * Returns 0, or -errno: -ENOTSUP without an available asynchronous resolver (currently all of
- * Windows), -EBUSY with a lookup already running, -EINVAL for an empty name or no callback. On
+ * Returns 0, or -errno: -ENOTSUP without an available asynchronous resolver, -EBUSY with a
+ * lookup already running, -EINVAL for an empty name or no callback. On
  * any error no work was started and `on_done` will not be called.
  *
  * On 0 the callback is called exactly once, later, from the loop. It is never called before this

@@ -1,12 +1,29 @@
 #include "framework/inkwell_test.h"
 
 #include "inkwell/net/resolve.h"
+#include "inkwell/runtime/loop.h"
 
 #include <errno.h>
+#include <string.h>
 
-static void unused_done(void *userdata, const struct inkwell_resolve_result *result) {
-    (void)userdata;
-    (void)result;
+struct resolve_probe {
+    unsigned calls;
+    struct inkwell_resolve_result result;
+};
+
+static void record_done(void *userdata, const struct inkwell_resolve_result *result) {
+    struct resolve_probe *probe = (struct resolve_probe *)userdata;
+    probe->calls++;
+    probe->result = *result;
+}
+
+static bool pump_until_done(struct inkwell_loop *loop, struct inkwell_resolve *resolve,
+                            struct resolve_probe *probe) {
+    for (unsigned turn = 0U; turn < 100U && probe->calls == 0U; ++turn) {
+        (void)inkwell_loop_run(loop, 50);
+        inkwell_resolve_tick(resolve, (uint64_t)turn * 50U);
+    }
+    return probe->calls > 0U;
 }
 
 INKWELL_TEST_CASE(resolve_windows_literals, unit) {
@@ -31,15 +48,68 @@ INKWELL_TEST_CASE(resolve_windows_literals, unit) {
     record_success(test_name);
 }
 
-INKWELL_TEST_CASE(resolve_windows_names_refused_without_blocking, unit) {
+INKWELL_TEST_CASE(resolve_windows_without_a_loop_is_unavailable, unit) {
     struct inkwell_resolve resolve;
     INKWELL_TEST_FAIL_IF(inkwell_resolve_init(&resolve, NULL) != 0, "init should succeed");
     INKWELL_TEST_FAIL_IF(inkwell_resolve_available(&resolve),
-                         "asynchronous lookup is not yet available");
-    INKWELL_TEST_FAIL_IF(inkwell_resolve_start(&resolve, "example.invalid", 4403U, unused_done,
+                         "a resolver without a loop should be unavailable");
+    INKWELL_TEST_FAIL_IF(inkwell_resolve_start(&resolve, "example.invalid", 4403U, record_done,
                                                NULL, 0U) != -ENOTSUP,
-                         "hostname lookup should refuse instead of blocking");
+                         "hostname lookup without a loop should refuse");
     INKWELL_TEST_FAIL_IF(inkwell_resolve_busy(&resolve), "refusal should not start work");
     inkwell_resolve_shutdown(&resolve);
+    record_success(test_name);
+}
+
+INKWELL_TEST_CASE(resolve_windows_finds_a_name_asynchronously, unit) {
+    struct inkwell_loop loop;
+    INKWELL_TEST_FAIL_IF(inkwell_loop_init(&loop) != 0, "loop should start");
+    struct inkwell_resolve resolve;
+    (void)inkwell_resolve_init(&resolve, &loop);
+    struct resolve_probe probe;
+    memset(&probe, 0, sizeof probe);
+
+    const int started =
+        inkwell_resolve_start(&resolve, "localhost", 4403U, record_done, &probe, 0U);
+    INKWELL_TEST_FAIL_IF_CLEANUP(started != 0,
+                                 (inkwell_resolve_shutdown(&resolve), inkwell_loop_shutdown(&loop)),
+                                 "lookup should start");
+    INKWELL_TEST_FAIL_IF_CLEANUP(probe.calls != 0U || !inkwell_resolve_busy(&resolve),
+                                 (inkwell_resolve_shutdown(&resolve), inkwell_loop_shutdown(&loop)),
+                                 "start should return before the lookup reports");
+    INKWELL_TEST_FAIL_IF_CLEANUP(!pump_until_done(&loop, &resolve, &probe),
+                                 (inkwell_resolve_shutdown(&resolve), inkwell_loop_shutdown(&loop)),
+                                 "lookup should report through the loop");
+    const bool good = probe.calls == 1U && probe.result.outcome == INKWELL_RESOLVE_OK &&
+                      probe.result.address_count > 0U && probe.result.address_len != 0 &&
+                      !inkwell_resolve_busy(&resolve);
+    inkwell_resolve_shutdown(&resolve);
+    inkwell_loop_shutdown(&loop);
+    INKWELL_TEST_FAIL_IF(!good, "localhost should resolve once with a usable address");
+    record_success(test_name);
+}
+
+INKWELL_TEST_CASE(resolve_windows_cancel_is_silent_and_reusable, unit) {
+    struct inkwell_loop loop;
+    INKWELL_TEST_FAIL_IF(inkwell_loop_init(&loop) != 0, "loop should start");
+    struct inkwell_resolve resolve;
+    (void)inkwell_resolve_init(&resolve, &loop);
+    struct resolve_probe probe;
+    memset(&probe, 0, sizeof probe);
+
+    const int started =
+        inkwell_resolve_start(&resolve, "localhost", 4403U, record_done, &probe, 0U);
+    const int duplicate =
+        inkwell_resolve_start(&resolve, "localhost", 4403U, record_done, &probe, 0U);
+    inkwell_resolve_cancel(&resolve);
+    const bool cancelled =
+        started == 0 && duplicate == -EBUSY && probe.calls == 0U && !inkwell_resolve_busy(&resolve);
+    const int restarted =
+        inkwell_resolve_start(&resolve, "localhost", 4403U, record_done, &probe, 0U);
+    const bool finished = restarted == 0 && pump_until_done(&loop, &resolve, &probe);
+    inkwell_resolve_shutdown(&resolve);
+    inkwell_loop_shutdown(&loop);
+    INKWELL_TEST_FAIL_IF(!cancelled || !finished || probe.calls != 1U,
+                         "cancellation should be silent and leave the resolver reusable");
     record_success(test_name);
 }
