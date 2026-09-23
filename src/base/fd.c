@@ -32,6 +32,9 @@ static int socket_error(int error) {
         return EINPROGRESS;
     case WSAEALREADY:
         return EALREADY;
+    case WSAENOPROTOOPT:
+    case WSAEOPNOTSUPP:
+        return ENOTSUP;
     case WSAECONNREFUSED:
         return ECONNREFUSED;
     case WSAETIMEDOUT:
@@ -366,6 +369,9 @@ int inkwell_socket_set_option(inkwell_socket socket, enum inkwell_socket_option 
                ? 0
                : -socket_error(WSAGetLastError());
 #else
-    return setsockopt((int)socket, level, name, &setting, sizeof setting) == 0 ? 0 : -errno;
+    if (setsockopt((int)socket, level, name, &setting, sizeof setting) == 0) {
+        return 0;
+    }
+    return errno == ENOPROTOOPT || errno == EOPNOTSUPP ? -ENOTSUP : -errno;
 #endif
 }

@@ -377,18 +377,17 @@ INKWELL_TEST_CASE(loop_watches_native_socket_with_token, unit) {
         return;
     }
     struct socket_watch_probe probe = {.token = -1};
-    int token = -1;
-    const int watched = inkwell_loop_watch_socket(&loop, (uintptr_t)sockets[0], INKWELL_LOOP_IN,
-                                                  socket_watch_callback, &probe, &token);
+    const int token = inkwell_loop_watch_socket(&loop, (uintptr_t)sockets[0], INKWELL_LOOP_IN,
+                                                socket_watch_callback, &probe);
     const int ran =
-        watched == 0 && send(sockets[1], "x", 1, 0) == 1 ? inkwell_loop_run(&loop, 100) : -1;
-    if (watched == 0) {
+        token >= 0 && send(sockets[1], "x", 1, 0) == 1 ? inkwell_loop_run(&loop, 100) : -1;
+    if (token >= 0) {
         (void)inkwell_loop_remove_fd(&loop, token);
     }
     inkwell_loop_shutdown(&loop);
     (void)close(sockets[0]);
     (void)close(sockets[1]);
-    INKWELL_TEST_FAIL_IF(watched != 0 || ran != 0 || token != probe.token || probe.byte != 'x',
+    INKWELL_TEST_FAIL_IF(token < 0 || ran != 0 || token != probe.token || probe.byte != 'x',
                          "socket callback should receive its registration token");
     record_success(test_name);
 }

@@ -419,29 +419,17 @@ int inkwell_loop_add_socket(struct inkwell_loop *loop, uintptr_t socket, uint32_
 #endif
 
 int inkwell_loop_watch_socket(struct inkwell_loop *loop, uintptr_t socket, uint32_t events,
-                              inkwell_loop_callback callback, void *userdata, int *token) {
-    if (token == NULL) {
-        return -EINVAL;
-    }
-    *token = -1;
+                              inkwell_loop_callback callback, void *userdata) {
 #if defined(_WIN32)
-    const int added = inkwell_loop_add_socket(loop, socket, events, callback, userdata);
-    if (added < 0) {
-        return added;
-    }
-    *token = added;
+    return inkwell_loop_add_socket(loop, socket, events, callback, userdata);
 #else
     if (socket > INT_MAX) {
         return -EINVAL;
     }
     const int fd = (int)socket;
     const int added = inkwell_loop_add_fd(loop, fd, events, callback, userdata);
-    if (added < 0) {
-        return added;
-    }
-    *token = fd;
+    return added < 0 ? added : fd;
 #endif
-    return 0;
 }
 
 int inkwell_loop_update_fd(struct inkwell_loop *loop, int fd, uint32_t events) {
