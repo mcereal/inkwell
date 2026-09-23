@@ -55,6 +55,8 @@ set(INKWELL_SIGNALS_SOURCE src/runtime/signals.c)
 set(INKWELL_WINDOWS_RUNTIME_SOURCE)
 set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_posix.c)
 set(INKWELL_RESOLVE_SOURCE src/net/resolve.c)
+set(INKWELL_FETCH_SOURCE src/net/fetch.c)
+set(INKWELL_MQTT_SOURCE src/net/mqtt.c)
 set(INKWELL_SERIAL_SOURCE src/io/serial.c)
 set(INKWELL_USB_STORAGE_SOURCE src/io/usb_storage.c)
 if(WIN32)
@@ -63,6 +65,10 @@ if(WIN32)
     set(INKWELL_WINDOWS_RUNTIME_SOURCE src/runtime/windows_handle.c)
     set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_windows.c)
     set(INKWELL_RESOLVE_SOURCE src/net/resolve_unavailable.c)
+    # HTTPS and MQTT still use POSIX socket descriptors. Keep their API callable and
+    # explicitly unavailable until they can adopt native Winsock handles.
+    set(INKWELL_FETCH_SOURCE src/net/fetch_unavailable.c)
+    set(INKWELL_MQTT_SOURCE src/net/mqtt_unavailable.c)
     # Device discovery and raw block writes need native Windows backends. Until then they
     # refuse explicitly, without pulling POSIX ioctl, termios, mount or fork into the build.
     set(INKWELL_SERIAL_SOURCE src/io/serial_unavailable.c)
@@ -102,8 +108,8 @@ add_library(inkwell STATIC
     src/codec/uf2.c
     src/codec/zip.c
     # net: one hostname, one socket, one session - all of it on the loop, none of it blocking
-    src/net/fetch.c
-    src/net/mqtt.c
+    ${INKWELL_FETCH_SOURCE}
+    ${INKWELL_MQTT_SOURCE}
     src/net/reason.c
     ${INKWELL_RESOLVE_SOURCE}
     src/net/stream.c
