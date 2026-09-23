@@ -102,6 +102,36 @@ static uint64_t zip_file_size(const struct inkwell_zip_fetch *zip, const char *n
     return info.st_size > 0 ? (uint64_t)info.st_size : 0U;
 }
 
+/*
+ * Reads a staged range whole, once it is known to be exactly the `expected` bytes that were
+ * asked for. NULL with `*error` set otherwise.
+ *
+ * The length is checked before anything is allocated, because the length is the server's. The
+ * fetcher stops a reply that runs past the range (`output_max`), but one that stops short is
+ * consistent with its own Content-Length and arrives as a success - so this is where it is
+ * caught, and it is the network's fault, which means the answer is "try again" rather than
+ * "give up". Only a file that could not be read at all is a staging failure.
+ */
+static uint8_t *zip_take(struct inkwell_zip_fetch *zip, const char *name, uint64_t expected,
+                         size_t *out_len, enum inkwell_zip_fetch_error *error) {
+    *out_len = 0U;
+    const uint64_t landed = zip_file_size(zip, name);
+    if (landed != expected) {
+        inkwell_log_error("zip_fetch", "The %s range arrived %llu bytes long, not %llu", name,
+                          (unsigned long long)landed, (unsigned long long)expected);
+        *error = INKWELL_ZIP_FETCH_ERROR_NETWORK;
+        return NULL;
+    }
+    uint8_t *const bytes = zip_read(zip, name, out_len);
+    if (bytes == NULL || (uint64_t)*out_len != expected) {
+        free(bytes);
+        *out_len = 0U;
+        *error = INKWELL_ZIP_FETCH_ERROR_STAGING;
+        return NULL;
+    }
+    return bytes;
+}
+
 /* ---- finishing --------------------------------------------------------------------------- */
 
 static void zip_finish(struct inkwell_zip_fetch *zip, enum inkwell_zip_fetch_state state,
@@ -155,6 +185,9 @@ static bool zip_range(struct inkwell_zip_fetch *zip, const char *name, uint64_t 
     request.url = zip->url;
     request.headers[0] = zip->range;
     request.output_path = zip->active_path;
+    /* A range is answered with exactly its own length or it is refused: a server that keeps
+       sending after the last byte asked for is not allowed to fill the staging directory. */
+    request.output_max = last - first + 1U;
     request.timeout_ms = timeout_ms;
     request.on_done = zip_on_fetch;
     request.userdata = zip;
@@ -207,9 +240,10 @@ static void zip_step_member(struct inkwell_zip_fetch *zip) {
 /* The tail window, or the directory fetched on its own. Both end here. */
 static void zip_read_directory(struct inkwell_zip_fetch *zip, const char *name, bool second_pass) {
     size_t len = 0U;
-    uint8_t *const window = zip_read(zip, name, &len);
+    enum inkwell_zip_fetch_error error = INKWELL_ZIP_FETCH_ERROR_STAGING;
+    uint8_t *const window = zip_take(zip, name, (uint64_t)zip->window_len, &len, &error);
     if (window == NULL) {
-        zip_fail(zip, INKWELL_ZIP_FETCH_ERROR_STAGING);
+        zip_fail(zip, error);
         return;
     }
 
@@ -217,10 +251,12 @@ static void zip_read_directory(struct inkwell_zip_fetch *zip, const char *name, 
     uint32_t central_size = 0U;
     uint32_t entries = 0U;
     if (second_pass) {
-        /* This read *is* the directory: its bounds were taken from the record last time. */
+        /* This read *is* the directory: its bounds and its count were taken from the record
+           last time. The count matters - a walk told to expect more entries than there are
+           runs off the end and reports a malformed directory, not an absent member. */
         central = window;
         central_size = (uint32_t)len;
-        entries = (uint32_t)UINT16_MAX;
+        entries = zip->central_entries;
     } else {
         struct inkwell_zip_end end;
         if (!inkwell_zip_find_end(window, len, zip->window_offset, &end)) {
@@ -239,10 +275,23 @@ static void zip_read_directory(struct inkwell_zip_fetch *zip, const char *name, 
              * the alternative is a feature that stops working on the version that crosses the
              * line, in a way nobody would connect to the zip having grown.
              */
+            free(window);
+            /*
+             * The size is the server's, and the only bound the record itself can offer is the
+             * archive's length - which is also the server's. What is fetched here is read whole
+             * into memory, so it is refused past a size no real directory reaches rather than
+             * asked for.
+             */
+            if (end.central_size > INKWELL_ZIP_FETCH_DIRECTORY_MAX) {
+                inkwell_log_error("zip_fetch", "Central directory claims %u bytes; refusing it",
+                                  (unsigned)end.central_size);
+                zip_fail(zip, INKWELL_ZIP_FETCH_ERROR_UNSUPPORTED);
+                return;
+            }
             zip->window_offset = end.central_offset;
             zip->window_len = (size_t)end.central_size;
             zip->central_offset = end.central_offset;
-            free(window);
+            zip->central_entries = end.entries;
             inkwell_log_info("zip_fetch", "Central directory is %u bytes; fetching it on its own",
                              (unsigned)end.central_size);
             zip_step_central(zip);
@@ -306,9 +355,11 @@ static void zip_read_directory(struct inkwell_zip_fetch *zip, const char *name, 
 
 static void zip_read_header(struct inkwell_zip_fetch *zip) {
     size_t len = 0U;
-    uint8_t *const header = zip_read(zip, ZIP_FILE_HEADER, &len);
+    enum inkwell_zip_fetch_error error = INKWELL_ZIP_FETCH_ERROR_STAGING;
+    uint8_t *const header =
+        zip_take(zip, ZIP_FILE_HEADER, INKWELL_ZIP_LOCAL_HEADER_SIZE, &len, &error);
     if (header == NULL) {
-        zip_fail(zip, INKWELL_ZIP_FETCH_ERROR_STAGING);
+        zip_fail(zip, error);
         return;
     }
     const bool placed = inkwell_zip_local_data_start(header, len, &zip->entry, &zip->data_offset);
@@ -395,23 +446,11 @@ static bool zip_write_output(const struct inkwell_zip_fetch *zip, const uint8_t 
  */
 static void zip_inflate(struct inkwell_zip_fetch *zip) {
     size_t len = 0U;
-    uint8_t *const member = zip_read(zip, ZIP_FILE_MEMBER, &len);
+    enum inkwell_zip_fetch_error error = INKWELL_ZIP_FETCH_ERROR_STAGING;
+    uint8_t *const member =
+        zip_take(zip, ZIP_FILE_MEMBER, (uint64_t)zip->entry.compressed_size, &len, &error);
     if (member == NULL) {
-        zip_fail(zip, INKWELL_ZIP_FETCH_ERROR_STAGING);
-        return;
-    }
-    if (len != (size_t)zip->entry.compressed_size) {
-        /*
-         * Not a staging failure and not a corrupt member: the bytes the directory promised did
-         * not all arrive. The fetcher holds a reply to its own Content-Length, and a server
-         * that answered the range with a shorter one than asked for is consistent with itself,
-         * so this is the only place that is caught - and it is the network's fault, which means
-         * the answer is "try again" rather than "give up".
-         */
-        inkwell_log_error("zip_fetch", "The member arrived %zu bytes long, not %u", len,
-                          (unsigned)zip->entry.compressed_size);
-        free(member);
-        zip_fail(zip, INKWELL_ZIP_FETCH_ERROR_NETWORK);
+        zip_fail(zip, error);
         return;
     }
 
@@ -468,6 +507,12 @@ static void zip_inflate(struct inkwell_zip_fetch *zip) {
 }
 
 /* ---- the public half ----------------------------------------------------------------------*/
+
+void inkwell_zip_fetch_init(struct inkwell_zip_fetch *zip) {
+    if (zip != NULL) {
+        memset(zip, 0, sizeof *zip);
+    }
+}
 
 int inkwell_zip_fetch_start(struct inkwell_zip_fetch *zip, struct inkwell_fetch *fetch,
                             const struct inkwell_zip_fetch_request *request) {

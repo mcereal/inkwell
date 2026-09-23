@@ -51,6 +51,13 @@ struct inkwell_loop;
 #define INKWELL_ZIP_FETCH_URL_MAX 512U
 /* The prefix the staged files are named with: "<stem>.window", "<stem>.member", ... */
 #define INKWELL_ZIP_FETCH_STEM_MAX 32U
+/*
+ * The largest central directory fetched on its own, when it does not fit the tail window. Its
+ * size is a field the server wrote and it is read whole into memory, so it is bounded here. 16
+ * MiB is a hundred thousand entries with long names - far past any archive this is for, and far
+ * short of the four gigabytes the field can say.
+ */
+#define INKWELL_ZIP_FETCH_DIRECTORY_MAX (16U * 1024U * 1024U)
 
 /* Where the download is. Each is a different thing for a caller to say, which is why they are
    states rather than a boolean and a percentage. */
@@ -69,7 +76,8 @@ enum inkwell_zip_fetch_state {
 /* Why it failed. Told apart because two of them mean "try again" and the rest do not. */
 enum inkwell_zip_fetch_error {
     INKWELL_ZIP_FETCH_ERROR_NONE = 0,
-    /* A step's fetch failed, timed out, or the member arrived short. Retryable. */
+    /* A step's fetch failed or timed out, or a range came back longer or shorter than it was
+       asked for. Retryable. */
     INKWELL_ZIP_FETCH_ERROR_NETWORK,
     /* The staging directory could not be written to, or a staged file could not be read back. */
     INKWELL_ZIP_FETCH_ERROR_STAGING,
@@ -84,7 +92,8 @@ enum inkwell_zip_fetch_error {
        empty, which the caller did not ask for either. */
     INKWELL_ZIP_FETCH_ERROR_NO_MEMBER,
     /* Compressed with something that is neither deflate nor store, or claiming to be bigger
-       than the caller's limit - which is refused before a byte of it is fetched. */
+       than the caller's limit - which is refused before a byte of it is fetched - or a
+       directory bigger than INKWELL_ZIP_FETCH_DIRECTORY_MAX. */
     INKWELL_ZIP_FETCH_ERROR_UNSUPPORTED,
     /* Not a deflate stream, or not the length and CRC the directory described. The bytes
        arrived and they are not the bytes that were promised. Retryable, once. */
@@ -141,6 +150,8 @@ struct inkwell_zip_fetch {
     /* Set when the tail window did not hold the whole central directory and it was fetched on
        its own - which decides both what the next read lands in and how it is walked. */
     bool directory_only;
+    /* The end record's entry count, carried to the walk of a directory fetched on its own. */
+    uint32_t central_entries;
     struct inkwell_zip_entry entry;
     /* The directory has been read and the member passed every check on it; set before its
        header or its bytes are asked for. */
@@ -156,6 +167,14 @@ struct inkwell_zip_fetch {
     inkwell_zip_fetch_done_fn on_done;
     void *userdata;
 };
+
+/*
+ * Puts `zip` in the idle state. Required before the first start() unless the struct is already
+ * zeroed - static storage, `= {0}`, or a memset of a struct that holds it - because start()
+ * asks whether a download is already running, and an automatic struct left uninitialised has
+ * no answer to that.
+ */
+void inkwell_zip_fetch_init(struct inkwell_zip_fetch *zip);
 
 /*
  * Starts fetching `request->member` out of the zip at `request->url`. The request is copied;

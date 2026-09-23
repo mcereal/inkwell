@@ -16,6 +16,7 @@
 
 #include "framework/inkwell_test.h"
 
+#include "inkwell/codec/inflate.h"
 #include "inkwell/net/fetch.h"
 #include "inkwell/net/zip_fetch.h"
 #include "inkwell/runtime/loop.h"
@@ -434,6 +435,294 @@ cleanup:
     record_success(test_name);
 }
 
+/* ---- a zip built in memory ------------------------------------------------------------- */
+
+/*
+ * The captured archive keeps its directory inside the tail window, as every release measured
+ * does, so it cannot reach the step that fetches a directory on its own. This one is built to:
+ * 700 stored entries with 90-byte names put 95 KB of directory in front of the end record, and
+ * the member asked for is near the start of the file, well outside the window.
+ */
+#define SYNTH_ENTRIES 700U
+#define SYNTH_NAME_LEN 90U
+#define SYNTH_TARGET 5U
+
+static uint8_t g_synth[256U * 1024U];
+static size_t g_synth_len;
+
+enum synth_cdn {
+    /* The archive, honestly. */
+    SYNTH_HONEST,
+    /* The 30-byte local header asked for and 4 KB more sent after it. */
+    SYNTH_OVERLONG_RANGE,
+    /* A 40 MiB archive whose end record claims a 30 MiB directory. */
+    SYNTH_HUGE_DIRECTORY,
+};
+
+#define SYNTH_HUGE_SIZE (40ULL * 1024ULL * 1024ULL)
+
+static void synth_u16(uint8_t *at, uint32_t value) {
+    at[0] = (uint8_t)(value & 0xFFU);
+    at[1] = (uint8_t)((value >> 8) & 0xFFU);
+}
+
+static void synth_u32(uint8_t *at, uint32_t value) {
+    synth_u16(at, value & 0xFFFFU);
+    synth_u16(at + 2, (value >> 16) & 0xFFFFU);
+}
+
+static void synth_name(unsigned index, char out[SYNTH_NAME_LEN + 1U]) {
+    memset(out, 'x', SYNTH_NAME_LEN);
+    out[SYNTH_NAME_LEN] = '\0';
+    char head[16];
+    const int written = snprintf(head, sizeof head, "entry-%04u-", index);
+    memcpy(out, head, (size_t)written);
+}
+
+static void synth_payload(unsigned index, char out[16]) {
+    snprintf(out, 16, "payload-%04u", index);
+}
+
+/* Lays the archive out in g_synth: every local header and its stored bytes, then the directory,
+   then the end record. */
+static bool synth_build(void) {
+    static uint32_t offsets[SYNTH_ENTRIES];
+    static uint32_t crcs[SYNTH_ENTRIES];
+    size_t at = 0U;
+    for (unsigned i = 0U; i < SYNTH_ENTRIES; ++i) {
+        char name[SYNTH_NAME_LEN + 1U];
+        char payload[16];
+        synth_name(i, name);
+        synth_payload(i, payload);
+        const size_t len = strlen(payload);
+        if (!inkwell_crc32((const uint8_t *)payload, len, &crcs[i])) {
+            return false;
+        }
+        offsets[i] = (uint32_t)at;
+        uint8_t *const h = g_synth + at;
+        memset(h, 0, 30U);
+        synth_u32(h, 0x04034b50U);
+        synth_u16(h + 4, 20U);
+        synth_u32(h + 14, crcs[i]);
+        synth_u32(h + 18, (uint32_t)len);
+        synth_u32(h + 22, (uint32_t)len);
+        synth_u16(h + 26, SYNTH_NAME_LEN);
+        memcpy(h + 30, name, SYNTH_NAME_LEN);
+        memcpy(h + 30 + SYNTH_NAME_LEN, payload, len);
+        at += 30U + SYNTH_NAME_LEN + len;
+    }
+    const size_t central_at = at;
+    for (unsigned i = 0U; i < SYNTH_ENTRIES; ++i) {
+        char name[SYNTH_NAME_LEN + 1U];
+        char payload[16];
+        synth_name(i, name);
+        synth_payload(i, payload);
+        const size_t len = strlen(payload);
+        uint8_t *const c = g_synth + at;
+        memset(c, 0, 46U);
+        synth_u32(c, 0x02014b50U);
+        synth_u16(c + 4, 20U);
+        synth_u16(c + 6, 20U);
+        synth_u32(c + 16, crcs[i]);
+        synth_u32(c + 20, (uint32_t)len);
+        synth_u32(c + 24, (uint32_t)len);
+        synth_u16(c + 28, SYNTH_NAME_LEN);
+        synth_u32(c + 42, offsets[i]);
+        memcpy(c + 46, name, SYNTH_NAME_LEN);
+        at += 46U + SYNTH_NAME_LEN;
+    }
+    uint8_t *const e = g_synth + at;
+    memset(e, 0, 22U);
+    synth_u32(e, 0x06054b50U);
+    synth_u16(e + 8, SYNTH_ENTRIES);
+    synth_u16(e + 10, SYNTH_ENTRIES);
+    synth_u32(e + 12, (uint32_t)(at - central_at));
+    synth_u32(e + 16, (uint32_t)central_at);
+    g_synth_len = at + 22U;
+    return at - central_at > INKWELL_ZIP_TAIL_WINDOW && g_synth_len <= sizeof g_synth;
+}
+
+static void synth_serve(void *userdata, const struct https_fixture_request *request,
+                        struct https_fixture_conn *conn) {
+    const enum synth_cdn cdn = *(const enum synth_cdn *)userdata;
+    const unsigned long long size =
+        cdn == SYNTH_HUGE_DIRECTORY ? SYNTH_HUGE_SIZE : (unsigned long long)g_synth_len;
+    if (strcmp(request->method, "HEAD") == 0) {
+        https_fixture_printf(conn,
+                             "HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\n"
+                             "Content-Length: %llu\r\n\r\n",
+                             size);
+        return;
+    }
+    if (!request->ranged || request->last < request->first || request->last >= size) {
+        https_fixture_reply(conn, 416, NULL, NULL, 0U);
+        return;
+    }
+    static uint8_t body[128U * 1024U];
+    const uint64_t count = request->last - request->first + 1U;
+    size_t len = 0U;
+    if (cdn == SYNTH_HUGE_DIRECTORY) {
+        /* Only the tail is ever meant to be asked for: zeros, and an end record whose directory
+           fits inside the claimed archive and is 30 MiB long. */
+        if (count != INKWELL_ZIP_TAIL_WINDOW) {
+            https_fixture_reply(conn, 416, NULL, NULL, 0U);
+            return;
+        }
+        memset(body, 0, (size_t)count);
+        uint8_t *const e = body + count - 22U;
+        synth_u32(e, 0x06054b50U);
+        synth_u16(e + 8, 1U);
+        synth_u16(e + 10, 1U);
+        synth_u32(e + 12, 30U * 1024U * 1024U);
+        synth_u32(e + 16, 1024U * 1024U);
+        len = (size_t)count;
+    } else {
+        memcpy(body, g_synth + request->first, (size_t)count);
+        len = (size_t)count;
+        if (cdn == SYNTH_OVERLONG_RANGE && count == INKWELL_ZIP_LOCAL_HEADER_SIZE) {
+            memset(body + len, 'z', 4096U);
+            len += 4096U;
+        }
+    }
+    char range[96];
+    snprintf(range, sizeof range, "Content-Range: bytes %llu-%llu/%llu\r\n",
+             (unsigned long long)request->first, (unsigned long long)request->last, size);
+    https_fixture_reply(conn, 206, range, (const char *)body, len);
+}
+
+/* One run against the synthetic archive: stands it up as `cdn`, fetches `member`, and waits. */
+static const char *synth_run(enum synth_cdn cdn, const char *member, const char *dir,
+                             struct inkwell_zip_fetch *zip, struct zip_probe *probe) {
+    const char *failure = NULL;
+    struct https_fixture server;
+    memset(&server, 0, sizeof server);
+    struct inkwell_loop loop;
+    struct inkwell_fetch fetch;
+    bool loop_up = false;
+    bool fetch_up = false;
+    static enum synth_cdn mode;
+    mode = cdn;
+
+    if (inkwell_loop_init(&loop) != 0) {
+        failure = "event loop init failed";
+        goto cleanup;
+    }
+    loop_up = true;
+    if (inkwell_fetch_init(&fetch, &loop) != 0) {
+        failure = "fetch init failed";
+        goto cleanup;
+    }
+    fetch_up = true;
+    if (!https_fixture_start(&server, synth_serve, &mode)) {
+        failure = "could not stand up the synthetic CDN";
+        goto cleanup;
+    }
+    https_fixture_attach(&server, &fetch);
+
+    memset(probe, 0, sizeof *probe);
+    inkwell_zip_fetch_init(zip);
+    struct inkwell_zip_fetch_request request;
+    zip_request(&request, member, dir, probe);
+    if (inkwell_zip_fetch_start(zip, &fetch, &request) != 0) {
+        failure = "the download should start";
+        goto cleanup;
+    }
+    if (!zip_wait(&loop, &fetch, zip, probe)) {
+        failure = "the download should have finished";
+    }
+
+cleanup:
+    if (fetch_up) {
+        inkwell_fetch_shutdown(&fetch);
+    }
+    if (loop_up) {
+        inkwell_loop_shutdown(&loop);
+    }
+    https_fixture_stop(&server);
+    return failure;
+}
+
+/*
+ * A directory too big for the tail window is fetched on its own and walked with the count its
+ * end record gave - so a member that is there is found, and one that is not is an absent member
+ * rather than a malformed archive.
+ */
+INKWELL_TEST_CASE(zip_fetch_walks_a_directory_fetched_on_its_own, unit) {
+    INKWELL_TEST_FAIL_IF(!synth_build(), "the synthetic archive should outgrow the tail window");
+    char dir[] = "/tmp/inkwell_zipfetch_XXXXXX";
+    INKWELL_TEST_FAIL_IF(mkdtemp(dir) == NULL, "could not create a temporary directory");
+
+    struct inkwell_zip_fetch zip;
+    struct zip_probe probe;
+    char name[SYNTH_NAME_LEN + 1U];
+    synth_name(SYNTH_TARGET, name);
+    const char *failure = synth_run(SYNTH_HONEST, name, dir, &zip, &probe);
+    if (failure == NULL && (probe.state != INKWELL_ZIP_FETCH_READY || !zip.directory_only)) {
+        failure = "a member behind a directory fetched on its own should arrive";
+    }
+    if (failure == NULL) {
+        char text[32] = {0};
+        FILE *const output = fopen(probe.output, "rb");
+        const size_t got = output != NULL ? fread(text, 1U, sizeof text - 1U, output) : 0U;
+        if (output != NULL) {
+            fclose(output);
+        }
+        if (got != 12U || strcmp(text, "payload-0005") != 0) {
+            failure = "and be the bytes that entry holds";
+        }
+    }
+    if (failure == NULL) {
+        failure = synth_run(SYNTH_HONEST, "entry-9999-not-there", dir, &zip, &probe);
+    }
+    if (failure == NULL && (probe.state != INKWELL_ZIP_FETCH_FAILED ||
+                            probe.error != INKWELL_ZIP_FETCH_ERROR_NO_MEMBER)) {
+        failure = "a name the long directory does not hold is absent, not malformed";
+    }
+    zip_clean_dir(dir);
+    INKWELL_TEST_FAIL_IF(failure != NULL, failure);
+    record_success(test_name);
+}
+
+/* An end record claiming a directory past INKWELL_ZIP_FETCH_DIRECTORY_MAX is refused on the
+   record, before the directory is asked for. */
+INKWELL_TEST_CASE(zip_fetch_refuses_a_directory_it_would_not_hold, unit) {
+    char dir[] = "/tmp/inkwell_zipfetch_XXXXXX";
+    INKWELL_TEST_FAIL_IF(mkdtemp(dir) == NULL, "could not create a temporary directory");
+    struct inkwell_zip_fetch zip;
+    struct zip_probe probe;
+    const char *failure = synth_run(SYNTH_HUGE_DIRECTORY, "anything", dir, &zip, &probe);
+    if (failure == NULL && (probe.state != INKWELL_ZIP_FETCH_FAILED ||
+                            probe.error != INKWELL_ZIP_FETCH_ERROR_UNSUPPORTED)) {
+        failure = "a 30 MiB directory is refused rather than fetched";
+    }
+    if (failure == NULL && zip.directory_only) {
+        failure = "and refused off the end record, before a byte of it was asked for";
+    }
+    zip_clean_dir(dir);
+    INKWELL_TEST_FAIL_IF(failure != NULL, failure);
+    record_success(test_name);
+}
+
+/* A range answered with more than was asked for fails as the network's fault, and the extra
+   bytes never reach the staging directory. */
+INKWELL_TEST_CASE(zip_fetch_refuses_a_range_that_runs_long, unit) {
+    INKWELL_TEST_FAIL_IF(!synth_build(), "the synthetic archive should build");
+    char dir[] = "/tmp/inkwell_zipfetch_XXXXXX";
+    INKWELL_TEST_FAIL_IF(mkdtemp(dir) == NULL, "could not create a temporary directory");
+    struct inkwell_zip_fetch zip;
+    struct zip_probe probe;
+    char name[SYNTH_NAME_LEN + 1U];
+    synth_name(SYNTH_TARGET, name);
+    const char *failure = synth_run(SYNTH_OVERLONG_RANGE, name, dir, &zip, &probe);
+    if (failure == NULL && (probe.state != INKWELL_ZIP_FETCH_FAILED ||
+                            probe.error != INKWELL_ZIP_FETCH_ERROR_NETWORK)) {
+        failure = "a local header that keeps going is refused as the network's fault";
+    }
+    zip_clean_dir(dir);
+    INKWELL_TEST_FAIL_IF(failure != NULL, failure);
+    record_success(test_name);
+}
+
 #endif /* INKWELL_HAVE_TLS */
 
 /* The arguments that are refused before anything is started. */
@@ -443,7 +732,8 @@ INKWELL_TEST_CASE(zip_fetch_refuses_what_it_cannot_do, unit) {
     INKWELL_TEST_FAIL_IF(inkwell_fetch_available(&fetch), "and report itself unavailable");
 
     struct inkwell_zip_fetch zip;
-    memset(&zip, 0, sizeof zip);
+    inkwell_zip_fetch_init(&zip);
+    INKWELL_TEST_FAIL_IF(inkwell_zip_fetch_busy(&zip), "an initialised download is idle");
     struct inkwell_zip_fetch_request request;
     memset(&request, 0, sizeof request);
     request.url = "https://example.invalid/a.zip";
