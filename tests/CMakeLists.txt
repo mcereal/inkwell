@@ -47,7 +47,7 @@ set(INKWELL_TEST_SUITES
     suites/runtime_wake.c
 )
 if(WIN32)
-    list(APPEND INKWELL_TEST_SUITES suites/runtime_windows_socket.c)
+    list(APPEND INKWELL_TEST_SUITES suites/net_resolve_windows.c suites/runtime_windows_socket.c)
 endif()
 
 add_executable(inkwell_tests

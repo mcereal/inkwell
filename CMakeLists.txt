@@ -54,11 +54,13 @@ set(INKWELL_CRASH_SOURCE src/runtime/crash.c)
 set(INKWELL_SIGNALS_SOURCE src/runtime/signals.c)
 set(INKWELL_WINDOWS_RUNTIME_SOURCE)
 set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_posix.c)
+set(INKWELL_RESOLVE_SOURCE src/net/resolve.c)
 if(WIN32)
     set(INKWELL_CRASH_SOURCE src/runtime/crash_windows.c)
     set(INKWELL_SIGNALS_SOURCE src/runtime/signals_windows.c)
     set(INKWELL_WINDOWS_RUNTIME_SOURCE src/runtime/windows_handle.c)
     set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_windows.c)
+    set(INKWELL_RESOLVE_SOURCE src/net/resolve_windows.c)
 endif()
 
 add_library(inkwell STATIC
@@ -97,7 +99,7 @@ add_library(inkwell STATIC
     src/net/fetch.c
     src/net/mqtt.c
     src/net/reason.c
-    src/net/resolve.c
+    ${INKWELL_RESOLVE_SOURCE}
     src/net/stream.c
     src/net/tcp.c
     src/net/tls.c

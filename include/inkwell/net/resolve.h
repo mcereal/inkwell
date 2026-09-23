@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * One hostname turned into a socket address, done by forking a child that is allowed to block.
+ * One hostname turned into a socket address without blocking the caller's event loop.
  *
  * `getaddrinfo()` is the one POSIX call a single-threaded process cannot make on its own thread:
  * it blocks for as long as the network takes to answer, there is no non-blocking form, and
@@ -9,7 +9,9 @@
  * That is why a TCP link tends to take a numeric address and nothing else for as long as it can
  * get away with.
  *
- * The way out: fork, let the child block, read the answer back through the event loop.
+ * On POSIX the way out is to fork, let the child block, and read the answer back through the
+ * event loop. Windows currently supports numeric literals only; hostname lookup refuses with
+ * -ENOTSUP until a loop-integrated asynchronous resolver is available there.
  * The child does not exec. There is nothing to exec - `getent` is not on the Brick and busybox's
  * `nslookup` prints a different thing every version - and the resolver we want is the one this
  * binary is already linked against.
@@ -17,8 +19,8 @@
  * **A literal is not a lookup.** inkwell_resolve_literal() answers `192.168.1.50` and `fd00::1`
  * with inet_pton and no child at all, which is both faster and what keeps the behaviour a caller
  * already had for an address exactly as it was. A caller checks that first and only starts a
- * lookup for what is left; start() therefore always forks and always reports later, and never
- * calls back before it returns.
+ * lookup for what is left; on POSIX start() therefore always forks and always reports later,
+ * and never calls back before it returns.
  *
  * One lookup at a time. A second is refused with -EBUSY, which is all either caller needs: a link
  * resolves one host because it is about to connect to one host.
@@ -27,8 +29,13 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/socket.h>
 #include <sys/types.h>
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <sys/socket.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -128,7 +135,7 @@ int inkwell_resolve_init(struct inkwell_resolve *resolve, struct inkwell_loop *l
 /* Kills anything in flight without reporting it, and releases everything held. */
 void inkwell_resolve_shutdown(struct inkwell_resolve *resolve);
 
-/* True when there is a loop to read a child through. */
+/* True when asynchronous hostname lookup is supported and a loop is supplied. */
 bool inkwell_resolve_available(const struct inkwell_resolve *resolve);
 /* True while a lookup is running. A second is refused with -EBUSY. */
 bool inkwell_resolve_busy(const struct inkwell_resolve *resolve);
@@ -136,8 +143,9 @@ bool inkwell_resolve_busy(const struct inkwell_resolve *resolve);
 /*
  * Starts looking `host` up, with `port` written into whatever comes back.
  *
- * Returns 0, or -errno: -ENOTSUP with no loop, -EBUSY with a lookup already running, -EINVAL for
- * an empty name or no callback. On any error nothing was forked and `on_done` will not be called.
+ * Returns 0, or -errno: -ENOTSUP without an available asynchronous resolver (currently all of
+ * Windows), -EBUSY with a lookup already running, -EINVAL for an empty name or no callback. On
+ * any error no work was started and `on_done` will not be called.
  *
  * On 0 the callback is called exactly once, later, from the loop. It is never called before this
  * returns, including for a name that turns out to be a literal - see inkwell_resolve_literal().
