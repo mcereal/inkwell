@@ -64,7 +64,7 @@ if(WIN32)
     set(INKWELL_SIGNALS_SOURCE src/runtime/signals_windows.c)
     set(INKWELL_WINDOWS_RUNTIME_SOURCE src/runtime/windows_handle.c)
     set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_windows.c)
-    set(INKWELL_RESOLVE_SOURCE src/net/resolve_unavailable.c)
+    set(INKWELL_RESOLVE_SOURCE src/net/resolve_windows.c)
     # HTTPS and MQTT still use POSIX socket descriptors. Keep their API callable and
     # explicitly unavailable until they can adopt native Winsock handles.
     set(INKWELL_FETCH_SOURCE src/net/fetch_unavailable.c)

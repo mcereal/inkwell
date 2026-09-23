@@ -72,11 +72,11 @@ target_compile_definitions(inkwell_tests PRIVATE
 add_test(NAME inkwell_unit COMMAND inkwell_tests)
 set_tests_properties(inkwell_unit PROPERTIES LABELS unit)
 
-# The full suite still has POSIX-only fixtures. Keep the Windows refusal contract runnable
-# independently while those fixtures are ported.
+# The full suite still has POSIX-only fixtures. Keep the native Windows networking contracts
+# runnable independently while those fixtures are ported.
 if(WIN32)
     add_executable(inkwell_windows_net_tests framework/inkwell_test.c
-                   suites/net_unavailable_windows.c)
+                   suites/net_resolve_windows.c suites/net_unavailable_windows.c)
     target_include_directories(inkwell_windows_net_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(inkwell_windows_net_tests PRIVATE inkwell inkwell_options)
     add_test(NAME inkwell_windows_net COMMAND inkwell_windows_net_tests)
