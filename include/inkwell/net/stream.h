@@ -19,6 +19,7 @@
  * up" are the same errno and two different sentences.
  */
 
+#include "inkwell/base/fd.h"
 #include "inkwell/runtime/loop.h"
 
 #include <stdbool.h>
@@ -88,8 +89,9 @@ typedef void (*inkwell_stream_dropped_fn)(void *userdata, uint32_t id);
 
 struct inkwell_stream {
     int fd;
+    inkwell_socket socket;
+    int registration_token;
     enum inkwell_stream_kind kind;
-    bool fd_registered;
     bool want_write; /* INKWELL_LOOP_OUT is armed because the queue has a remainder */
     struct inkwell_loop *loop;
 
@@ -147,8 +149,8 @@ void inkwell_stream_set_sink(struct inkwell_stream *stream, inkwell_stream_bytes
  * Adopts `fd` - which must already be open and non-blocking - and watches it for readability.
  * The stream owns the descriptor from here: close() is inkwell_stream_close()'s to call.
  *
- * `kind` says what the descriptor is, which decides how writes are made; see above, and get it
- * wrong towards SOCKET and every write fails with ENOTSOCK.
+ * `kind` says what the descriptor is. SOCKET here is for POSIX descriptor compatibility only;
+ * native Windows sockets must use inkwell_stream_open_socket(), since SOCKET cannot fit in int.
  *
  * `callback` and `userdata` go to the event loop unchanged, so the owner keeps its own dispatch.
  * A NULL `loop` opens the stream unwatched, which is what a test driving pump() by hand wants.
@@ -157,6 +159,12 @@ void inkwell_stream_set_sink(struct inkwell_stream *stream, inkwell_stream_bytes
  */
 int inkwell_stream_open(struct inkwell_stream *stream, int fd, enum inkwell_stream_kind kind,
                         struct inkwell_loop *loop, inkwell_loop_callback callback, void *userdata);
+
+/* Adopts a nonblocking native socket without narrowing it to an int. On a registration failure
+ * the socket remains caller-owned. A NULL loop leaves it unwatched for manual pump/flush. */
+int inkwell_stream_open_socket(struct inkwell_stream *stream, inkwell_socket socket,
+                               struct inkwell_loop *loop, inkwell_loop_callback callback,
+                               void *userdata);
 
 /* Unwatches and closes the descriptor, and reports every queued write as dropped. Safe on a
    stream that is already closed - which still reports the queue, because a caller that queued

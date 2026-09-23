@@ -65,7 +65,7 @@ INKWELL_TEST_CASE(stream_round_trips_bytes, unit) {
                                  (void)close(fds[1]), "init failed");
     inkwell_stream_set_sink(&stream, probe_bytes, probe_dropped, &probe);
     INKWELL_TEST_FAIL_IF_CLEANUP(
-        inkwell_stream_open(&stream, fds[0], INKWELL_STREAM_SOCKET, NULL, NULL, NULL) != 0,
+        inkwell_stream_open_socket(&stream, (inkwell_socket)fds[0], NULL, NULL, NULL) != 0,
         (void)close(fds[0]);
         (void)close(fds[1]), "open failed");
 

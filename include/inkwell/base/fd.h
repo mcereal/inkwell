@@ -42,6 +42,13 @@ int inkwell_fd_socket(int domain, int type, int protocol);
 /* Sets O_NONBLOCK and FD_CLOEXEC on a descriptor somebody else made. 0 or a negative errno. */
 int inkwell_fd_set_nonblocking_cloexec(int fd);
 
+/* CRT/POSIX descriptor I/O, distinct from native socket I/O on Windows. A successful read or
+ * write returns a byte count; a failure returns negative errno. close returns 0 or negative
+ * errno. These do not make a descriptor nonblocking. */
+int inkwell_fd_read(int fd, void *bytes, size_t len);
+int inkwell_fd_write(int fd, const void *bytes, size_t len);
+int inkwell_fd_close(int fd);
+
 /* A socket is pointer-sized on Windows, so it cannot safely travel through the int descriptor
  * API above. This value is a native socket on either host, never a loop registration token.
  * open() starts Winsock once on Windows and makes the socket nonblocking and non-inheritable.
@@ -50,6 +57,10 @@ int inkwell_fd_set_nonblocking_cloexec(int fd);
  */
 typedef uintptr_t inkwell_socket;
 #define INKWELL_SOCKET_INVALID UINTPTR_MAX
+
+/* POSIX accepts a socket as an int descriptor; Windows does not. This compatibility bridge
+ * returns -ENOTSUP on Windows so an int cannot accidentally truncate a native SOCKET. */
+int inkwell_fd_to_socket(int fd, inkwell_socket *out);
 
 int inkwell_socket_open(int domain, int type, int protocol, inkwell_socket *out);
 int inkwell_socket_close(inkwell_socket socket);
