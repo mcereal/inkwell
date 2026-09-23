@@ -45,10 +45,13 @@ Three questions, in this order.
 | `net/stream.h` | `mesh/transport/stream_link.h` | the frame parser, the session it feeds, and the two numbers that size the outbound queue |
 | `net/tls.h` | `mesh/core/tls_client.h` | which roots to trust, and where they came from - a generated table compiled into a binary is one product's answer to shipping without a certificate store |
 | `net/fetch.h` | `mesh/core/fetch.h` | the product's name and version, sent as `User-Agent`, and every state machine that decides what to do with what came back |
+| `net/zip_fetch.h` | `mesh/core/firmware_download.h` | which archive and which member to ask for, the largest member worth accepting, how long each step may take, and what the member is once it lands |
+| `net/tcp.h` | the connect half of `src/transport/tcp/tcp_transport.c` | the registry, target syntax and remembered host, the handshake, the auto-connect policy |
 | `net/mqtt.h` | `mesh/core/mqtt_proxy.h` | Meshtastic's broker defaults, client-id derivation, channel filters, publish policy, and the translated state/failure tables |
 | `io/serial.h` | `mesh/transport/serial_usb.h` | which ports are a radio and which a bootloader, the rate one firmware talks at, and the transport that connects to one |
 | `io/usb_storage.h` | `mesh/transport/usb_msc.h` | bootloader selection, UF2 validation, transfer timing, and the meaning of an early device reset |
 | `ble/central.h` | `mesh/transport/ble_bluez.h` | the five service and characteristic UUIDs one firmware publishes, the lookup of all four at once, and every policy about when to scan, connect, pair and give up |
+| `base/record_file.h` | the line reader and writer inside `store_file.c` and `store_archive.c` | the key table, the field lists, the message codec, conversation routing and retention |
 
 ## Next, in the order the dependencies allow
 
@@ -93,17 +96,8 @@ used to size its outbound queue - one protocol's largest message, one applicatio
 are the caller's storage now. What stayed behind is the frame parser, the session it feeds, and
 a `struct mesh_stream_link` that is those two things over an `inkwell_stream`.
 
-The transports over it - serial, TCP - are the next step and a larger one. They are ordinary
-socket and termios work wrapped in the Meshtastic transport registry. The errors question that
-used to block them is answered (`net/reason.h`) and the TCP link already reports that way; what
-is left is the registry, which is the application's, and the device discovery underneath it,
-which is not:
-
-| Candidate | What is general | What stays |
-|---|---|---|
-| `src/transport/tcp/tcp_transport.c` | `net/tcp.h`: the connect-with-a-deadline over `net/resolve` and `net/stream` | the registry, target syntax and remembered host, the handshake, the auto-connect policy |
-
-The serial half has come down as `io/serial.h`. The scan reports what the USB tree says - a
+The transports over it - serial, TCP - came next. They were ordinary socket and termios work
+wrapped in the application's transport registry, and the registry is what stayed. The serial half has come down as `io/serial.h`. The scan reports what the USB tree says - a
 bridge or the device's own USB, a drive beside it or not - and the application decides what that
 makes it. The TCP half is now `net/tcp.h`: it resolves a host, opens and tunes a non-blocking
 socket, enforces the caller's connect deadline, and hands the connected descriptor up. It does
@@ -157,6 +151,35 @@ cache and archive suites cover the application format and behavior.
 The archive's targeted message deletion still streams through its own filter and rewrite. Its
 choice of which lines to keep depends on message and reaction fields, so it remains with the
 application until that filter can be expressed without exposing those fields to inkwell.
+
+### 6. Ranged zip downloads - done, as `net/zip_fetch.h`
+
+The piece of the firmware downloader that reads one member out of a remote zip - HEAD, the tail
+window, the local header, the member, then the inflate and the CRC check - came down whole. It
+never knew what the member was: its header included only `codec/zip.h` and `net/fetch.h`, and
+its one application fact was a number, the largest image any supported device could hold. That
+number is now the caller's `max_member_bytes`, and it is required rather than defaulted, because
+the size it bounds is one a stranger's directory declared and this layer cannot know what a real
+member weighs. The per-step deadlines went up the same way, and so did the names of the staged
+files, which are "<stem>.<suffix>" so the caller keeps whatever it already had on disk.
+
+What stayed is the part that reads two documents to decide *which* zip and *which* member -
+`firmware_fetch.c` - and everything that checks the member is the right image for a device once
+it lands. The loopback-CDN cases for the download moved with it; the resolution cases stayed with
+the application, over their own copy of the same fake CDN.
+
+## Still on the wrong side
+
+| Candidate | What is general | What stays |
+|---|---|---|
+| `src/transport/ble/ble_hci.c` | asking for a connection interval on an open LE link, which BlueZ has no D-Bus call for - a raw HCI `LE Connection Update` | the interval one transfer protocol wants, and when to ask for it |
+
+It is not a file move. Its API names an adapter by BlueZ object path and a peer by its text
+address, which is the vocabulary `ble/central.h` was written to hide; the general form is a call
+on `ble/central.h` by address, implemented over an HCI socket on Linux and refused elsewhere.
+
+`enum inkwell_fetch_outcome`'s folded `NETWORK` member (above) is the other open item, and it is
+inkwell's own.
 
 ## The two questions that blocked several rows
 

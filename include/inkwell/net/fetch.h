@@ -129,6 +129,13 @@ struct inkwell_fetch_request {
     uint32_t timeout_ms;
     /* Cap on a captured reply; 0 takes INKWELL_FETCH_RESPONSE_MAX. Ignored with output_path. */
     size_t response_max;
+    /*
+     * With output_path: the most bytes the body may write to the file, or 0 for no cap. The 206
+     * check above says a server honoured the range, not that it sent only what was asked for, and
+     * a reply that keeps going is a file that keeps growing - so a caller that knows how long the
+     * answer should be says so, and the first byte past it fails the request TOO_LARGE.
+     */
+    uint64_t output_max;
     inkwell_fetch_done_fn on_done;
     void *userdata;
 };

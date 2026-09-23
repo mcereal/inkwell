@@ -80,6 +80,7 @@ struct inkwell_fetch_conn {
     bool ranged;
     char output_path[INKWELL_FETCH_PATH_MAX];
     size_t response_max;
+    uint64_t output_max;
     uint64_t deadline_ms;
     inkwell_fetch_done_fn on_done;
     void *userdata;
@@ -106,6 +107,7 @@ struct inkwell_fetch_conn {
 
     /* ---- where the body goes */
     int out_fd;
+    uint64_t out_written;
     char *body;
     size_t body_len;
 
@@ -238,6 +240,12 @@ static bool fetch_sink(struct inkwell_fetch *fetch, const uint8_t *bytes, size_t
         }
         return true;
     }
+    if (conn->output_max > 0U && (uint64_t)len > conn->output_max - conn->out_written) {
+        fetch_fail(fetch, INKWELL_FETCH_TOO_LARGE, "%s passed %llu bytes", conn->output_path,
+                   (unsigned long long)conn->output_max);
+        return false;
+    }
+    conn->out_written += (uint64_t)len;
     while (len > 0U) {
         const ssize_t wrote = write(conn->out_fd, bytes, len);
         if (wrote < 0 && errno == EINTR) {
@@ -332,6 +340,7 @@ static bool fetch_on_head(struct inkwell_fetch *fetch) {
     }
     if (conn->output_path[0] != '\0' && conn->method == INKWELL_FETCH_GET) {
         conn->out_fd = open(conn->output_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        conn->out_written = 0U;
         if (conn->out_fd < 0) {
             fetch_fail(fetch, INKWELL_FETCH_FILE, "opening %s: %s", conn->output_path,
                        strerror(errno));
@@ -774,6 +783,7 @@ int inkwell_fetch_start(struct inkwell_fetch *fetch, const struct inkwell_fetch_
     conn->method = request->method;
     conn->response_max =
         request->response_max > 0U ? request->response_max : INKWELL_FETCH_RESPONSE_MAX;
+    conn->output_max = (uint64_t)request->output_max;
     conn->deadline_ms =
         now_ms + (request->timeout_ms > 0U ? request->timeout_ms : FETCH_DEFAULT_TIMEOUT_MS);
     conn->on_done = request->on_done;

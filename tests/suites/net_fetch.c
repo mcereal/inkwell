@@ -503,6 +503,54 @@ cleanup:
 }
 
 /*
+ * A file download stops at `output_max`: a reply of exactly that length is whole, and one byte
+ * more is TOO_LARGE rather than a file that keeps growing. The 206 check says a server honoured
+ * a range, not that it stopped where the range did.
+ */
+INKWELL_TEST_CASE(fetch_caps_a_file_at_output_max, unit) {
+    struct fetch_harness h;
+    const char *failure = NULL;
+    char path[64];
+    snprintf(path, sizeof path, "/tmp/inkwell-fetch-cap-%d.out", (int)getpid());
+    (void)unlink(path);
+    if (!harness_start(&h)) {
+        failure = "the harness did not start";
+        goto cleanup;
+    }
+
+    const struct inkwell_fetch_request exact = {
+        .url = "https://github.com/release",
+        .output_path = path,
+        .output_max = 1000U,
+    };
+    struct stat info;
+    if (!harness_fetch(&h, &exact) || h.probe.outcome[0] != INKWELL_FETCH_OK ||
+        stat(path, &info) != 0 || info.st_size != 1000) {
+        failure = "a 1,000-byte asset fits a 1,000-byte cap exactly";
+        goto cleanup;
+    }
+
+    const struct inkwell_fetch_request tight = {
+        .url = "https://github.com/release",
+        .output_path = path,
+        .output_max = 999U,
+    };
+    if (!harness_fetch(&h, &tight) || h.probe.outcome[1] != INKWELL_FETCH_TOO_LARGE) {
+        failure = "and one byte past the cap fails the request";
+        goto cleanup;
+    }
+
+cleanup:
+    harness_stop(&h);
+    (void)unlink(path);
+    if (failure != NULL) {
+        record_failure(test_name, failure);
+    } else {
+        record_success(test_name);
+    }
+}
+
+/*
  * The cap is on the reply, and a reply of exactly that many bytes is inside it.
  *
  * The boundary is the whole point. Every other case here asks for a reply far past its cap or

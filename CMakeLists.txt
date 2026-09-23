@@ -88,6 +88,7 @@ add_library(inkwell STATIC
     src/net/stream.c
     src/net/tcp.c
     src/net/tls.c
+    src/net/zip_fetch.c
     # io: the USB serial ports the system has, and a tty opened raw on the loop's terms
     src/io/serial.c
     src/io/usb_storage.c
