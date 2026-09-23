@@ -1,13 +1,13 @@
 #pragma once
 
 /*
- * One non-blocking TCP connection, from a host and port to an owned descriptor.
+ * One non-blocking TCP connection, from a host and port to an owned native socket.
  *
  * This is the small piece every TCP client otherwise writes again: recognise a numeric address
  * or resolve a name without blocking the loop, open the socket, watch a non-blocking connect,
  * and stop waiting at a caller-selected deadline. It does not own a protocol or a reconnect
- * policy. On success it hands one connected descriptor to the callback, which commonly passes
- * it straight to `inkwell_stream_open()`.
+ * policy. On success it hands one connected socket to the callback. A Windows SOCKET cannot
+ * travel through an int descriptor, so the result uses inkwell_socket rather than an fd.
  */
 
 #include "inkwell/net/reason.h"
@@ -40,8 +40,8 @@ struct inkwell_tcp_connect_options {
 };
 
 struct inkwell_tcp_connect_result {
-    /* On success, a connected non-blocking descriptor now owned by the callback. -1 on failure. */
-    int fd;
+    /* On success, a connected non-blocking socket now owned by the callback. */
+    inkwell_socket socket; /* INKWELL_SOCKET_INVALID on failure */
     struct inkwell_net_failure failure;
 };
 
@@ -52,8 +52,8 @@ struct inkwell_tcp_connector {
     struct inkwell_loop *loop;
     struct inkwell_resolve resolve;
     enum inkwell_tcp_connect_state state;
-    int fd;
-    bool fd_registered;
+    inkwell_socket socket;
+    int registration_token; /* loop token, not necessarily the native socket */
     uint64_t deadline_ms;
     uint64_t now_ms;
     struct inkwell_tcp_connect_options options;

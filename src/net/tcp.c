@@ -7,22 +7,18 @@
 
 #include <errno.h>
 #include <limits.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 static void tcp_drop_socket(struct inkwell_tcp_connector *connector) {
-    if (connector->fd < 0) {
+    if (connector->socket == INKWELL_SOCKET_INVALID) {
         return;
     }
-    if (connector->fd_registered && connector->loop != NULL) {
-        (void)inkwell_loop_remove_fd(connector->loop, connector->fd);
+    if (connector->registration_token >= 0 && connector->loop != NULL) {
+        (void)inkwell_loop_remove_fd(connector->loop, connector->registration_token);
     }
-    (void)close(connector->fd);
-    connector->fd = -1;
-    connector->fd_registered = false;
+    (void)inkwell_socket_close(connector->socket);
+    connector->socket = INKWELL_SOCKET_INVALID;
+    connector->registration_token = -1;
 }
 
 static void tcp_clear_attempt(struct inkwell_tcp_connector *connector) {
@@ -40,7 +36,7 @@ static void tcp_complete_failure(struct inkwell_tcp_connector *connector,
     tcp_clear_attempt(connector);
     if (callback != NULL) {
         const struct inkwell_tcp_connect_result result = {
-            .fd = -1,
+            .socket = INKWELL_SOCKET_INVALID,
             .failure = {.reason = reason, .detail = detail},
         };
         callback(userdata, &result);
@@ -50,32 +46,28 @@ static void tcp_complete_failure(struct inkwell_tcp_connector *connector,
 static void tcp_complete_success(struct inkwell_tcp_connector *connector) {
     inkwell_tcp_connect_done_fn const callback = connector->on_done;
     void *const userdata = connector->userdata;
-    const int fd = connector->fd;
-    if (connector->fd_registered && connector->loop != NULL) {
-        (void)inkwell_loop_remove_fd(connector->loop, fd);
+    const inkwell_socket socket = connector->socket;
+    if (connector->registration_token >= 0 && connector->loop != NULL) {
+        (void)inkwell_loop_remove_fd(connector->loop, connector->registration_token);
     }
-    connector->fd = -1;
-    connector->fd_registered = false;
+    connector->socket = INKWELL_SOCKET_INVALID;
+    connector->registration_token = -1;
     tcp_clear_attempt(connector);
     if (callback != NULL) {
         const struct inkwell_tcp_connect_result result = {
-            .fd = fd,
+            .socket = socket,
             .failure = {.reason = INKWELL_NET_OK, .detail = 0},
         };
         callback(userdata, &result);
     } else {
-        (void)close(fd);
+        (void)inkwell_socket_close(socket);
     }
 }
 
 static void tcp_finish_connect(struct inkwell_tcp_connector *connector) {
-    int error = 0;
-    socklen_t error_len = (socklen_t)sizeof error;
-    if (getsockopt(connector->fd, SOL_SOCKET, SO_ERROR, &error, &error_len) < 0) {
-        error = errno;
-    }
-    if (error != 0) {
-        tcp_complete_failure(connector, inkwell_net_reason_from_errno(error), -error);
+    const int error = inkwell_socket_pending_error(connector->socket);
+    if (error < 0) {
+        tcp_complete_failure(connector, inkwell_net_reason_from_errno(error), error);
         return;
     }
     tcp_complete_success(connector);
@@ -93,65 +85,73 @@ static int tcp_on_fd(int fd, uint32_t events, void *userdata) {
     return 0;
 }
 
-static void tcp_set_unsigned_option(int fd, int option, unsigned value) {
-    if (value == 0U || value > (unsigned)INT_MAX) {
-        return;
-    }
-    const int setting = (int)value;
-    (void)setsockopt(fd, IPPROTO_TCP, option, &setting, sizeof setting);
-}
-
-static void tcp_configure_socket(int fd, const struct inkwell_tcp_connect_options *options) {
-    const int enabled = 1;
+static void tcp_configure_socket(inkwell_socket socket,
+                                 const struct inkwell_tcp_connect_options *options) {
     if (options->no_delay) {
-        (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof enabled);
+        (void)inkwell_socket_set_option(socket, INKWELL_SOCKET_NO_DELAY, 1U);
     }
     if (!options->keepalive) {
         return;
     }
-    (void)setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &enabled, sizeof enabled);
-#if defined(TCP_KEEPIDLE)
-    tcp_set_unsigned_option(fd, TCP_KEEPIDLE, options->keepalive_idle_s);
-#elif defined(TCP_KEEPALIVE)
-    /* Darwin's name for the same idle interval. */
-    tcp_set_unsigned_option(fd, TCP_KEEPALIVE, options->keepalive_idle_s);
-#endif
-#if defined(TCP_KEEPINTVL)
-    tcp_set_unsigned_option(fd, TCP_KEEPINTVL, options->keepalive_interval_s);
-#endif
-#if defined(TCP_KEEPCNT)
-    tcp_set_unsigned_option(fd, TCP_KEEPCNT, options->keepalive_count);
-#endif
+    (void)inkwell_socket_set_option(socket, INKWELL_SOCKET_KEEPALIVE, 1U);
+    if (options->keepalive_idle_s > 0U && options->keepalive_idle_s <= (unsigned)INT_MAX) {
+        (void)inkwell_socket_set_option(socket, INKWELL_SOCKET_KEEPALIVE_IDLE_S,
+                                        options->keepalive_idle_s);
+    }
+    if (options->keepalive_interval_s > 0U && options->keepalive_interval_s <= (unsigned)INT_MAX) {
+        (void)inkwell_socket_set_option(socket, INKWELL_SOCKET_KEEPALIVE_INTERVAL_S,
+                                        options->keepalive_interval_s);
+    }
+    if (options->keepalive_count > 0U && options->keepalive_count <= (unsigned)INT_MAX) {
+        (void)inkwell_socket_set_option(socket, INKWELL_SOCKET_KEEPALIVE_COUNT,
+                                        options->keepalive_count);
+    }
 }
 
 static int tcp_open(struct inkwell_tcp_connector *connector, const struct sockaddr_storage *address,
                     socklen_t address_len, bool start_deadline,
                     struct inkwell_net_failure *failure) {
-    const int fd = inkwell_fd_socket(address->ss_family, SOCK_STREAM, 0);
-    if (fd < 0) {
+    inkwell_socket socket = INKWELL_SOCKET_INVALID;
+    const int opened = inkwell_socket_open(address->ss_family, SOCK_STREAM, 0, &socket);
+    if (opened < 0) {
         if (failure != NULL) {
-            failure->reason = inkwell_net_reason_from_errno(fd);
-            failure->detail = fd;
+            failure->reason = inkwell_net_reason_from_errno(opened);
+            failure->detail = opened;
         }
-        return fd;
+        return opened;
     }
-    tcp_configure_socket(fd, &connector->options);
+    tcp_configure_socket(socket, &connector->options);
 
-    const int connected = connect(fd, (const struct sockaddr *)address, address_len);
-    if (connected < 0 && errno != EINPROGRESS) {
-        const int error = errno;
-        (void)close(fd);
-        if (failure != NULL) {
-            failure->reason = inkwell_net_reason_from_errno(error);
-            failure->detail = -error;
-        }
-        return -error;
-    }
-
-    connector->fd = fd;
+    connector->socket = socket;
     connector->state = INKWELL_TCP_CONNECT_CONNECTING;
     connector->deadline_ms =
         start_deadline ? connector->now_ms + connector->options.timeout_ms : 0U;
+    /* Register before connect(): a backend may report completion only once, so a fast refusal
+       could otherwise finish before the loop starts watching the socket. */
+    if (connector->loop != NULL) {
+        const int added = inkwell_loop_watch_socket(connector->loop, socket, INKWELL_LOOP_OUT,
+                                                    tcp_on_fd, connector);
+        if (added < 0) {
+            tcp_drop_socket(connector);
+            if (failure != NULL) {
+                failure->reason = inkwell_net_reason_from_errno(added);
+                failure->detail = added;
+            }
+            return added;
+        }
+        connector->registration_token = added;
+    }
+
+    const int connected = inkwell_socket_connect(socket, address, (size_t)address_len);
+    if (connected < 0 && connected != -EINPROGRESS) {
+        tcp_drop_socket(connector);
+        if (failure != NULL) {
+            failure->reason = inkwell_net_reason_from_errno(connected);
+            failure->detail = connected;
+        }
+        return connected;
+    }
+
     if (connected == 0) {
         tcp_finish_connect(connector);
         return 0;
@@ -164,17 +164,6 @@ static int tcp_open(struct inkwell_tcp_connector *connector, const struct sockad
         }
         return -ENOTSUP;
     }
-    const int added =
-        inkwell_loop_add_fd(connector->loop, fd, INKWELL_LOOP_OUT, tcp_on_fd, connector);
-    if (added < 0) {
-        tcp_drop_socket(connector);
-        if (failure != NULL) {
-            failure->reason = inkwell_net_reason_from_errno(added);
-            failure->detail = added;
-        }
-        return added;
-    }
-    connector->fd_registered = true;
     return 0;
 }
 
@@ -204,7 +193,8 @@ int inkwell_tcp_connector_init(struct inkwell_tcp_connector *connector, struct i
     }
     memset(connector, 0, sizeof *connector);
     connector->loop = loop;
-    connector->fd = -1;
+    connector->socket = INKWELL_SOCKET_INVALID;
+    connector->registration_token = -1;
     connector->state = INKWELL_TCP_CONNECT_IDLE;
     return inkwell_resolve_init(&connector->resolve, loop);
 }
