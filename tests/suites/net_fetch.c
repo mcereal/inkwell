@@ -131,6 +131,8 @@ struct fetch_probe {
     int status[4];
     char body[4][1024];
     size_t len[4];
+    struct inkwell_net_failure failure[4];
+    char host[4][64];
     unsigned calls;
     /* When set, the first completion starts this URL - the chained case. */
     const char *chain_url;
@@ -145,6 +147,8 @@ static void probe_record(void *userdata, const struct inkwell_fetch_result *resu
         probe->outcome[slot] = result->outcome;
         probe->status[slot] = result->status;
         probe->len[slot] = result->len;
+        probe->failure[slot] = result->failure;
+        snprintf(probe->host[slot], sizeof probe->host[slot], "%s", result->host);
         snprintf(probe->body[slot], sizeof probe->body[slot], "%s",
                  result->body != NULL ? result->body : "");
     }
@@ -290,6 +294,10 @@ INKWELL_TEST_CASE(fetch_reads_a_body_and_names_a_failure, unit) {
         failure = "a 404 should be reported as one, with no body";
         goto cleanup;
     }
+    if (inkwell_net_failed(&h.probe.failure[1]) || strcmp(h.probe.host[1], "api.github.com") != 0) {
+        failure = "a 404 is the reply's problem, not the connection's, and names its host";
+        goto cleanup;
+    }
 
     const struct inkwell_fetch_request garbage = {.url = "https://api.github.com/garbage"};
     if (!harness_fetch(&h, &garbage) || h.probe.outcome[2] != INKWELL_FETCH_PROTOCOL) {
@@ -332,6 +340,10 @@ INKWELL_TEST_CASE(fetch_follows_a_redirect_to_another_host, unit) {
     if (!harness_fetch(&h, &ranged) || h.probe.outcome[0] != INKWELL_FETCH_OK ||
         h.probe.status[0] != 206 || strcmp(h.probe.body[0], "abcde") != 0) {
         failure = "the range should arrive from the host the redirect named";
+        goto cleanup;
+    }
+    if (strcmp(h.probe.host[0], "objects.githubusercontent.com") != 0) {
+        failure = "and the result should name that host, which the caller never did";
         goto cleanup;
     }
     char log[1024];
@@ -427,12 +439,14 @@ INKWELL_TEST_CASE(fetch_knows_where_a_body_ends, unit) {
         goto cleanup;
     }
     const struct inkwell_fetch_request cut = {.url = "https://api.github.com/until-cut"};
-    if (!harness_fetch(&h, &cut) || h.probe.outcome[2] != INKWELL_FETCH_NETWORK) {
-        failure = "a body ended by a bare close should be refused";
+    if (!harness_fetch(&h, &cut) || h.probe.outcome[2] != INKWELL_FETCH_NETWORK ||
+        h.probe.failure[2].reason != INKWELL_NET_CLOSED) {
+        failure = "a body ended by a bare close should be refused, as the peer closing";
         goto cleanup;
     }
     const struct inkwell_fetch_request shorted = {.url = "https://api.github.com/short"};
-    if (!harness_fetch(&h, &shorted) || h.probe.outcome[3] != INKWELL_FETCH_NETWORK) {
+    if (!harness_fetch(&h, &shorted) || h.probe.outcome[3] != INKWELL_FETCH_NETWORK ||
+        h.probe.failure[3].reason != INKWELL_NET_CLOSED) {
         failure = "a body short of its Content-Length should be refused";
         goto cleanup;
     }
@@ -659,7 +673,8 @@ INKWELL_TEST_CASE(fetch_verifies_the_server, unit) {
     }
 
     const struct inkwell_fetch_request stranger = {.url = "https://wrong.example.org/doc"};
-    if (!harness_fetch(&h, &stranger) || h.probe.outcome[0] != INKWELL_FETCH_TLS) {
+    if (!harness_fetch(&h, &stranger) || h.probe.outcome[0] != INKWELL_FETCH_TLS ||
+        h.probe.failure[0].reason != INKWELL_NET_TLS) {
         failure = "a certificate for other names should be refused";
         goto cleanup;
     }
@@ -801,6 +816,52 @@ cleanup:
 }
 
 /*
+ * Which network failure it was, where the server is up and something else is not: an address
+ * that refuses on the way to one that answers, and a name that does not resolve at all.
+ */
+INKWELL_TEST_CASE(fetch_names_the_connection_failure, unit) {
+    struct fetch_harness h;
+    const char *failure = NULL;
+    if (!harness_start(&h)) {
+        failure = "the harness did not start";
+        goto cleanup;
+    }
+
+    /* A dead address followed by a live one: what the request ends on is the live one's
+       failure, not the address it got past on the way. */
+    inkwell_fetch_connect_to(&h.fetch, "127.0.0.2,127.0.0.1", h.server.port);
+    const struct inkwell_fetch_request cut = {.url = "https://api.github.com/until-cut"};
+    if (!harness_fetch(&h, &cut) || h.probe.outcome[0] != INKWELL_FETCH_NETWORK ||
+        h.probe.failure[0].reason != INKWELL_NET_CLOSED) {
+        failure = "a cut body behind a refused address is the peer closing, not the refusal";
+        goto cleanup;
+    }
+
+    /* A name nobody can look up. Whether the answer is NXDOMAIN or a resolver that is not
+       there depends on where the suite runs - net_resolve.c gates the difference - but either
+       way it is a lookup's reason and never a connect's. */
+    inkwell_fetch_connect_to(&h.fetch, "no-such-host.invalid", h.server.port);
+    const struct inkwell_fetch_request unknown = {.url = "https://api.github.com/doc"};
+    if (!harness_fetch(&h, &unknown) ||
+        (h.probe.outcome[1] != INKWELL_FETCH_NETWORK &&
+         h.probe.outcome[1] != INKWELL_FETCH_TIMED_OUT) ||
+        (h.probe.failure[1].reason != INKWELL_NET_UNKNOWN_HOST &&
+         h.probe.failure[1].reason != INKWELL_NET_LOOKUP_FAILED &&
+         h.probe.failure[1].reason != INKWELL_NET_LOOKUP_TIMED_OUT)) {
+        failure = "a name that does not resolve should fail as a lookup";
+        goto cleanup;
+    }
+
+cleanup:
+    harness_stop(&h);
+    if (failure != NULL) {
+        record_failure(test_name, failure);
+    } else {
+        record_success(test_name);
+    }
+}
+
+/*
  * A host's addresses are tried in turn, so one that will not take a connection is not the end of
  * the request. The first is refused outright - 127.0.0.2 is loopback with nothing listening - and
  * the second is TEST-NET-1, which never answers at all and is given up on by the clock; the third
@@ -825,6 +886,7 @@ INKWELL_TEST_CASE(fetch_tries_the_next_address, unit) {
         failure = "the request should start";
         goto cleanup;
     }
+
     /* Past each address's allowance in turn, and well inside the request's own. */
     uint64_t now = 0U;
     for (int turn = 0; turn < 600 && h.probe.calls == 0U; ++turn) {
@@ -881,7 +943,7 @@ INKWELL_TEST_CASE(fetch_gives_up_on_a_server_that_does_not_answer, unit) {
     }
     inkwell_fetch_tick(&h.fetch, 1000U);
     if (h.probe.calls != 1U || h.probe.outcome[0] != INKWELL_FETCH_TIMED_OUT ||
-        inkwell_fetch_busy(&h.fetch)) {
+        h.probe.failure[0].reason != INKWELL_NET_TIMED_OUT || inkwell_fetch_busy(&h.fetch)) {
         failure = "the deadline should end the request";
         goto cleanup;
     }
@@ -891,6 +953,11 @@ INKWELL_TEST_CASE(fetch_gives_up_on_a_server_that_does_not_answer, unit) {
     const struct inkwell_fetch_request refused = {.url = "https://api.github.com/doc"};
     if (!harness_fetch(&h, &refused) || h.probe.outcome[1] != INKWELL_FETCH_NETWORK) {
         failure = "a refused connection should be reported as the network";
+        goto cleanup;
+    }
+    if (h.probe.failure[1].reason != INKWELL_NET_UNREACHABLE ||
+        h.probe.failure[1].detail != -ECONNREFUSED) {
+        failure = "and say which network failure it was, with the errno behind it";
         goto cleanup;
     }
 

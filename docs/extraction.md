@@ -79,13 +79,16 @@ direct-message filters, decides which radio messages to publish, and turns state
 records into translated sentences. The loopback broker tests moved with the state machine;
 mesh-client's policy and wording tests stayed with the application.
 
-**One thing was deliberately left undone.** `enum inkwell_fetch_outcome` came down unchanged, and
-its `NETWORK` member folds four things `net/reason.h` can tell apart - an unknown host, a lookup
-that failed, an unreachable address, a connection that closed - into one. That is the same
-duplication `net/reason.h` was written to remove, and a caller that wants to say "no such host"
-rather than "could not be reached" cannot. Folding it is a behaviour change to every caller's
-sentences, so it did not belong in a move; it is worth doing on its own, with the call sites in
-view.
+**`NETWORK` no longer hides which network failure it was.** `enum inkwell_fetch_outcome` came
+down with a `NETWORK` member that folded four things `net/reason.h` can tell apart - an unknown
+host, a lookup that failed, an unreachable address, a connection that closed - into one, so a
+caller that wanted to say "no such host" rather than "could not be reached" could not. The
+outcome stayed as it was, because it answers a different question - what the reader would do
+next, and for all four that is "try again" - and the result gained a `struct
+inkwell_net_failure` beside it that says what happened, filled for NETWORK, TLS and TIMED_OUT.
+It also carries the host of the hop the request ended on, which after a redirect is a host the
+caller never named. mesh-client's updater and firmware check word a NETWORK failure through the
+same table its TCP link and MQTT proxy already use.
 
 ### 2. The transports, now that the stream under them has gone
 
@@ -177,9 +180,6 @@ the application, over their own copy of the same fake CDN.
 It is not a file move. Its API names an adapter by BlueZ object path and a peer by its text
 address, which is the vocabulary `ble/central.h` was written to hide; the general form is a call
 on `ble/central.h` by address, implemented over an HCI socket on Linux and refused elsewhere.
-
-`enum inkwell_fetch_outcome`'s folded `NETWORK` member (above) is the other open item, and it is
-inkwell's own.
 
 ## The two questions that blocked several rows
 
