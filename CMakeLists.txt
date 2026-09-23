@@ -153,7 +153,9 @@ endif()
 # submodule as well - it already has one - so testing the checkout first would take the stub
 # branch and quietly turn TLS off for the entire tree, with the pin sitting right there unused.
 # The file check belongs only where a checkout is actually about to be read.
-if(TARGET mbedtls OR EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/CMakeLists.txt)
+option(INKWELL_WITH_TLS "Build TLS support when Mbed TLS is present" ON)
+if(INKWELL_WITH_TLS AND
+   (TARGET mbedtls OR EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/CMakeLists.txt))
     if(NOT TARGET mbedtls)
         # Mbed TLS builds its own tests, sample programs and package config by default, none of
         # which belong in this build. FATAL_WARNINGS is turned off because it is that project's
@@ -193,10 +195,14 @@ if(TARGET mbedtls OR EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/CMak
     # `tfpsacrypto` is 4.x's name for what 3.x called `mbedcrypto`.
     target_link_libraries(inkwell PUBLIC mbedtls mbedx509 tfpsacrypto)
 else()
-    message(STATUS
-        "third_party/mbedtls is missing: building inkwell without TLS, so net/tls.h refuses every "
-        "session and net/fetch.h reports itself unavailable. "
-        "Run `git submodule update --init --recursive` to enable it.")
+    if(INKWELL_WITH_TLS)
+        message(STATUS
+            "third_party/mbedtls is missing: building inkwell without TLS, so net/tls.h refuses "
+            "every session and net/fetch.h reports itself unavailable. "
+            "Run `git submodule update --init --recursive` to enable it.")
+    else()
+        message(STATUS "inkwell: TLS support disabled by INKWELL_WITH_TLS=OFF")
+    endif()
 endif()
 
 # The Bluetooth stack under ble/central.h, chosen here because a process has exactly one.
