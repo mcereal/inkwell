@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <string.h>
 #if defined(_WIN32)
+#include <io.h>
 #include <windows.h>
 #else
 #include <arpa/inet.h>
@@ -17,6 +18,56 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
+
+int inkwell_fd_read(int fd, void *bytes, size_t len) {
+    if (fd < 0 || (bytes == NULL && len != 0U)) {
+        return -EINVAL;
+    }
+    const unsigned count = (unsigned)(len > INT_MAX ? INT_MAX : len);
+#if defined(_WIN32)
+    const int result = _read(fd, bytes, count);
+#else
+    const int result = (int)read(fd, bytes, count);
+#endif
+    return result >= 0 ? result : -errno;
+}
+
+int inkwell_fd_write(int fd, const void *bytes, size_t len) {
+    if (fd < 0 || (bytes == NULL && len != 0U)) {
+        return -EINVAL;
+    }
+    const unsigned count = (unsigned)(len > INT_MAX ? INT_MAX : len);
+#if defined(_WIN32)
+    const int result = _write(fd, bytes, count);
+#else
+    const int result = (int)write(fd, bytes, count);
+#endif
+    return result >= 0 ? result : -errno;
+}
+
+int inkwell_fd_close(int fd) {
+    if (fd < 0) {
+        return -EINVAL;
+    }
+#if defined(_WIN32)
+    return _close(fd) == 0 ? 0 : -errno;
+#else
+    return close(fd) == 0 ? 0 : -errno;
+#endif
+}
+
+int inkwell_fd_to_socket(int fd, inkwell_socket *out) {
+    if (fd < 0 || out == NULL) {
+        return -EINVAL;
+    }
+    *out = INKWELL_SOCKET_INVALID;
+#if defined(_WIN32)
+    return -ENOTSUP;
+#else
+    *out = (inkwell_socket)fd;
+    return 0;
+#endif
+}
 
 #if defined(_WIN32)
 static INIT_ONCE kWinsockOnce = INIT_ONCE_STATIC_INIT;

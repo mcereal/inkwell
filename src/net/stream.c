@@ -1,14 +1,9 @@
-#define _GNU_SOURCE
-#define _POSIX_C_SOURCE 200809L
-
 #include "inkwell/net/stream.h"
 
 #include "inkwell/base/log.h"
 
 #include <errno.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #define INKWELL_STREAM_READ_CHUNK 1024U
 /* Reads per loop turn. A peer that sends a burst - a database sync, a backlog after a
@@ -24,6 +19,8 @@ int inkwell_stream_init(struct inkwell_stream *stream, const char *tag,
     }
     memset(stream, 0, sizeof *stream);
     stream->fd = -1;
+    stream->socket = INKWELL_SOCKET_INVALID;
+    stream->registration_token = -1;
     stream->tag = tag != NULL ? tag : "stream";
     /* Either half missing means no queue at all, rather than a queue with a hole in it: a
        caller that only listens passes nothing, and one that passes half of it has a bug worth
@@ -48,7 +45,9 @@ void inkwell_stream_set_sink(struct inkwell_stream *stream, inkwell_stream_bytes
 }
 
 bool inkwell_stream_is_open(const struct inkwell_stream *stream) {
-    return stream != NULL && stream->fd >= 0;
+    return stream != NULL &&
+           (stream->kind == INKWELL_STREAM_SOCKET ? stream->socket != INKWELL_SOCKET_INVALID
+                                                  : stream->fd >= 0);
 }
 
 size_t inkwell_stream_bytes_received(const struct inkwell_stream *stream) {
@@ -64,11 +63,11 @@ size_t inkwell_stream_queued(const struct inkwell_stream *stream) {
  * applied on another. MSG_NOSIGNAL is a socket flag and a tty write takes none, which is the
  * whole of why the stream is told what it holds.
  */
-static ssize_t stream_write(const struct inkwell_stream *stream, const uint8_t *data, size_t len) {
+static int stream_write(const struct inkwell_stream *stream, const uint8_t *data, size_t len) {
     if (stream->kind == INKWELL_STREAM_SOCKET) {
-        return send(stream->fd, data, len, MSG_NOSIGNAL);
+        return inkwell_socket_send(stream->socket, data, len);
     }
-    return write(stream->fd, data, len);
+    return inkwell_fd_write(stream->fd, data, len);
 }
 
 /* ------------------------------------------------------------------ the queue */
@@ -92,7 +91,7 @@ static void stream_drop_queue(struct inkwell_stream *stream) {
 /* Keeps INKWELL_LOOP_OUT armed exactly while the queue has a remainder, so a descriptor that filled
    up wakes the loop instead of waiting out the poll timeout. */
 static void stream_update_write_interest(struct inkwell_stream *stream) {
-    if (!stream->fd_registered || stream->loop == NULL) {
+    if (stream->registration_token < 0 || stream->loop == NULL) {
         return;
     }
     const bool want = stream->queued > 0U;
@@ -100,7 +99,7 @@ static void stream_update_write_interest(struct inkwell_stream *stream) {
         return;
     }
     const uint32_t events = want ? (uint32_t)(INKWELL_LOOP_IN | INKWELL_LOOP_OUT) : INKWELL_LOOP_IN;
-    if (inkwell_loop_update_fd(stream->loop, stream->fd, events) == 0) {
+    if (inkwell_loop_update_fd(stream->loop, stream->registration_token, events) == 0) {
         stream->want_write = want;
     }
 }
@@ -109,24 +108,24 @@ int inkwell_stream_flush(struct inkwell_stream *stream) {
     if (stream == NULL) {
         return -EINVAL;
     }
-    if (stream->fd < 0) {
+    if (!inkwell_stream_is_open(stream)) {
         return -ENOTCONN;
     }
 
     while (stream->queued > 0U) {
         struct inkwell_stream_slot *slot = &stream->slots[stream->head];
-        const ssize_t written = stream_write(
-            stream, slot_bytes_at(stream, stream->head) + slot->sent, slot->length - slot->sent);
+        const int written = stream_write(stream, slot_bytes_at(stream, stream->head) + slot->sent,
+                                         slot->length - slot->sent);
         if (written < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (written == -EAGAIN || written == -EWOULDBLOCK) {
                 break; /* the far end is not draining; INKWELL_LOOP_OUT brings us back */
             }
-            if (errno == EINTR) {
+            if (written == -EINTR) {
                 continue;
             }
             /* EPIPE lands here rather than as a dead process, which is what MSG_NOSIGNAL above
                bought: the far end went away and the owner gets to say so in its own words. */
-            inkwell_log_warn(stream->tag, "write failed: %s", strerror(errno));
+            inkwell_log_warn(stream->tag, "write failed: %s", strerror(-written));
             return -EIO;
         }
 
@@ -147,7 +146,7 @@ int inkwell_stream_send(struct inkwell_stream *stream, const uint8_t *data, size
     if (stream == NULL || data == NULL) {
         return -EINVAL;
     }
-    if (stream->fd < 0) {
+    if (!inkwell_stream_is_open(stream)) {
         return -ENOTCONN;
     }
     if (stream->slot_count == 0U || stream->queued >= stream->slot_count) {
@@ -172,14 +171,10 @@ int inkwell_stream_write_raw(struct inkwell_stream *stream, const uint8_t *data,
     if (stream == NULL || data == NULL) {
         return -EINVAL;
     }
-    if (stream->fd < 0) {
+    if (!inkwell_stream_is_open(stream)) {
         return -ENOTCONN;
     }
-    const ssize_t written = stream_write(stream, data, len);
-    if (written < 0) {
-        return -errno;
-    }
-    return (int)written;
+    return stream_write(stream, data, len);
 }
 
 /* ------------------------------------------------------------------ read path */
@@ -188,14 +183,16 @@ int inkwell_stream_pump(struct inkwell_stream *stream) {
     if (stream == NULL) {
         return -EINVAL;
     }
-    if (stream->fd < 0) {
+    if (!inkwell_stream_is_open(stream)) {
         return -ENOTCONN;
     }
 
     size_t total = 0U;
     for (unsigned turn = 0U; turn < INKWELL_STREAM_READS_PER_TURN; ++turn) {
         uint8_t buffer[INKWELL_STREAM_READ_CHUNK];
-        const ssize_t got = read(stream->fd, buffer, sizeof buffer);
+        const int got = stream->kind == INKWELL_STREAM_SOCKET
+                            ? inkwell_socket_recv(stream->socket, buffer, sizeof buffer)
+                            : inkwell_fd_read(stream->fd, buffer, sizeof buffer);
         if (got > 0) {
             total += (size_t)got;
             stream->bytes_received += (size_t)got;
@@ -210,13 +207,13 @@ int inkwell_stream_pump(struct inkwell_stream *stream) {
                enum inkwell_stream_kind, which is where the reason lives. */
             return -ENOTCONN;
         }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (got == -EAGAIN || got == -EWOULDBLOCK) {
             break;
         }
-        if (errno == EINTR) {
+        if (got == -EINTR) {
             continue;
         }
-        inkwell_log_warn(stream->tag, "read failed: %s", strerror(errno));
+        inkwell_log_warn(stream->tag, "read failed: %s", strerror(-got));
         return -EIO;
     }
 
@@ -230,22 +227,60 @@ int inkwell_stream_open(struct inkwell_stream *stream, int fd, enum inkwell_stre
     if (stream == NULL || fd < 0) {
         return -EINVAL;
     }
-    if (stream->fd >= 0) {
+    if (kind == INKWELL_STREAM_SOCKET) {
+        inkwell_socket socket;
+        const int converted = inkwell_fd_to_socket(fd, &socket);
+        return converted < 0 ? converted
+                             : inkwell_stream_open_socket(stream, socket, loop, callback, userdata);
+    }
+    if (kind != INKWELL_STREAM_FILE) {
+        return -EINVAL;
+    }
+    if (inkwell_stream_is_open(stream)) {
         return -EBUSY;
     }
 
+    int token = -1;
     if (loop != NULL) {
         const int added = inkwell_loop_add_fd(loop, fd, INKWELL_LOOP_IN, callback, userdata);
         if (added < 0) {
             return added;
         }
-        stream->fd_registered = true;
-    } else {
-        stream->fd_registered = false;
+        token = fd;
     }
 
     stream->fd = fd;
     stream->kind = kind;
+    stream->registration_token = token;
+    stream->loop = loop;
+    stream->want_write = false;
+    stream->bytes_received = 0U;
+    stream->head = 0U;
+    stream->queued = 0U;
+    return 0;
+}
+
+int inkwell_stream_open_socket(struct inkwell_stream *stream, inkwell_socket socket,
+                               struct inkwell_loop *loop, inkwell_loop_callback callback,
+                               void *userdata) {
+    if (stream == NULL || socket == INKWELL_SOCKET_INVALID) {
+        return -EINVAL;
+    }
+    if (inkwell_stream_is_open(stream)) {
+        return -EBUSY;
+    }
+
+    int token = -1;
+    if (loop != NULL) {
+        token = inkwell_loop_watch_socket(loop, socket, INKWELL_LOOP_IN, callback, userdata);
+        if (token < 0) {
+            return token;
+        }
+    }
+
+    stream->socket = socket;
+    stream->kind = INKWELL_STREAM_SOCKET;
+    stream->registration_token = token;
     stream->loop = loop;
     stream->want_write = false;
     stream->bytes_received = 0U;
@@ -261,14 +296,19 @@ void inkwell_stream_close(struct inkwell_stream *stream) {
     /* The queue is reported even on an already-closed stream: a caller that queued and then
        failed to open still owes those writes a verdict. */
     stream_drop_queue(stream);
-    if (stream->fd < 0) {
+    if (!inkwell_stream_is_open(stream)) {
         return;
     }
-    if (stream->fd_registered && stream->loop != NULL) {
-        inkwell_loop_remove_fd(stream->loop, stream->fd);
+    if (stream->registration_token >= 0 && stream->loop != NULL) {
+        inkwell_loop_remove_fd(stream->loop, stream->registration_token);
     }
-    close(stream->fd);
+    if (stream->kind == INKWELL_STREAM_SOCKET) {
+        (void)inkwell_socket_close(stream->socket);
+    } else {
+        (void)inkwell_fd_close(stream->fd);
+    }
     stream->fd = -1;
-    stream->fd_registered = false;
+    stream->socket = INKWELL_SOCKET_INVALID;
+    stream->registration_token = -1;
     stream->want_write = false;
 }
