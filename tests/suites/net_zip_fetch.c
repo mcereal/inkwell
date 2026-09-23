@@ -385,8 +385,7 @@ INKWELL_TEST_CASE(zip_fetch_tells_a_missing_member_from_a_broken_one, unit) {
         failure = "it should have finished too";
         goto cleanup;
     }
-    if (probe.state != INKWELL_ZIP_FETCH_FAILED ||
-        probe.error != INKWELL_ZIP_FETCH_ERROR_INFLATE) {
+    if (probe.state != INKWELL_ZIP_FETCH_FAILED || probe.error != INKWELL_ZIP_FETCH_ERROR_INFLATE) {
         failure = "a member that did not survive the trip is refused by the inflate";
         goto cleanup;
     }

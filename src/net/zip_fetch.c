@@ -35,8 +35,8 @@ static void zip_step_inflate(struct inkwell_zip_fetch *zip);
 
 /* ---- staging ----------------------------------------------------------------------------- */
 
-static bool zip_path(const struct inkwell_zip_fetch *zip, const char *name,
-                          char *out, size_t out_len) {
+static bool zip_path(const struct inkwell_zip_fetch *zip, const char *name, char *out,
+                     size_t out_len) {
     const int written = snprintf(out, out_len, "%s/%s.%s", zip->staging, zip->stem, name);
     return written > 0 && (size_t)written < out_len;
 }
@@ -59,8 +59,7 @@ static void zip_clean(const struct inkwell_zip_fetch *zip) {
 
 /* Reads a staged file whole. The largest is the member, which the caller's limit bounds, and
    the inflate wants all of it in memory at once anyway. */
-static uint8_t *zip_read(const struct inkwell_zip_fetch *zip, const char *name,
-                              size_t *out_len) {
+static uint8_t *zip_read(const struct inkwell_zip_fetch *zip, const char *name, size_t *out_len) {
     *out_len = 0U;
     char path[INKWELL_FETCH_PATH_MAX];
     if (!zip_path(zip, name, path, sizeof path)) {
@@ -94,8 +93,7 @@ static uint8_t *zip_read(const struct inkwell_zip_fetch *zip, const char *name,
     return bytes;
 }
 
-static uint64_t zip_file_size(const struct inkwell_zip_fetch *zip,
-                                   const char *name) {
+static uint64_t zip_file_size(const struct inkwell_zip_fetch *zip, const char *name) {
     char path[INKWELL_FETCH_PATH_MAX];
     struct stat info;
     if (!zip_path(zip, name, path, sizeof path) || stat(path, &info) != 0) {
@@ -106,9 +104,8 @@ static uint64_t zip_file_size(const struct inkwell_zip_fetch *zip,
 
 /* ---- finishing --------------------------------------------------------------------------- */
 
-static void zip_finish(struct inkwell_zip_fetch *zip,
-                            enum inkwell_zip_fetch_state state,
-                            enum inkwell_zip_fetch_error error) {
+static void zip_finish(struct inkwell_zip_fetch *zip, enum inkwell_zip_fetch_state state,
+                       enum inkwell_zip_fetch_error error) {
     zip->state = state;
     zip->error = error;
     zip_clean(zip);
@@ -128,8 +125,7 @@ static void zip_finish(struct inkwell_zip_fetch *zip,
     }
 }
 
-static void zip_fail(struct inkwell_zip_fetch *zip,
-                          enum inkwell_zip_fetch_error error) {
+static void zip_fail(struct inkwell_zip_fetch *zip, enum inkwell_zip_fetch_error error) {
     zip_finish(zip, INKWELL_ZIP_FETCH_FAILED, error);
 }
 
@@ -144,8 +140,8 @@ static void zip_on_fetch(void *userdata, const struct inkwell_fetch_result *resu
  * suffix range (`bytes=-65536`) is answered `501 Unsupported client range` by at least one CDN
  * that serves large archives, which is the whole reason the HEAD step exists.
  */
-static bool zip_range(struct inkwell_zip_fetch *zip, const char *name,
-                           uint64_t first, uint64_t last, uint32_t timeout_ms) {
+static bool zip_range(struct inkwell_zip_fetch *zip, const char *name, uint64_t first,
+                      uint64_t last, uint32_t timeout_ms) {
     if (!zip_path(zip, name, zip->active_path, sizeof zip->active_path)) {
         return false;
     }
@@ -174,8 +170,8 @@ static void zip_step_window(struct inkwell_zip_fetch *zip) {
     zip->window_offset = zip->zip_size > want ? zip->zip_size - want : 0U;
     zip->window_len = (size_t)(zip->zip_size - zip->window_offset);
     zip->state = INKWELL_ZIP_FETCH_READING;
-    if (!zip_range(zip, ZIP_FILE_WINDOW, zip->window_offset,
-                        zip->zip_size - 1U, zip->step_timeout_ms)) {
+    if (!zip_range(zip, ZIP_FILE_WINDOW, zip->window_offset, zip->zip_size - 1U,
+                   zip->step_timeout_ms)) {
         zip_fail(zip, INKWELL_ZIP_FETCH_ERROR_STAGING);
     }
 }
@@ -184,8 +180,7 @@ static void zip_step_central(struct inkwell_zip_fetch *zip) {
     zip->state = INKWELL_ZIP_FETCH_READING;
     zip->directory_only = true;
     if (!zip_range(zip, ZIP_FILE_CENTRAL, zip->window_offset,
-                        zip->window_offset + (uint64_t)zip->window_len - 1U,
-                        zip->step_timeout_ms)) {
+                   zip->window_offset + (uint64_t)zip->window_len - 1U, zip->step_timeout_ms)) {
         zip_fail(zip, INKWELL_ZIP_FETCH_ERROR_STAGING);
     }
 }
@@ -193,8 +188,8 @@ static void zip_step_central(struct inkwell_zip_fetch *zip) {
 static void zip_step_header(struct inkwell_zip_fetch *zip) {
     zip->state = INKWELL_ZIP_FETCH_LOCATING;
     if (!zip_range(zip, ZIP_FILE_HEADER, zip->entry.local_header_offset,
-                        zip->entry.local_header_offset + INKWELL_ZIP_LOCAL_HEADER_SIZE - 1U,
-                        zip->step_timeout_ms)) {
+                   zip->entry.local_header_offset + INKWELL_ZIP_LOCAL_HEADER_SIZE - 1U,
+                   zip->step_timeout_ms)) {
         zip_fail(zip, INKWELL_ZIP_FETCH_ERROR_STAGING);
     }
 }
@@ -202,8 +197,7 @@ static void zip_step_header(struct inkwell_zip_fetch *zip) {
 static void zip_step_member(struct inkwell_zip_fetch *zip) {
     zip->state = INKWELL_ZIP_FETCH_FETCHING;
     if (!zip_range(zip, ZIP_FILE_MEMBER, zip->data_offset,
-                        zip->data_offset + zip->entry.compressed_size - 1U,
-                        zip->member_timeout_ms)) {
+                   zip->data_offset + zip->entry.compressed_size - 1U, zip->member_timeout_ms)) {
         zip_fail(zip, INKWELL_ZIP_FETCH_ERROR_STAGING);
     }
 }
@@ -211,8 +205,7 @@ static void zip_step_member(struct inkwell_zip_fetch *zip) {
 /* ---- reading what came back ---------------------------------------------------------------*/
 
 /* The tail window, or the directory fetched on its own. Both end here. */
-static void zip_read_directory(struct inkwell_zip_fetch *zip, const char *name,
-                                    bool second_pass) {
+static void zip_read_directory(struct inkwell_zip_fetch *zip, const char *name, bool second_pass) {
     size_t len = 0U;
     uint8_t *const window = zip_read(zip, name, &len);
     if (window == NULL) {
@@ -307,8 +300,7 @@ static void zip_read_directory(struct inkwell_zip_fetch *zip, const char *name,
     }
     zip->located = true;
     inkwell_log_info("zip_fetch", "%s is %u bytes in the zip, %u out", zip->entry.name,
-                     (unsigned)zip->entry.compressed_size,
-                     (unsigned)zip->entry.uncompressed_size);
+                     (unsigned)zip->entry.compressed_size, (unsigned)zip->entry.uncompressed_size);
     zip_step_header(zip);
 }
 
@@ -319,8 +311,7 @@ static void zip_read_header(struct inkwell_zip_fetch *zip) {
         zip_fail(zip, INKWELL_ZIP_FETCH_ERROR_STAGING);
         return;
     }
-    const bool placed =
-        inkwell_zip_local_data_start(header, len, &zip->entry, &zip->data_offset);
+    const bool placed = inkwell_zip_local_data_start(header, len, &zip->entry, &zip->data_offset);
     free(header);
     if (!placed) {
         zip_fail(zip, INKWELL_ZIP_FETCH_ERROR_NOT_A_ZIP);
@@ -354,9 +345,8 @@ static void zip_on_fetch(void *userdata, const struct inkwell_fetch_result *resu
         /* Which of the two reads this was is the file it landed in, and the second one
            only ever happens after the first has moved `window_offset` onto the record's
            own answer. */
-        zip_read_directory(
-            zip, zip->directory_only ? ZIP_FILE_CENTRAL : ZIP_FILE_WINDOW,
-            zip->directory_only);
+        zip_read_directory(zip, zip->directory_only ? ZIP_FILE_CENTRAL : ZIP_FILE_WINDOW,
+                           zip->directory_only);
         break;
     case INKWELL_ZIP_FETCH_LOCATING:
         zip_read_header(zip);
@@ -378,8 +368,8 @@ static void zip_step_inflate(struct inkwell_zip_fetch *zip) {
     zip->inflate_pending = true;
 }
 
-static bool zip_write_output(const struct inkwell_zip_fetch *zip,
-                                 const uint8_t *bytes, size_t len) {
+static bool zip_write_output(const struct inkwell_zip_fetch *zip, const uint8_t *bytes,
+                             size_t len) {
     char path[INKWELL_FETCH_PATH_MAX];
     if (!zip_path(zip, ZIP_FILE_IMAGE, path, sizeof path)) {
         return false;
@@ -565,8 +555,7 @@ bool inkwell_zip_fetch_busy(const struct inkwell_zip_fetch *zip) {
     if (zip == NULL) {
         return false;
     }
-    return zip->state != INKWELL_ZIP_FETCH_IDLE &&
-           zip->state != INKWELL_ZIP_FETCH_READY &&
+    return zip->state != INKWELL_ZIP_FETCH_IDLE && zip->state != INKWELL_ZIP_FETCH_READY &&
            zip->state != INKWELL_ZIP_FETCH_FAILED;
 }
 
@@ -580,12 +569,10 @@ unsigned inkwell_zip_fetch_progress(const struct inkwell_zip_fetch *zip) {
      * what it did on the device the first time this was watched, and which reads as a zip
      * starting over rather than as a step finishing.
      */
-    if (zip->state == INKWELL_ZIP_FETCH_READY ||
-        zip->state == INKWELL_ZIP_FETCH_INFLATING) {
+    if (zip->state == INKWELL_ZIP_FETCH_READY || zip->state == INKWELL_ZIP_FETCH_INFLATING) {
         return 100U;
     }
-    if (zip->state != INKWELL_ZIP_FETCH_FETCHING ||
-        zip->entry.compressed_size == 0U) {
+    if (zip->state != INKWELL_ZIP_FETCH_FETCHING || zip->entry.compressed_size == 0U) {
         return 0U;
     }
     const uint64_t landed = zip_file_size(zip, ZIP_FILE_MEMBER);
@@ -595,10 +582,9 @@ unsigned inkwell_zip_fetch_progress(const struct inkwell_zip_fetch *zip) {
     return (unsigned)((landed * 100U) / (uint64_t)zip->entry.compressed_size);
 }
 
-const char *inkwell_zip_fetch_output_path(const struct inkwell_zip_fetch *zip,
-                                              char *out, size_t out_len) {
-    if (zip == NULL || out == NULL || out_len == 0U ||
-        zip->state != INKWELL_ZIP_FETCH_READY) {
+const char *inkwell_zip_fetch_output_path(const struct inkwell_zip_fetch *zip, char *out,
+                                          size_t out_len) {
+    if (zip == NULL || out == NULL || out_len == 0U || zip->state != INKWELL_ZIP_FETCH_READY) {
         return NULL;
     }
     return zip_path(zip, ZIP_FILE_IMAGE, out, out_len) ? out : NULL;
