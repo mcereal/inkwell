@@ -49,26 +49,57 @@ _Static_assert(INKWELL_LOOP_HUP == EPOLLHUP, "INKWELL_LOOP_HUP is EPOLLHUP");
 
 #if defined(_WIN32)
 
+#define WINDOWS_SOCKET_TOKEN_BASE 0x50000000
+
+static long socket_events(uint32_t events) {
+    long wanted = FD_CLOSE;
+    if ((events & INKWELL_LOOP_IN) != 0U) {
+        wanted |= FD_READ;
+    }
+    if ((events & INKWELL_LOOP_OUT) != 0U) {
+        wanted |= FD_WRITE | FD_CONNECT;
+    }
+    return wanted;
+}
+
 static int backend_open(void) {
     return 0;
 }
 
 static int backend_add(struct inkwell_loop *loop, struct inkwell_loop_source *source) {
     (void)loop;
+    if (source->is_socket) {
+        return WSAEventSelect((SOCKET)source->socket, (WSAEVENT)source->socket_event,
+                              socket_events(source->events)) == SOCKET_ERROR
+                   ? -EIO
+                   : 0;
+    }
     return inkwell_windows_handle_get(source->fd) == NULL ? -EBADF : 0;
 }
 
 static int backend_update(struct inkwell_loop *loop, struct inkwell_loop_source *source,
                           uint32_t was) {
     (void)loop;
-    (void)source;
-    (void)was;
+    if (source->is_socket) {
+        if (WSAEventSelect((SOCKET)source->socket, (WSAEVENT)source->socket_event,
+                           socket_events(source->events)) == SOCKET_ERROR) {
+            (void)WSAEventSelect((SOCKET)source->socket, (WSAEVENT)source->socket_event,
+                                 socket_events(was));
+            return -EIO;
+        }
+    }
     return 0;
 }
 
 static int backend_remove(struct inkwell_loop *loop, struct inkwell_loop_source *source) {
     (void)loop;
-    (void)source;
+    if (source->is_socket) {
+        (void)WSAEventSelect((SOCKET)source->socket, NULL, 0);
+        (void)WSACloseEvent((WSAEVENT)source->socket_event);
+        source->socket_event = NULL;
+        source->socket = 0U;
+        source->is_socket = false;
+    }
     return 0;
 }
 
@@ -342,6 +373,50 @@ int inkwell_loop_add_fd(struct inkwell_loop *loop, int fd, uint32_t events,
     return 0;
 }
 
+#if defined(_WIN32)
+int inkwell_loop_add_socket(struct inkwell_loop *loop, uintptr_t socket, uint32_t events,
+                            inkwell_loop_callback callback, void *userdata) {
+    if (loop == NULL || socket == (uintptr_t)INVALID_SOCKET || callback == NULL) {
+        return -EINVAL;
+    }
+    int slot = -1;
+    for (int i = 0; i < INKWELL_LOOP_MAX_SOURCES; ++i) {
+        if (loop->sources[i].active && loop->sources[i].is_socket &&
+            loop->sources[i].socket == socket) {
+            return -EEXIST;
+        }
+        if (!loop->sources[i].active && slot < 0) {
+            slot = i;
+        }
+    }
+    if (slot < 0) {
+        return -ENOSPC;
+    }
+    const WSAEVENT event = WSACreateEvent();
+    if (event == WSA_INVALID_EVENT) {
+        return -EIO;
+    }
+    struct inkwell_loop_source *source = &loop->sources[slot];
+    source->fd = WINDOWS_SOCKET_TOKEN_BASE + slot;
+    source->events = events;
+    source->callback = callback;
+    source->userdata = userdata;
+    source->socket = socket;
+    source->socket_event = (void *)event;
+    source->is_socket = true;
+    source->active = true;
+    const int added = backend_add(loop, source);
+    if (added < 0) {
+        source->active = false;
+        source->is_socket = false;
+        source->socket_event = NULL;
+        (void)WSACloseEvent(event);
+        return added;
+    }
+    return source->fd;
+}
+#endif
+
 int inkwell_loop_update_fd(struct inkwell_loop *loop, int fd, uint32_t events) {
     if (loop == NULL) {
         return -EINVAL;
@@ -358,6 +433,7 @@ int inkwell_loop_update_fd(struct inkwell_loop *loop, int fd, uint32_t events) {
 
     const int updated = backend_update(loop, source, was);
     if (updated < 0) {
+        source->events = was;
         inkwell_log_error("loop", "changing fd %d failed: %s", fd, strerror(-updated));
         return updated;
     }
@@ -386,6 +462,11 @@ int inkwell_loop_remove_fd(struct inkwell_loop *loop, int fd) {
     loop->sources[index].callback = NULL;
     loop->sources[index].userdata = NULL;
     loop->sources[index].events = 0;
+#if defined(_WIN32)
+    loop->sources[index].socket = 0U;
+    loop->sources[index].socket_event = NULL;
+    loop->sources[index].is_socket = false;
+#endif
 
     return 0;
 }
@@ -395,6 +476,38 @@ int inkwell_loop_remove_fd(struct inkwell_loop *loop, int fd) {
  * timeout - or a negative errno, -EINTR included, which the caller retries.
  */
 #if defined(_WIN32)
+static uint32_t socket_ready(struct inkwell_loop_source *source) {
+    WSANETWORKEVENTS reported;
+    if (WSAEnumNetworkEvents((SOCKET)source->socket, (WSAEVENT)source->socket_event, &reported) ==
+        SOCKET_ERROR) {
+        return INKWELL_LOOP_ERR;
+    }
+    uint32_t mask = 0U;
+    if ((reported.lNetworkEvents & FD_READ) != 0) {
+        mask |= INKWELL_LOOP_IN;
+    }
+    if ((reported.lNetworkEvents & (FD_WRITE | FD_CONNECT)) != 0) {
+        mask |= INKWELL_LOOP_OUT;
+    }
+    if ((reported.lNetworkEvents & FD_CLOSE) != 0) {
+        mask |= INKWELL_LOOP_IN | INKWELL_LOOP_HUP;
+    }
+    const struct {
+        long event;
+        int bit;
+    } errors[] = {{FD_READ, FD_READ_BIT},
+                  {FD_WRITE, FD_WRITE_BIT},
+                  {FD_CONNECT, FD_CONNECT_BIT},
+                  {FD_CLOSE, FD_CLOSE_BIT}};
+    for (size_t i = 0U; i < sizeof errors / sizeof errors[0]; ++i) {
+        if ((reported.lNetworkEvents & errors[i].event) != 0 &&
+            reported.iErrorCode[errors[i].bit] != 0) {
+            mask |= INKWELL_LOOP_ERR;
+        }
+    }
+    return mask;
+}
+
 static int backend_dispatch(struct inkwell_loop *loop, int wait_ms) {
     HANDLE handles[INKWELL_LOOP_MAX_SOURCES];
     struct inkwell_loop_source *sources[INKWELL_LOOP_MAX_SOURCES];
@@ -403,7 +516,9 @@ static int backend_dispatch(struct inkwell_loop *loop, int wait_ms) {
         if (!loop->sources[i].active) {
             continue;
         }
-        HANDLE handle = inkwell_windows_handle_get(loop->sources[i].fd);
+        HANDLE handle = loop->sources[i].is_socket
+                            ? (HANDLE)loop->sources[i].socket_event
+                            : inkwell_windows_handle_get(loop->sources[i].fd);
         if (handle == NULL) {
             return -EBADF;
         }
@@ -432,12 +547,19 @@ static int backend_dispatch(struct inkwell_loop *loop, int wait_ms) {
     const DWORD first_index = first - WAIT_OBJECT_0;
     for (DWORD pass = 0; pass < count; ++pass) {
         const DWORD index = pass == 0U ? first_index : pass - (pass <= first_index ? 1U : 0U);
-        if (pass > 0U && WaitForSingleObject(handles[index], 0) != WAIT_OBJECT_0) {
+        struct inkwell_loop_source *source = sources[index];
+        if (!source->active) {
             continue;
         }
-        struct inkwell_loop_source *source = sources[index];
-        if (source->active && inkwell_windows_handle_get(source->fd) == handles[index]) {
-            source->callback(source->fd, source->events, source->userdata);
+        HANDLE current = source->is_socket ? (HANDLE)source->socket_event
+                                           : inkwell_windows_handle_get(source->fd);
+        if (current != handles[index] ||
+            (pass > 0U && WaitForSingleObject(handles[index], 0) != WAIT_OBJECT_0)) {
+            continue;
+        }
+        const uint32_t events = source->is_socket ? socket_ready(source) : source->events;
+        if (events != 0U) {
+            source->callback(source->fd, events, source->userdata);
             ++ready;
         }
     }

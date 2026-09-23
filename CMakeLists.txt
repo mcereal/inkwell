@@ -130,6 +130,9 @@ target_include_directories(inkwell PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(inkwell PRIVATE inkwell_options)
+if(WIN32)
+    target_link_libraries(inkwell PUBLIC ws2_32)
+endif()
 add_library(inkwell::inkwell ALIAS inkwell)
 
 # _POSIX_C_SOURCE for signalfd, timerfd, eventfd, clock_gettime and the rest of the loop's

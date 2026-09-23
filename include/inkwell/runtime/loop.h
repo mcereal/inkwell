@@ -15,8 +15,8 @@ extern "C" {
  * The values are epoll's, bit for bit, and loop.c asserts it on Linux: so there the mask goes
  * straight into epoll_ctl() and straight back out of epoll_wait() with nothing translated, and a
  * caller that still says EPOLLIN means the same thing. The kqueue backend on macOS maps these
- * onto read and write filters. Windows waitable handles currently report the mask they registered;
- * Winsock events join this abstraction in the networking slice.
+ * onto read and write filters. Windows waitable handles report the mask they registered, while
+ * Winsock notifications are translated to these bits when the event is dispatched.
  *
  * ERR and HUP are reported whether or not they were asked for, as epoll reports them. Asking for
  * them is harmless and says what the callback is prepared to hear.
@@ -36,6 +36,11 @@ struct inkwell_loop_source {
     inkwell_loop_callback callback;
     void *userdata;
     bool active;
+#if defined(_WIN32)
+    uintptr_t socket;
+    void *socket_event;
+    bool is_socket;
+#endif
 };
 
 struct inkwell_loop {
@@ -53,6 +58,14 @@ int inkwell_loop_add_fd(struct inkwell_loop *loop, int fd, uint32_t events,
                         inkwell_loop_callback callback, void *userdata);
 int inkwell_loop_update_fd(struct inkwell_loop *loop, int fd, uint32_t events);
 int inkwell_loop_remove_fd(struct inkwell_loop *loop, int fd);
+
+#if defined(_WIN32)
+/* Register a native Winsock SOCKET without narrowing its pointer-sized value to int. The
+ * returned nonnegative token is passed to the callback and to update/remove_fd; the caller
+ * retains ownership of the socket. WSAEventSelect makes the socket nonblocking. */
+int inkwell_loop_add_socket(struct inkwell_loop *loop, uintptr_t socket, uint32_t events,
+                            inkwell_loop_callback callback, void *userdata);
+#endif
 
 int inkwell_loop_run(struct inkwell_loop *loop, int timeout_ms);
 void inkwell_loop_request_stop(struct inkwell_loop *loop);
