@@ -231,7 +231,7 @@ void inkwell_ble_read_cancel(struct inkwell_ble_central *central) {
         if (central->loop != NULL) {
             inkwell_loop_remove_fd(central->loop, central->read_timer_fd);
         }
-        close(central->read_timer_fd);
+        inkwell_timer_close(central->read_timer_fd);
     }
     central->read_timer_fd = -1;
     central->read_state = 0;
@@ -289,7 +289,7 @@ static void pending_cancel(struct inkwell_ble_pending *request) {
         if (request->central != NULL && request->central->loop != NULL) {
             inkwell_loop_remove_fd(request->central->loop, request->timer_fd);
         }
-        close(request->timer_fd);
+        inkwell_timer_close(request->timer_fd);
     }
     request->state = 0;
     request->token = 0U;

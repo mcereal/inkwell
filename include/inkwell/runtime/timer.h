@@ -12,8 +12,8 @@ extern "C" {
  * On Linux this is a timerfd on CLOCK_MONOTONIC and every call is the one it replaces. On macOS -
  * a development host, not a device - it is a kqueue holding one EVFILT_TIMER: a kqueue is itself
  * a descriptor that polls readable while it has an event pending, so the loop's kqueue can wait
- * on it exactly as epoll waits on a timerfd. Close it with close(); on both systems it is an
- * ordinary descriptor.
+ * on it exactly as epoll waits on a timerfd. Windows registers a waitable timer under an integer
+ * source key so callers retain the same platform-neutral interface.
  *
  * Two shapes rather than timerfd's full itimerspec, because they are the two anything here has
  * ever asked for: once after a delay, and every period with the first expiry one period out. A
@@ -30,6 +30,9 @@ extern "C" {
 
 /* A disarmed timer: its descriptor, or a negative errno. */
 int inkwell_timer_open(void);
+/* Releases the timer on every platform. Use this rather than close(), which cannot release the
+   small amount of Windows-side bookkeeping associated with a waitable timer. */
+void inkwell_timer_close(int fd);
 
 /* Expire once, `after_ms` from now. 0 is the same as disarming. 0 or a negative errno. */
 int inkwell_timer_arm_once(int fd, uint32_t after_ms);

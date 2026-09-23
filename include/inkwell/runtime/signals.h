@@ -8,9 +8,9 @@ extern "C" {
 
 struct inkwell_loop;
 
-/* SIGINT/SIGTERM/SIGHUP delivered through a descriptor on the event loop - a signalfd on Linux,
-   a kqueue on macOS - so a shutdown runs the normal path - whatever an application flushes on
-   the way out - instead of the default kill action. Nothing here runs in signal context. */
+/* Shutdown delivered through a source on the event loop - a signalfd on Linux, a kqueue on macOS,
+   and a console control event on Windows - so it runs the normal path instead of the default kill
+   action. Nothing here runs in POSIX signal or Windows console-handler context. */
 struct inkwell_signals {
     struct inkwell_loop *loop;
     int fd;

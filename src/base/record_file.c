@@ -1,12 +1,11 @@
 #define _POSIX_C_SOURCE 200809L
 #include "inkwell/base/record_file.h"
+#include "platform.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 int inkwell_record_read(FILE *file, char *line, size_t capacity, inkwell_record_visit_fn visit,
                         void *context) {
@@ -76,36 +75,6 @@ void inkwell_record_unescape(char *value) {
     *write_ptr = '\0';
 }
 
-/* The name is durable only after the directory entry is synced too. */
-static int sync_parent_directory(const char *path) {
-    char *parent = strdup(path);
-    if (parent == NULL) {
-        return -ENOMEM;
-    }
-    char *slash = strrchr(parent, '/');
-    const char *directory = ".";
-    if (slash != NULL) {
-        if (slash == parent) {
-            slash[1] = '\0';
-        } else {
-            *slash = '\0';
-        }
-        directory = parent;
-    }
-    const int fd = open(directory, O_RDONLY);
-    int result = fd < 0 ? -errno : 0;
-    if (fd >= 0) {
-        if (fsync(fd) != 0) {
-            result = -errno;
-        }
-        if (close(fd) != 0 && result == 0) {
-            result = -errno;
-        }
-    }
-    free(parent);
-    return result;
-}
-
 int inkwell_record_replace(const char *path, char *temp, size_t temp_capacity,
                            inkwell_record_write_fn write_records, void *context, bool sync_data) {
     if (path == NULL || path[0] == '\0' || temp == NULL || temp_capacity == 0U ||
@@ -125,20 +94,21 @@ int inkwell_record_replace(const char *path, char *temp, size_t temp_capacity,
     if (result == 0 && sync_data && fflush(file) != 0) {
         result = -errno;
     }
-    if (result == 0 && sync_data && fsync(fileno(file)) != 0) {
+    if (result == 0 && sync_data &&
+        inkwell_platform_file_sync(inkwell_platform_file_stream_fd(file)) != 0) {
         result = -errno;
     }
     if (fclose(file) != 0 && result == 0) {
         result = -errno;
     }
-    if (result == 0 && rename(temp, path) != 0) {
+    if (result == 0 && inkwell_platform_file_replace(temp, path, sync_data) != 0) {
         result = -errno;
     }
     if (result != 0) {
-        (void)unlink(temp);
+        (void)remove(temp);
         return result;
     }
-    return sync_data ? sync_parent_directory(path) : 0;
+    return sync_data ? inkwell_platform_parent_sync(path) : 0;
 }
 
 int inkwell_record_append(const char *path, inkwell_record_write_fn write_records, void *context) {

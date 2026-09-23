@@ -2,13 +2,20 @@
 
 #include "inkwell/base/log.h"
 #include "inkwell/base/time.h"
+#if defined(_WIN32)
+#include "windows_handle.h"
+#endif
 
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 /*
  * Two backends behind one table of sources.
@@ -25,7 +32,8 @@
  * as it is under epoll. And end-of-file is a flag on a filter rather than an event of its own, so
  * it is mapped onto what epoll would have said; see kqueue_mask().
  */
-#if defined(__linux__)
+#if defined(_WIN32)
+#elif defined(__linux__)
 #include <sys/epoll.h>
 
 _Static_assert(INKWELL_LOOP_IN == EPOLLIN, "INKWELL_LOOP_IN is EPOLLIN");
@@ -39,7 +47,32 @@ _Static_assert(INKWELL_LOOP_HUP == EPOLLHUP, "INKWELL_LOOP_HUP is EPOLLHUP");
 
 /* ---- the backend ----------------------------------------------------------------------------- */
 
-#if defined(__linux__)
+#if defined(_WIN32)
+
+static int backend_open(void) {
+    return 0;
+}
+
+static int backend_add(struct inkwell_loop *loop, struct inkwell_loop_source *source) {
+    (void)loop;
+    return inkwell_windows_handle_get(source->fd) == NULL ? -EBADF : 0;
+}
+
+static int backend_update(struct inkwell_loop *loop, struct inkwell_loop_source *source,
+                          uint32_t was) {
+    (void)loop;
+    (void)source;
+    (void)was;
+    return 0;
+}
+
+static int backend_remove(struct inkwell_loop *loop, struct inkwell_loop_source *source) {
+    (void)loop;
+    (void)source;
+    return 0;
+}
+
+#elif defined(__linux__)
 
 static int backend_open(void) {
     const int fd = epoll_create1(EPOLL_CLOEXEC);
@@ -222,7 +255,9 @@ int inkwell_loop_init(struct inkwell_loop *loop) {
     const int woken = inkwell_wake_open(&loop->wake);
     if (woken < 0) {
         inkwell_log_error("loop", "creating the wake failed: %s", strerror(-woken));
+#if !defined(_WIN32)
         close(loop->poll_fd);
+#endif
         loop->poll_fd = -1;
         return woken;
     }
@@ -231,7 +266,9 @@ int inkwell_loop_init(struct inkwell_loop *loop) {
     if (result < 0) {
         inkwell_log_error("loop", "Failed to register wake FD: %d", result);
         inkwell_wake_close(&loop->wake);
+#if !defined(_WIN32)
         close(loop->poll_fd);
+#endif
         loop->poll_fd = -1;
         return result;
     }
@@ -256,7 +293,9 @@ void inkwell_loop_shutdown(struct inkwell_loop *loop) {
     inkwell_wake_close(&loop->wake);
 
     if (loop->poll_fd >= 0) {
+#if !defined(_WIN32)
         close(loop->poll_fd);
+#endif
         loop->poll_fd = -1;
     }
 
@@ -355,7 +394,56 @@ int inkwell_loop_remove_fd(struct inkwell_loop *loop, int fd) {
  * One wait and everything it returned, dispatched. Returns how many sources were ready - 0 on a
  * timeout - or a negative errno, -EINTR included, which the caller retries.
  */
-#if defined(__linux__)
+#if defined(_WIN32)
+static int backend_dispatch(struct inkwell_loop *loop, int wait_ms) {
+    HANDLE handles[INKWELL_LOOP_MAX_SOURCES];
+    struct inkwell_loop_source *sources[INKWELL_LOOP_MAX_SOURCES];
+    DWORD count = 0;
+    for (int i = 0; i < INKWELL_LOOP_MAX_SOURCES; ++i) {
+        if (!loop->sources[i].active) {
+            continue;
+        }
+        HANDLE handle = inkwell_windows_handle_get(loop->sources[i].fd);
+        if (handle == NULL) {
+            return -EBADF;
+        }
+        handles[count] = handle;
+        sources[count] = &loop->sources[i];
+        ++count;
+    }
+    if (count == 0U) {
+        if (wait_ms < 0) {
+            return -EINVAL;
+        }
+        Sleep((DWORD)wait_ms);
+        return 0;
+    }
+
+    const DWORD timeout = wait_ms < 0 ? INFINITE : (DWORD)wait_ms;
+    const DWORD first = WaitForMultipleObjects(count, handles, FALSE, timeout);
+    if (first == WAIT_TIMEOUT) {
+        return 0;
+    }
+    if (first >= WAIT_OBJECT_0 + count) {
+        return -EIO;
+    }
+
+    int ready = 0;
+    const DWORD first_index = first - WAIT_OBJECT_0;
+    for (DWORD pass = 0; pass < count; ++pass) {
+        const DWORD index = pass == 0U ? first_index : pass - (pass <= first_index ? 1U : 0U);
+        if (pass > 0U && WaitForSingleObject(handles[index], 0) != WAIT_OBJECT_0) {
+            continue;
+        }
+        struct inkwell_loop_source *source = sources[index];
+        if (source->active && inkwell_windows_handle_get(source->fd) == handles[index]) {
+            source->callback(source->fd, source->events, source->userdata);
+            ++ready;
+        }
+    }
+    return ready;
+}
+#elif defined(__linux__)
 static int backend_dispatch(struct inkwell_loop *loop, int wait_ms) {
     struct epoll_event events[8];
     const int ready =

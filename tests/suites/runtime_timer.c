@@ -28,7 +28,7 @@ INKWELL_TEST_CASE(timer_unarmed_reads_nothing, unit) {
     const int fd = inkwell_timer_open();
     INKWELL_TEST_FAIL_IF(fd < 0, "inkwell_timer_open failed");
     const int64_t read = inkwell_timer_read(fd);
-    close(fd);
+    inkwell_timer_close(fd);
     INKWELL_TEST_FAIL_IF(read != 0, "a timer never armed reported an expiry");
     record_success(test_name);
 }
@@ -41,7 +41,7 @@ INKWELL_TEST_CASE(timer_once_expires_once, unit) {
     const int64_t first = inkwell_timer_read(fd);
     sleep_ms(10);
     const int64_t second = inkwell_timer_read(fd);
-    close(fd);
+    inkwell_timer_close(fd);
     INKWELL_TEST_FAIL_IF(armed < 0, "arming failed");
     INKWELL_TEST_FAIL_IF(first != 1, "a one-shot did not expire exactly once");
     INKWELL_TEST_FAIL_IF(second != 0, "a one-shot expired again");
@@ -56,7 +56,7 @@ INKWELL_TEST_CASE(timer_every_keeps_expiring, unit) {
     const int64_t collected = inkwell_timer_read(fd);
     sleep_ms(30);
     const int64_t later = inkwell_timer_read(fd);
-    close(fd);
+    inkwell_timer_close(fd);
     INKWELL_TEST_FAIL_IF(armed < 0, "arming failed");
     /* A count, as a timerfd read is: several periods passed, and they are one read. */
     INKWELL_TEST_FAIL_IF(collected < 2, "a periodic timer did not count its expiries");
@@ -76,7 +76,7 @@ INKWELL_TEST_CASE(timer_rearm_discards_a_pending_expiry, unit) {
     sleep_ms(20);
     const int rearmed = inkwell_timer_arm_once(fd, 10000U);
     const int64_t read = inkwell_timer_read(fd);
-    close(fd);
+    inkwell_timer_close(fd);
     INKWELL_TEST_FAIL_IF(armed < 0 || rearmed < 0, "arming failed");
     INKWELL_TEST_FAIL_IF(read != 0, "an expiry from before the re-arm survived it");
     record_success(test_name);
@@ -89,7 +89,7 @@ INKWELL_TEST_CASE(timer_disarm_stops_it, unit) {
     const int disarmed = inkwell_timer_disarm(fd);
     sleep_ms(20);
     const int64_t read = inkwell_timer_read(fd);
-    close(fd);
+    inkwell_timer_close(fd);
     INKWELL_TEST_FAIL_IF(armed < 0 || disarmed < 0, "arming or disarming failed");
     INKWELL_TEST_FAIL_IF(read != 0, "a disarmed timer expired");
     record_success(test_name);
@@ -119,7 +119,7 @@ INKWELL_TEST_CASE(timer_wakes_the_loop, unit) {
     }
     if (fd >= 0) {
         inkwell_loop_remove_fd(&loop, fd);
-        close(fd);
+        inkwell_timer_close(fd);
     }
     inkwell_loop_shutdown(&loop);
     INKWELL_TEST_FAIL_IF(!armed, "could not arm the timer on the loop");

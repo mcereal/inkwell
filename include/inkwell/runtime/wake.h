@@ -11,8 +11,9 @@ extern "C" {
  *
  * It is how a part of the program that is not a descriptor - a store that changed, a drain that
  * wants another turn, a request to stop - gets the loop's attention the same way a socket does.
- * On Linux that is one eventfd, and `fd` and `write_fd` are the same number. Elsewhere it is a
- * pipe, because nothing else is both pollable and portable, and the two ends differ.
+ * On Linux that is one eventfd, and `fd` and `write_fd` are the same number. On macOS it is a
+ * pipe and the two ends differ. On Windows it is a manual-reset event registered under an
+ * integer source key.
  *
  * `fd` is the one to hand to inkwell_loop_add_fd(). Close it with inkwell_wake_close() rather
  * than close(), which would leak the other end of a pipe.
