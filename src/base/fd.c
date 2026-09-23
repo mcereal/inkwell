@@ -4,11 +4,89 @@
 #include "inkwell/base/fd.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stddef.h>
-#if !defined(_WIN32)
+#if defined(_WIN32)
+/* Winsock must precede windows.h to avoid pulling in the older winsock.h. */
+// clang-format off
+#include <winsock2.h>
+#include <windows.h>
+// clang-format on
+#else
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
+
+#if defined(_WIN32)
+static INIT_ONCE kWinsockOnce = INIT_ONCE_STATIC_INIT;
+static int s_winsock_error = EIO;
+
+static int socket_error(int error) {
+    switch (error) {
+    case 0:
+        return 0;
+    case WSAEWOULDBLOCK:
+        return EAGAIN;
+    case WSAEINPROGRESS:
+        return EINPROGRESS;
+    case WSAEALREADY:
+        return EALREADY;
+    case WSAECONNREFUSED:
+        return ECONNREFUSED;
+    case WSAETIMEDOUT:
+        return ETIMEDOUT;
+    case WSAEHOSTUNREACH:
+        return EHOSTUNREACH;
+    case WSAENETUNREACH:
+        return ENETUNREACH;
+    case WSAECONNRESET:
+        return ECONNRESET;
+    case WSAECONNABORTED:
+        return ECONNABORTED;
+    case WSAENOTCONN:
+        return ENOTCONN;
+    case WSAEADDRINUSE:
+        return EADDRINUSE;
+    case WSAEADDRNOTAVAIL:
+        return EADDRNOTAVAIL;
+    case WSAEACCES:
+        return EACCES;
+    case WSAEINVAL:
+        return EINVAL;
+    case WSAENOBUFS:
+        return ENOBUFS;
+    case WSAEAFNOSUPPORT:
+        return EAFNOSUPPORT;
+    case WSAENOTSOCK:
+        return ENOTSOCK;
+    case WSAEMSGSIZE:
+        return EMSGSIZE;
+    case WSAESHUTDOWN:
+        return EPIPE;
+    default:
+        return EIO;
+    }
+}
+
+static BOOL CALLBACK start_winsock(PINIT_ONCE once, PVOID parameter, PVOID *context) {
+    (void)once;
+    (void)parameter;
+    (void)context;
+    WSADATA data;
+    const int result = WSAStartup(MAKEWORD(2, 2), &data);
+    if (result != 0) {
+        s_winsock_error = socket_error(result);
+        return TRUE;
+    }
+    if (LOBYTE(data.wVersion) != 2 || HIBYTE(data.wVersion) != 2) {
+        (void)WSACleanup();
+        s_winsock_error = ENOSYS;
+        return TRUE;
+    }
+    s_winsock_error = 0;
+    return TRUE;
+}
 #endif
 
 int inkwell_fd_set_nonblocking_cloexec(int fd) {
@@ -88,5 +166,116 @@ int inkwell_fd_socket(int domain, int type, int protocol) {
         return result;
     }
     return fd;
+#endif
+}
+
+int inkwell_socket_open(int domain, int type, int protocol, inkwell_socket *out) {
+    if (out == NULL) {
+        return -EINVAL;
+    }
+    *out = INKWELL_SOCKET_INVALID;
+#if defined(_WIN32)
+    if (!InitOnceExecuteOnce(&kWinsockOnce, start_winsock, NULL, NULL)) {
+        return -EIO;
+    }
+    if (s_winsock_error != 0) {
+        return -s_winsock_error;
+    }
+    SOCKET socket = WSASocketW(domain, type, protocol, NULL, 0,
+                               WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+    if (socket == INVALID_SOCKET) {
+        return -socket_error(WSAGetLastError());
+    }
+    u_long nonblocking = 1;
+    if (ioctlsocket(socket, FIONBIO, &nonblocking) != 0) {
+        const int error = socket_error(WSAGetLastError());
+        (void)closesocket(socket);
+        return -error;
+    }
+    *out = (inkwell_socket)socket;
+    return 0;
+#else
+    const int fd = inkwell_fd_socket(domain, type, protocol);
+    if (fd < 0) {
+        return fd;
+    }
+    *out = (inkwell_socket)fd;
+    return 0;
+#endif
+}
+
+int inkwell_socket_close(inkwell_socket socket) {
+    if (socket == INKWELL_SOCKET_INVALID) {
+        return -EINVAL;
+    }
+#if defined(_WIN32)
+    return closesocket((SOCKET)socket) == 0 ? 0 : -socket_error(WSAGetLastError());
+#else
+    return close((int)socket) == 0 ? 0 : -errno;
+#endif
+}
+
+int inkwell_socket_connect(inkwell_socket socket, const void *address, size_t address_len) {
+    if (socket == INKWELL_SOCKET_INVALID || address == NULL || address_len > INT_MAX) {
+        return -EINVAL;
+    }
+#if defined(_WIN32)
+    if (connect((SOCKET)socket, (const struct sockaddr *)address, (int)address_len) == 0) {
+        return 0;
+    }
+    const int error = WSAGetLastError();
+    return error == WSAEWOULDBLOCK ? -EINPROGRESS : -socket_error(error);
+#else
+    return connect((int)socket, (const struct sockaddr *)address, (socklen_t)address_len) == 0
+               ? 0
+               : -errno;
+#endif
+}
+
+int inkwell_socket_send(inkwell_socket socket, const void *bytes, size_t len) {
+    if (socket == INKWELL_SOCKET_INVALID || (bytes == NULL && len != 0)) {
+        return -EINVAL;
+    }
+    const int count = (int)(len > INT_MAX ? INT_MAX : len);
+#if defined(_WIN32)
+    const int sent = send((SOCKET)socket, (const char *)bytes, count, 0);
+    return sent >= 0 ? sent : -socket_error(WSAGetLastError());
+#else
+    const int sent = (int)send((int)socket, bytes, (size_t)count, MSG_NOSIGNAL);
+    return sent >= 0 ? sent : -errno;
+#endif
+}
+
+int inkwell_socket_recv(inkwell_socket socket, void *bytes, size_t len) {
+    if (socket == INKWELL_SOCKET_INVALID || (bytes == NULL && len != 0)) {
+        return -EINVAL;
+    }
+    const int count = (int)(len > INT_MAX ? INT_MAX : len);
+#if defined(_WIN32)
+    const int received = recv((SOCKET)socket, (char *)bytes, count, 0);
+    return received >= 0 ? received : -socket_error(WSAGetLastError());
+#else
+    const int received = (int)recv((int)socket, bytes, (size_t)count, 0);
+    return received >= 0 ? received : -errno;
+#endif
+}
+
+int inkwell_socket_pending_error(inkwell_socket socket) {
+    if (socket == INKWELL_SOCKET_INVALID) {
+        return -EINVAL;
+    }
+    int error = 0;
+#if defined(_WIN32)
+    int len = sizeof error;
+    if (getsockopt((SOCKET)socket, SOL_SOCKET, SO_ERROR, (char *)&error, &len) != 0) {
+        return -socket_error(WSAGetLastError());
+    }
+    return -socket_error(error);
+#else
+    socklen_t len = sizeof error;
+    if (getsockopt((int)socket, SOL_SOCKET, SO_ERROR, &error, &len) != 0) {
+        return -errno;
+    }
+    return -error;
 #endif
 }
