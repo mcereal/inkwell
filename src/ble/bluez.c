@@ -2,6 +2,7 @@
 #include "hci.h"
 
 #include "inkwell/base/array.h"
+#include "inkwell/base/fd.h"
 #include "inkwell/base/ioctl.h"
 #include "inkwell/base/log.h"
 #include "inkwell/base/text.h"
@@ -56,8 +57,7 @@
 #define INKWELL_BTPROTO_HCI 1
 #define INKWELL_HCI_CHANNEL_RAW 0
 #define INKWELL_HCI_LE_LINK 0x80U
-#define INKWELL_HCIGETCONNLIST _IOR('H', 212, int)
-#define INKWELL_HCI_CONNECTION_MAX 16U
+#define INKWELL_HCIGETCONNINFO _IOR('H', 213, int)
 
 struct inkwell_sockaddr_hci {
     sa_family_t hci_family;
@@ -74,10 +74,12 @@ struct inkwell_hci_connection_info {
     uint32_t link_mode;
 };
 
-struct inkwell_hci_connection_list {
-    uint16_t dev_id;
-    uint16_t conn_num;
-    struct inkwell_hci_connection_info info[INKWELL_HCI_CONNECTION_MAX];
+struct inkwell_hci_connection_info_request {
+    uint8_t bdaddr[6];
+    uint8_t type;
+    /* The kernel ABI declares this as a flexible array. One address-specific query returns one
+       entry, so one inline slot gives it the identical layout without an allocation. */
+    struct inkwell_hci_connection_info info[1];
 };
 
 /* A bond is made before a link is used (pair_begin), so a write has nothing to wait behind. */
@@ -1765,9 +1767,9 @@ int inkwell_ble_backend_request_connection_interval(
         return -EINVAL;
     }
 
-    const int fd = socket(AF_BLUETOOTH, SOCK_RAW | SOCK_CLOEXEC, INKWELL_BTPROTO_HCI);
+    const int fd = inkwell_fd_socket(AF_BLUETOOTH, SOCK_RAW, INKWELL_BTPROTO_HCI);
     if (fd < 0) {
-        return -errno;
+        return fd;
     }
     struct inkwell_sockaddr_hci bind_to;
     memset(&bind_to, 0, sizeof bind_to);
@@ -1780,28 +1782,16 @@ int inkwell_ble_backend_request_connection_interval(
         return error;
     }
 
-    struct inkwell_hci_connection_list list;
-    memset(&list, 0, sizeof list);
-    list.dev_id = (uint16_t)dev_id;
-    list.conn_num = INKWELL_HCI_CONNECTION_MAX;
-    if (ioctl(fd, inkwell_ioctl_request_of(INKWELL_HCIGETCONNLIST), &list) < 0) {
+    struct inkwell_hci_connection_info_request request;
+    memset(&request, 0, sizeof request);
+    memcpy(request.bdaddr, bdaddr, sizeof request.bdaddr);
+    request.type = INKWELL_HCI_LE_LINK;
+    if (ioctl(fd, inkwell_ioctl_request_of(INKWELL_HCIGETCONNINFO), &request) < 0) {
         const int error = -errno;
         close(fd);
         return error;
     }
-
-    int handle = -1;
-    for (size_t i = 0; i < list.conn_num && i < INKWELL_HCI_CONNECTION_MAX; ++i) {
-        if (list.info[i].type == INKWELL_HCI_LE_LINK &&
-            memcmp(list.info[i].bdaddr, bdaddr, sizeof bdaddr) == 0) {
-            handle = list.info[i].handle;
-            break;
-        }
-    }
-    if (handle < 0) {
-        close(fd);
-        return -ENOENT;
-    }
+    const uint16_t handle = request.info[0].handle;
 
     uint8_t packet[INKWELL_BLE_HCI_CONNECTION_UPDATE_LEN];
     const size_t len =
@@ -1814,9 +1804,10 @@ int inkwell_ble_backend_request_connection_interval(
     const int result = sent < 0 ? -errno : (sent == (ssize_t)len ? 0 : -EIO);
     close(fd);
     if (result == 0) {
-        inkwell_log_info("ble", "Asked for a %u.%02u ms connection interval on %s (handle %d)",
+        inkwell_log_info("ble", "Asked for a %u.%02u ms connection interval on %s (handle %u)",
                          (unsigned)(parameters->min_interval * 125U / 100U),
-                         (unsigned)(parameters->min_interval * 125U % 100U), address, handle);
+                         (unsigned)(parameters->min_interval * 125U % 100U), address,
+                         (unsigned)handle);
     }
     return result;
 }
