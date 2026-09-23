@@ -133,16 +133,9 @@ new suite file goes in `INKWELL_TEST_SUITES` in `tests/CMakeLists.txt`.
 
 ## Status
 
-Early. The foundation, the loop, the leaf codecs, the resolver, the TCP connector, the byte
-stream, the TLS session, the HTTPS client, and the MQTT client are here. Still to come out of
-mesh-client, roughly in the order the dependencies allow:
-
-- **`bt/`** — a BlueZ GATT client over D-Bus: discovery, bonding, an `org.bluez.Agent1` that can
-  answer a PIN prompt from inside the application, characteristic reads and writes, all
-  asynchronous on the loop. About 3,200 lines, of which exactly four are Meshtastic-specific.
-- **the rest of `io/`** — finding and mounting the USB mass-storage drive a device publishes.
-- **`store/`** — the key/value file and the append-only log that let an application remember
-  things across runs.
+The platform pieces identified during the extraction from mesh-client are here. The current
+boundary and the evidence for everything that stayed in the application are recorded in
+[`docs/extraction.md`](docs/extraction.md).
 
 ## Licence
 

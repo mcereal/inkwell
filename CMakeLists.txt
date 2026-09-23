@@ -95,6 +95,7 @@ add_library(inkwell STATIC
     # ble: a Bluetooth LE central over whichever stack the system has. The backend is added
     # below, once the build knows which one that is.
     src/ble/central.c
+    src/ble/hci.c
 )
 
 # Wuffs, for codec/png.c and codec/inflate.c. See third_party/wuffs/README.md for what it is and

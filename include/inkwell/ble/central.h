@@ -96,6 +96,18 @@ struct inkwell_ble_device {
 };
 
 /*
+ * Parameters for an LE connection interval update, in controller units. Intervals use 1.25 ms;
+ * the supervision timeout uses 10 ms. The central validates the Bluetooth Core bounds before
+ * asking the backend, so invalid commands never reach the controller.
+ */
+struct inkwell_ble_connection_parameters {
+    uint16_t min_interval;
+    uint16_t max_interval;
+    uint16_t latency;
+    uint16_t supervision_timeout;
+};
+
+/*
  * What the stack is asking the user while a pair is in flight.
  *
  * On BlueZ the central registers an agent with KeyboardDisplay capability, so a peripheral
@@ -283,6 +295,18 @@ int inkwell_ble_find_characteristic(struct inkwell_ble_central *central, const c
 int inkwell_ble_characteristic_mtu(struct inkwell_ble_central *central, const char *handle,
                                    uint16_t *out_mtu);
 /*
+ * Asks the controller to change the interval on the open LE link to `address`.
+ *
+ * Call this after selecting an adapter and opening the connection. BlueZ has no D-Bus method for
+ * this, so its backend resolves the connection handle and sends an HCI LE Connection Update
+ * directly. The command is handed to the controller, but its later completion event is not
+ * awaited. -ENOENT means there is no open LE link to the address; -ENOTSUP means this stack does
+ * not expose interval control. On Linux the raw HCI socket also requires CAP_NET_RAW.
+ */
+int inkwell_ble_request_connection_interval(
+    struct inkwell_ble_central *central, const char *address,
+    const struct inkwell_ble_connection_parameters *parameters);
+/*
  * Turns on notifications from one characteristic; each arrives at the notification handler.
  * One subscription at a time.
  *
@@ -337,6 +361,8 @@ struct inkwell_ble_mock_config {
     int check_ready_result;
     int find_adapter_result;
     const char *adapter_name;
+    int request_connection_interval_result;
+    unsigned *request_connection_interval_calls;
     int start_discovery_result;
     int stop_discovery_result;
     /* Bumped on every start/stop, so a test can assert that a scan is down for the whole of a

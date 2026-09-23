@@ -942,6 +942,15 @@ int inkwell_ble_backend_mtu(struct inkwell_ble_central *central, const char *han
     return 0;
 }
 
+int inkwell_ble_backend_request_connection_interval(
+    struct inkwell_ble_central *central, const char *address,
+    const struct inkwell_ble_connection_parameters *parameters) {
+    (void)central;
+    (void)address;
+    (void)parameters;
+    return -ENOTSUP;
+}
+
 int inkwell_ble_backend_subscribe(struct inkwell_ble_central *central, const char *handle,
                                   uint32_t *token) {
     IWCentral *object = object_of(central);

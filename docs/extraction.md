@@ -173,13 +173,10 @@ the application, over their own copy of the same fake CDN.
 
 ## Still on the wrong side
 
-| Candidate | What is general | What stays |
-|---|---|---|
-| `src/transport/ble/ble_hci.c` | asking for a connection interval on an open LE link, which BlueZ has no D-Bus call for - a raw HCI `LE Connection Update` | the interval one transfer protocol wants, and when to ask for it |
-
-It is not a file move. Its API names an adapter by BlueZ object path and a peer by its text
-address, which is the vocabulary `ble/central.h` was written to hide; the general form is a call
-on `ble/central.h` by address, implemented over an HCI socket on Linux and refused elsewhere.
+Nothing currently identified. The raw HCI `LE Connection Update` is now
+`inkwell_ble_request_connection_interval()`, an operation on `ble/central.h` by peer address.
+The BlueZ backend resolves the adapter and connection handle and sends the command; other stacks
+refuse it with `-ENOTSUP`. mesh-client keeps the interval its OTA transfer wants and when to ask.
 
 ## The two questions that blocked several rows
 

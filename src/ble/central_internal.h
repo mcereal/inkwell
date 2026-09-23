@@ -92,6 +92,9 @@ int inkwell_ble_backend_find_characteristic(struct inkwell_ble_central *central,
                                             char *out_handle, size_t out_len);
 int inkwell_ble_backend_mtu(struct inkwell_ble_central *central, const char *handle,
                             uint16_t *out_mtu);
+int inkwell_ble_backend_request_connection_interval(
+    struct inkwell_ble_central *central, const char *address,
+    const struct inkwell_ble_connection_parameters *parameters);
 
 int inkwell_ble_backend_attach(struct inkwell_ble_central *central);
 void inkwell_ble_backend_detach(struct inkwell_ble_central *central);

@@ -1,6 +1,7 @@
 #include "inkwell/ble/central.h"
 
 #include "central_internal.h"
+#include "hci.h"
 
 #include "inkwell/base/array.h"
 #include "inkwell/base/log.h"
@@ -485,6 +486,25 @@ int inkwell_ble_find_adapter(struct inkwell_ble_central *central, char *name, si
         return -ENOTCONN;
     }
     return inkwell_ble_backend_find_adapter(central, name, name_len);
+}
+
+int inkwell_ble_request_connection_interval(
+    struct inkwell_ble_central *central, const char *address,
+    const struct inkwell_ble_connection_parameters *parameters) {
+    if (central == NULL || address == NULL || address[0] == '\0' ||
+        !inkwell_ble_hci_parameters_valid(parameters)) {
+        return -EINVAL;
+    }
+    if (scripted()) {
+        if (g_mock.config.request_connection_interval_calls != NULL) {
+            ++*g_mock.config.request_connection_interval_calls;
+        }
+        return g_mock.config.request_connection_interval_result;
+    }
+    if (!central->open) {
+        return -ENOTCONN;
+    }
+    return inkwell_ble_backend_request_connection_interval(central, address, parameters);
 }
 
 int inkwell_ble_start_discovery(struct inkwell_ble_central *central) {
