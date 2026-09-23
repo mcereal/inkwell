@@ -520,6 +520,19 @@ int inkwell_ble_start_discovery(struct inkwell_ble_central *central) {
     return inkwell_ble_backend_discovery(central, true);
 }
 
+int inkwell_ble_discovering(struct inkwell_ble_central *central) {
+    if (central == NULL) {
+        return -EINVAL;
+    }
+    if (scripted()) {
+        return g_mock.scanning ? 1 : 0;
+    }
+    if (!central->open) {
+        return -ENOTCONN;
+    }
+    return inkwell_ble_backend_discovering(central);
+}
+
 int inkwell_ble_stop_discovery(struct inkwell_ble_central *central) {
     if (central == NULL) {
         return -EINVAL;

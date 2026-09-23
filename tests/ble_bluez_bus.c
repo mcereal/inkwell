@@ -255,21 +255,26 @@ static void emit_interfaces(DBusConnection *server, bool added, const char *path
     emit(server, signal);
 }
 
-/* The adapter switched on or off, as bluetoothd reports it. */
-static void emit_powered(DBusConnection *server, bool powered) {
+/* One of the adapter's boolean properties changing, as bluetoothd reports it. */
+static void emit_adapter_flag(DBusConnection *server, const char *name, bool on) {
     DBusMessage *signal = dbus_message_new_signal(
         "/org/bluez/hci0", "org.freedesktop.DBus.Properties", "PropertiesChanged");
     const char *interface = "org.bluez.Adapter1";
-    const dbus_bool_t value = powered ? TRUE : FALSE;
+    const dbus_bool_t value = on ? TRUE : FALSE;
     DBusMessageIter iter, changed, invalidated;
     dbus_message_iter_init_append(signal, &iter);
     dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &interface);
     dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sv}", &changed);
-    append_property(&changed, "Powered", DBUS_TYPE_BOOLEAN, &value);
+    append_property(&changed, name, DBUS_TYPE_BOOLEAN, &value);
     dbus_message_iter_close_container(&iter, &changed);
     dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "s", &invalidated);
     dbus_message_iter_close_container(&iter, &invalidated);
     emit(server, signal);
+}
+
+/* The adapter switched on or off. */
+static void emit_powered(DBusConnection *server, bool powered) {
+    emit_adapter_flag(server, "Powered", powered);
 }
 
 /* A rename, and the RSSI going: what bluetoothd says when a device stops being heard. */
@@ -392,8 +397,9 @@ static const char *test_object_tree(DBusConnection *server, struct inkwell_loop 
 /*
  * Discovery, Disconnect and Trusted are sent and not waited for: each returns 0 while the fake
  * has not answered - a blocking call would have timed out - and reaches it afterwards. A refusal
- * that comes back later is logged and changes nothing. An adapter the copy knows is off refuses
- * discovery at once.
+ * that comes back later is logged and changes nothing - which is why whether the adapter is
+ * scanning is read from what bluetoothd reports, not from what was asked. An adapter the copy
+ * knows is off refuses discovery at once.
  */
 static const char *test_sent_not_waited(DBusConnection *server, struct inkwell_loop *loop,
                                         struct inkwell_ble_central *client) {
@@ -427,6 +433,17 @@ static const char *test_sent_not_waited(DBusConnection *server, struct inkwell_l
         emit(server, refusal);
     }
     settle(server, loop, client);
+    if (inkwell_ble_discovering(client) != 0)
+        return "a refused StartDiscovery was taken for a scan";
+
+    emit_adapter_flag(server, "Discovering", true);
+    settle(server, loop, client);
+    if (inkwell_ble_discovering(client) != 1)
+        return "the adapter reporting Discovering did not read as scanning";
+    emit_adapter_flag(server, "Discovering", false);
+    settle(server, loop, client);
+    if (inkwell_ble_discovering(client) != 0)
+        return "the adapter stopping did not read as not scanning";
 
     emit_powered(server, false);
     settle(server, loop, client);

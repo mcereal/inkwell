@@ -222,6 +222,17 @@ int inkwell_ble_find_adapter(struct inkwell_ble_central *central, char *name, si
 /* Sent, not waited for. -ENETDOWN at once when the stack already knows the adapter is off. */
 int inkwell_ble_start_discovery(struct inkwell_ble_central *central);
 int inkwell_ble_stop_discovery(struct inkwell_ble_central *central);
+/*
+ * Whether the adapter is scanning, as the stack reports it: 1 or 0, -EAGAIN while it has not
+ * said, -ENOSYS where there is no stack.
+ *
+ * The two calls above are sent and not waited for, so 0 from them means only that the stack
+ * was asked. A refusal arrives later and is logged - BlueZ answers InProgress to a start that
+ * lands on a stop still settling - and a caller keeping its own "scanning" flag from the request
+ * then believes in a scan that is not running, hears nothing, and waits on it forever. Compare
+ * this against what was asked for and ask again when they disagree.
+ */
+int inkwell_ble_discovering(struct inkwell_ble_central *central);
 /* Every peripheral the stack holds that advertises `service_uuid`, compared without regard to
    case. Read from memory, except that on BlueZ the first lookup of any kind after bluetoothd
    starts fetches its object tree, bounded to a second. */

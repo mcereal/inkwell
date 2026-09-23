@@ -109,6 +109,8 @@ struct bluez_object {
     unsigned interfaces;
     /* Adapter1: Powered, when bluetoothd has said it is false. */
     bool powered_off;
+    /* Adapter1: Discovering, as bluetoothd last said - not as it was last asked. */
+    bool discovering;
     /* Device1 */
     char address[INKWELL_BLE_ADDRESS_MAX];
     char name[INKWELL_BLE_NAME_MAX];
@@ -670,6 +672,10 @@ static int object_set_property(struct bluez_object *object, unsigned interface, 
             dbus_bool_t powered = TRUE;
             dbus_message_iter_get_basic(variant, &powered);
             object->powered_off = powered == FALSE;
+        } else if (strcmp(name, "Discovering") == 0 && type == DBUS_TYPE_BOOLEAN) {
+            dbus_bool_t discovering = FALSE;
+            dbus_message_iter_get_basic(variant, &discovering);
+            object->discovering = discovering != FALSE;
         }
         return 0;
     }
@@ -1177,6 +1183,23 @@ int inkwell_ble_backend_discovery(struct inkwell_ble_central *central, bool on) 
         return -ENOMEM;
     }
     return send_logged(central, message, method);
+}
+
+/* From the copy, which bluetoothd's PropertiesChanged keeps current: the answer to a
+   Start/StopDiscovery that was sent and not waited for, whichever way it went. */
+int inkwell_ble_backend_discovering(struct inkwell_ble_central *central) {
+    if (connection_of(central) == NULL) {
+        return -ENOTCONN;
+    }
+    const char *adapter =
+        central->adapter[0] != '\0' ? central->adapter : INKWELL_BLUEZ_DEFAULT_ADAPTER;
+    struct bluez_backend *backend = backend_of(central);
+    const struct bluez_object *object =
+        backend->objects_loaded ? object_find(backend, adapter) : NULL;
+    if (object == NULL) {
+        return -EAGAIN;
+    }
+    return object->discovering ? 1 : 0;
 }
 
 int inkwell_ble_backend_connect(struct inkwell_ble_central *central, const char *address,
