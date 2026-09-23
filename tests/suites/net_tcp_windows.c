@@ -1,9 +1,11 @@
 #include "framework/inkwell_test.h"
 
+#include "inkwell/base/time.h"
 #include "inkwell/net/tcp.h"
 #include "inkwell/runtime/loop.h"
 
 #include <errno.h>
+#include <stdio.h>
 
 struct windows_tcp_probe {
     unsigned calls;
@@ -120,5 +122,57 @@ INKWELL_TEST_CASE(tcp_windows_refuses_named_host_without_blocking, unit) {
     inkwell_tcp_connector_shutdown(&connector);
     INKWELL_TEST_FAIL_IF(result != -ENOTSUP || probe.calls != 0U,
                          "hostname lookup should refuse without a callback");
+    record_success(test_name);
+}
+
+INKWELL_TEST_CASE(tcp_windows_reports_refusal_before_deadline, unit) {
+    inkwell_socket listener = INKWELL_SOCKET_INVALID;
+    INKWELL_TEST_FAIL_IF(inkwell_socket_open(AF_INET, SOCK_STREAM, IPPROTO_TCP, &listener) != 0,
+                         "loopback socket should open");
+    struct sockaddr_in address = {0};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int address_len = sizeof address;
+    if (bind((SOCKET)listener, (struct sockaddr *)&address, address_len) != 0 ||
+        listen((SOCKET)listener, 1) != 0 ||
+        getsockname((SOCKET)listener, (struct sockaddr *)&address, &address_len) != 0) {
+        (void)inkwell_socket_close(listener);
+        record_failure(test_name, "unused loopback port should be selected");
+        return;
+    }
+    const uint16_t port = ntohs(address.sin_port);
+    (void)inkwell_socket_close(listener); /* no listener when the connector reaches the port */
+
+    struct inkwell_loop loop;
+    INKWELL_TEST_FAIL_IF(inkwell_loop_init(&loop) != 0, "loop should initialize");
+    struct inkwell_tcp_connector connector;
+    (void)inkwell_tcp_connector_init(&connector, &loop);
+    struct windows_tcp_probe probe = {.socket = INKWELL_SOCKET_INVALID};
+    const struct inkwell_tcp_connect_options options = {.timeout_ms = 5000U};
+    struct inkwell_net_failure immediate = {0};
+    const int started = inkwell_tcp_connector_start(&connector, "127.0.0.1", port, &options,
+                                                    windows_tcp_done, &probe, 0U, &immediate);
+    const uint64_t began_ms = inkwell_time_monotonic_ms();
+    if (started == 0) {
+        for (unsigned turn = 0; turn < 250U && probe.calls == 0U; ++turn) {
+            (void)inkwell_loop_run(&loop, 20);
+            inkwell_tcp_connector_tick(&connector, (uint64_t)(turn + 1U) * 20U);
+        }
+    }
+    const struct inkwell_net_failure observed = started < 0 ? immediate : probe.failure;
+    const bool correct = (started < 0 || probe.calls == 1U) &&
+                         observed.reason == INKWELL_NET_UNREACHABLE &&
+                         observed.detail == -ECONNREFUSED && probe.socket == INKWELL_SOCKET_INVALID;
+    inkwell_tcp_connector_shutdown(&connector);
+    inkwell_loop_shutdown(&loop);
+    if (!correct) {
+        char message[160];
+        (void)snprintf(message, sizeof message,
+                       "refusal: start=%d calls=%u reason=%d detail=%d elapsed=%llu", started,
+                       probe.calls, observed.reason, observed.detail,
+                       (unsigned long long)(inkwell_time_monotonic_ms() - began_ms));
+        record_failure(test_name, message);
+        return;
+    }
     record_success(test_name);
 }

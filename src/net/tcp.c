@@ -122,9 +122,29 @@ static int tcp_open(struct inkwell_tcp_connector *connector, const struct sockad
     }
     tcp_configure_socket(socket, &connector->options);
 
+    connector->socket = socket;
+    connector->state = INKWELL_TCP_CONNECT_CONNECTING;
+    connector->deadline_ms =
+        start_deadline ? connector->now_ms + connector->options.timeout_ms : 0U;
+    /* Register before connect(): a backend may report completion only once, so a fast refusal
+       could otherwise finish before the loop starts watching the socket. */
+    if (connector->loop != NULL) {
+        const int added = inkwell_loop_watch_socket(connector->loop, socket, INKWELL_LOOP_OUT,
+                                                    tcp_on_fd, connector);
+        if (added < 0) {
+            tcp_drop_socket(connector);
+            if (failure != NULL) {
+                failure->reason = inkwell_net_reason_from_errno(added);
+                failure->detail = added;
+            }
+            return added;
+        }
+        connector->registration_token = added;
+    }
+
     const int connected = inkwell_socket_connect(socket, address, (size_t)address_len);
     if (connected < 0 && connected != -EINPROGRESS) {
-        (void)inkwell_socket_close(socket);
+        tcp_drop_socket(connector);
         if (failure != NULL) {
             failure->reason = inkwell_net_reason_from_errno(connected);
             failure->detail = connected;
@@ -132,10 +152,6 @@ static int tcp_open(struct inkwell_tcp_connector *connector, const struct sockad
         return connected;
     }
 
-    connector->socket = socket;
-    connector->state = INKWELL_TCP_CONNECT_CONNECTING;
-    connector->deadline_ms =
-        start_deadline ? connector->now_ms + connector->options.timeout_ms : 0U;
     if (connected == 0) {
         tcp_finish_connect(connector);
         return 0;
@@ -148,17 +164,6 @@ static int tcp_open(struct inkwell_tcp_connector *connector, const struct sockad
         }
         return -ENOTSUP;
     }
-    const int added =
-        inkwell_loop_watch_socket(connector->loop, socket, INKWELL_LOOP_OUT, tcp_on_fd, connector);
-    if (added < 0) {
-        tcp_drop_socket(connector);
-        if (failure != NULL) {
-            failure->reason = inkwell_net_reason_from_errno(added);
-            failure->detail = added;
-        }
-        return added;
-    }
-    connector->registration_token = added;
     return 0;
 }
 
