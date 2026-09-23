@@ -83,7 +83,7 @@ INKWELL_TEST_CASE(socket_loopback_datagram, unit) {
         failure = "sender should connect to receiver";
         goto done;
     }
-    const char payload[] = "mesh";
+    const char payload[] = "ping";
     if (inkwell_socket_send(sender, payload, sizeof payload) != (int)sizeof payload) {
         failure = "send should write the datagram";
         goto done;
