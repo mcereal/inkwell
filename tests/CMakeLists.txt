@@ -38,6 +38,7 @@ set(INKWELL_TEST_SUITES
     suites/net_resolve.c
     suites/net_stream.c
     suites/net_tcp.c
+    suites/net_zip_fetch.c
     suites/runtime_crash.c
     suites/runtime_loop.c
     suites/runtime_timer.c
