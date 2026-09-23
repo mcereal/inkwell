@@ -827,11 +827,33 @@ INKWELL_TEST_CASE(fetch_names_the_connection_failure, unit) {
         goto cleanup;
     }
 
-    /* A dead address followed by a live one: what the request ends on is the live one's
-       failure, not the address it got past on the way. */
+    /*
+     * A dead address followed by a live one: what the request ends on is the live one's
+     * failure, not the address it got past on the way. 127.0.0.2 refuses at once on Linux and
+     * is not a local address at all on macOS, where the connect hangs - so the clock is moved
+     * past each address's allowance, as in fetch_tries_the_next_address, and either way the
+     * dead address fails before the live one is tried.
+     */
     inkwell_fetch_connect_to(&h.fetch, "127.0.0.2,127.0.0.1", h.server.port);
-    const struct inkwell_fetch_request cut = {.url = "https://api.github.com/until-cut"};
-    if (!harness_fetch(&h, &cut) || h.probe.outcome[0] != INKWELL_FETCH_NETWORK ||
+    const struct inkwell_fetch_request cut = {
+        .url = "https://api.github.com/until-cut",
+        .timeout_ms = 60000U,
+        .on_done = probe_record,
+        .userdata = &h.probe,
+    };
+    if (inkwell_fetch_start(&h.fetch, &cut, 0U) != 0) {
+        failure = "the request should start";
+        goto cleanup;
+    }
+    uint64_t now = 0U;
+    for (int turn = 0; turn < 600 && h.probe.calls == 0U; ++turn) {
+        (void)inkwell_loop_run(&h.loop, 10);
+        if (turn % 20 == 19) {
+            now += 4000U;
+        }
+        inkwell_fetch_tick(&h.fetch, now);
+    }
+    if (h.probe.calls != 1U || h.probe.outcome[0] != INKWELL_FETCH_NETWORK ||
         h.probe.failure[0].reason != INKWELL_NET_CLOSED) {
         failure = "a cut body behind a refused address is the peer closing, not the refusal";
         goto cleanup;
