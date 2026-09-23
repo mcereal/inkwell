@@ -1,5 +1,8 @@
 #pragma once
 
+#include <stddef.h>
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -28,6 +31,23 @@ int inkwell_fd_socket(int domain, int type, int protocol);
 
 /* Sets O_NONBLOCK and FD_CLOEXEC on a descriptor somebody else made. 0 or a negative errno. */
 int inkwell_fd_set_nonblocking_cloexec(int fd);
+
+/* A socket is pointer-sized on Windows, so it cannot safely travel through the int descriptor
+ * API above. This value is a native socket on either host, never a loop registration token.
+ * open() starts Winsock once on Windows and makes the socket nonblocking and non-inheritable.
+ * The caller owns a successful result and closes it with inkwell_socket_close().
+ * I/O returns a byte count or negative errno; EAGAIN means wait for loop readiness.
+ */
+typedef uintptr_t inkwell_socket;
+#define INKWELL_SOCKET_INVALID UINTPTR_MAX
+
+int inkwell_socket_open(int domain, int type, int protocol, inkwell_socket *out);
+int inkwell_socket_close(inkwell_socket socket);
+int inkwell_socket_connect(inkwell_socket socket, const void *address, size_t address_len);
+int inkwell_socket_send(inkwell_socket socket, const void *bytes, size_t len);
+int inkwell_socket_recv(inkwell_socket socket, void *bytes, size_t len);
+/* 0 when connected and healthy, or a negative errno from SO_ERROR. */
+int inkwell_socket_pending_error(inkwell_socket socket);
 
 #ifdef __cplusplus
 }
