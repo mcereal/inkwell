@@ -1,6 +1,7 @@
 #include "inkwell/net/mqtt.h"
 
 #include "inkwell/base/text.h"
+#include "mqtt_address.h"
 
 #include <errno.h>
 #include <string.h>
@@ -43,6 +44,11 @@ int inkwell_mqtt_client_start(struct inkwell_mqtt_client *proxy,
     (void)now_ms;
     if (proxy == NULL || config == NULL || config->address[0] == '\0' ||
         config->client_id[0] == '\0') {
+        return -EINVAL;
+    }
+    char host[INKWELL_MQTT_CLIENT_ADDRESS_MAX];
+    uint16_t port = 0U;
+    if (inkwell_mqtt_target_split(config->address, host, sizeof host, &port) != 0) {
         return -EINVAL;
     }
     return -ENOTSUP;

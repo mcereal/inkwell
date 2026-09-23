@@ -110,6 +110,7 @@ add_library(inkwell STATIC
     # net: one hostname, one socket, one session - all of it on the loop, none of it blocking
     ${INKWELL_FETCH_SOURCE}
     ${INKWELL_MQTT_SOURCE}
+    src/net/mqtt_address.c
     src/net/reason.c
     ${INKWELL_RESOLVE_SOURCE}
     src/net/stream.c
@@ -186,7 +187,7 @@ endif()
 # branch and quietly turn TLS off for the entire tree, with the pin sitting right there unused.
 # The file check belongs only where a checkout is actually about to be read.
 option(INKWELL_WITH_TLS "Build TLS support when Mbed TLS is present" ON)
-if(INKWELL_WITH_TLS AND
+if(INKWELL_WITH_TLS AND NOT WIN32 AND
    (TARGET mbedtls OR EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/CMakeLists.txt))
     if(NOT TARGET mbedtls)
         # Mbed TLS builds its own tests, sample programs and package config by default, none of
@@ -227,7 +228,9 @@ if(INKWELL_WITH_TLS AND
     # `tfpsacrypto` is 4.x's name for what 3.x called `mbedcrypto`.
     target_link_libraries(inkwell PUBLIC mbedtls mbedx509 tfpsacrypto)
 else()
-    if(INKWELL_WITH_TLS)
+    if(WIN32)
+        message(STATUS "inkwell: TLS support unavailable on Windows until the socket backend is ported")
+    elseif(INKWELL_WITH_TLS)
         message(STATUS
             "third_party/mbedtls is missing: building inkwell without TLS, so net/tls.h refuses "
             "every session and net/fetch.h reports itself unavailable. "
