@@ -55,6 +55,8 @@ set(INKWELL_SIGNALS_SOURCE src/runtime/signals.c)
 set(INKWELL_WINDOWS_RUNTIME_SOURCE)
 set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_posix.c)
 set(INKWELL_RESOLVE_SOURCE src/net/resolve.c)
+set(INKWELL_FETCH_SOURCE src/net/fetch.c)
+set(INKWELL_MQTT_SOURCE src/net/mqtt.c)
 set(INKWELL_SERIAL_SOURCE src/io/serial.c)
 set(INKWELL_USB_STORAGE_SOURCE src/io/usb_storage.c)
 if(WIN32)
@@ -63,6 +65,10 @@ if(WIN32)
     set(INKWELL_WINDOWS_RUNTIME_SOURCE src/runtime/windows_handle.c)
     set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_windows.c)
     set(INKWELL_RESOLVE_SOURCE src/net/resolve_unavailable.c)
+    # HTTPS and MQTT still use POSIX socket descriptors. Keep their API callable and
+    # explicitly unavailable until they can adopt native Winsock handles.
+    set(INKWELL_FETCH_SOURCE src/net/fetch_unavailable.c)
+    set(INKWELL_MQTT_SOURCE src/net/mqtt_unavailable.c)
     # Device discovery and raw block writes need native Windows backends. Until then they
     # refuse explicitly, without pulling POSIX ioctl, termios, mount or fork into the build.
     set(INKWELL_SERIAL_SOURCE src/io/serial_unavailable.c)
@@ -102,8 +108,9 @@ add_library(inkwell STATIC
     src/codec/uf2.c
     src/codec/zip.c
     # net: one hostname, one socket, one session - all of it on the loop, none of it blocking
-    src/net/fetch.c
-    src/net/mqtt.c
+    ${INKWELL_FETCH_SOURCE}
+    ${INKWELL_MQTT_SOURCE}
+    src/net/mqtt_address.c
     src/net/reason.c
     ${INKWELL_RESOLVE_SOURCE}
     src/net/stream.c
@@ -180,7 +187,7 @@ endif()
 # branch and quietly turn TLS off for the entire tree, with the pin sitting right there unused.
 # The file check belongs only where a checkout is actually about to be read.
 option(INKWELL_WITH_TLS "Build TLS support when Mbed TLS is present" ON)
-if(INKWELL_WITH_TLS AND
+if(INKWELL_WITH_TLS AND NOT WIN32 AND
    (TARGET mbedtls OR EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/CMakeLists.txt))
     if(NOT TARGET mbedtls)
         # Mbed TLS builds its own tests, sample programs and package config by default, none of
@@ -221,7 +228,9 @@ if(INKWELL_WITH_TLS AND
     # `tfpsacrypto` is 4.x's name for what 3.x called `mbedcrypto`.
     target_link_libraries(inkwell PUBLIC mbedtls mbedx509 tfpsacrypto)
 else()
-    if(INKWELL_WITH_TLS)
+    if(WIN32)
+        message(STATUS "inkwell: TLS support unavailable on Windows until the socket backend is ported")
+    elseif(INKWELL_WITH_TLS)
         message(STATUS
             "third_party/mbedtls is missing: building inkwell without TLS, so net/tls.h refuses "
             "every session and net/fetch.h reports itself unavailable. "
