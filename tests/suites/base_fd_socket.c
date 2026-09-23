@@ -55,6 +55,28 @@ INKWELL_TEST_CASE(socket_rejects_invalid_handle, unit) {
     record_success(test_name);
 }
 
+INKWELL_TEST_CASE(socket_parse_numeric_address, unit) {
+    struct sockaddr_storage address;
+    socklen_t address_len = 0;
+    INKWELL_TEST_FAIL_IF(!inkwell_socket_parse_literal("192.0.2.1", 4403U, &address, &address_len),
+                         "IPv4 literal should parse");
+    const struct sockaddr_in *v4 = (const struct sockaddr_in *)&address;
+    INKWELL_TEST_FAIL_IF(v4->sin_family != AF_INET || ntohs(v4->sin_port) != 4403U ||
+                             address_len != (socklen_t)sizeof *v4,
+                         "IPv4 port and length should match");
+    INKWELL_TEST_FAIL_IF(
+        !inkwell_socket_parse_literal("2001:db8::1", 4404U, &address, &address_len),
+        "IPv6 literal should parse");
+    const struct sockaddr_in6 *v6 = (const struct sockaddr_in6 *)&address;
+    INKWELL_TEST_FAIL_IF(v6->sin6_family != AF_INET6 || ntohs(v6->sin6_port) != 4404U ||
+                             address_len != (socklen_t)sizeof *v6,
+                         "IPv6 port and length should match");
+    INKWELL_TEST_FAIL_IF(
+        inkwell_socket_parse_literal("example.invalid", 4403U, &address, &address_len),
+        "hostname should not parse as a literal");
+    record_success(test_name);
+}
+
 INKWELL_TEST_CASE(socket_loopback_datagram, unit) {
     const char *failure = NULL;
     inkwell_socket sender = INKWELL_SOCKET_INVALID;

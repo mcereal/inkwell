@@ -6,14 +6,13 @@
 #include <errno.h>
 #include <limits.h>
 #include <stddef.h>
+#include <string.h>
 #if defined(_WIN32)
-/* Winsock must precede windows.h to avoid pulling in the older winsock.h. */
-// clang-format off
-#include <winsock2.h>
 #include <windows.h>
-// clang-format on
 #else
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -278,4 +277,43 @@ int inkwell_socket_pending_error(inkwell_socket socket) {
     }
     return -error;
 #endif
+}
+
+bool inkwell_socket_parse_literal(const char *host, uint16_t port, struct sockaddr_storage *out,
+                                  socklen_t *out_len) {
+    if (host == NULL || host[0] == '\0' || out == NULL || out_len == NULL) {
+        return false;
+    }
+    memset(out, 0, sizeof *out);
+
+    struct in_addr v4;
+#if defined(_WIN32)
+    const int parsed_v4 = InetPtonA(AF_INET, host, &v4);
+#else
+    const int parsed_v4 = inet_pton(AF_INET, host, &v4);
+#endif
+    if (parsed_v4 == 1) {
+        struct sockaddr_in *address = (struct sockaddr_in *)out;
+        address->sin_family = AF_INET;
+        address->sin_port = htons(port);
+        address->sin_addr = v4;
+        *out_len = (socklen_t)sizeof *address;
+        return true;
+    }
+
+    struct in6_addr v6;
+#if defined(_WIN32)
+    const int parsed_v6 = InetPtonA(AF_INET6, host, &v6);
+#else
+    const int parsed_v6 = inet_pton(AF_INET6, host, &v6);
+#endif
+    if (parsed_v6 == 1) {
+        struct sockaddr_in6 *address = (struct sockaddr_in6 *)out;
+        address->sin6_family = AF_INET6;
+        address->sin6_port = htons(port);
+        address->sin6_addr = v6;
+        *out_len = (socklen_t)sizeof *address;
+        return true;
+    }
+    return false;
 }

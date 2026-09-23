@@ -5,11 +5,9 @@
 #include "inkwell/net/tls.h"
 #include "inkwell/runtime/loop.h"
 
-#include <netinet/in.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/socket.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,9 +20,9 @@ extern "C" {
  * This client deliberately knows nothing about the application protocol carried in a topic or
  * payload; its business is the MQTT session and the socket underneath it.
  *
- * **Everything is on the one event loop.** The socket is non-blocking, the name lookup is
- * inkwell_resolve's forked child, and TLS is a state machine over the same descriptor. There is no
- * thread here and there is nowhere for one to go.
+ * **Everything is on the one event loop.** The socket is non-blocking, name lookup uses
+ * inkwell_resolve's asynchronous backend where available, and TLS is a state machine over the
+ * same descriptor. There is no thread here and there is nowhere for one to go.
  *
  * **Nothing is queued across a disconnect.** A publish that arrives while the broker is
  * unreachable is dropped and counted, not held. Replaying stale application data after a
