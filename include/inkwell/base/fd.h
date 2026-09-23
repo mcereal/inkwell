@@ -48,6 +48,8 @@ int inkwell_fd_set_nonblocking_cloexec(int fd);
 int inkwell_fd_read(int fd, void *bytes, size_t len);
 int inkwell_fd_write(int fd, const void *bytes, size_t len);
 int inkwell_fd_close(int fd);
+/* Duplicate a CRT/POSIX descriptor so a test fixture and its consumer own separate lifetimes. */
+int inkwell_fd_dup(int fd);
 
 /* A socket is pointer-sized on Windows, so it cannot safely travel through the int descriptor
  * API above. This value is a native socket on either host, never a loop registration token.

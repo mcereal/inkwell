@@ -55,12 +55,18 @@ set(INKWELL_SIGNALS_SOURCE src/runtime/signals.c)
 set(INKWELL_WINDOWS_RUNTIME_SOURCE)
 set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_posix.c)
 set(INKWELL_RESOLVE_SOURCE src/net/resolve.c)
+set(INKWELL_SERIAL_SOURCE src/io/serial.c)
+set(INKWELL_USB_STORAGE_SOURCE src/io/usb_storage.c)
 if(WIN32)
     set(INKWELL_CRASH_SOURCE src/runtime/crash_windows.c)
     set(INKWELL_SIGNALS_SOURCE src/runtime/signals_windows.c)
     set(INKWELL_WINDOWS_RUNTIME_SOURCE src/runtime/windows_handle.c)
     set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_windows.c)
     set(INKWELL_RESOLVE_SOURCE src/net/resolve_unavailable.c)
+    # Device discovery and raw block writes need native Windows backends. Until then they
+    # refuse explicitly, without pulling POSIX ioctl, termios, mount or fork into the build.
+    set(INKWELL_SERIAL_SOURCE src/io/serial_unavailable.c)
+    set(INKWELL_USB_STORAGE_SOURCE src/io/usb_storage_unavailable.c)
 endif()
 
 add_library(inkwell STATIC
@@ -105,8 +111,8 @@ add_library(inkwell STATIC
     src/net/tls.c
     src/net/zip_fetch.c
     # io: the USB serial ports the system has, and a tty opened raw on the loop's terms
-    src/io/serial.c
-    src/io/usb_storage.c
+    ${INKWELL_SERIAL_SOURCE}
+    ${INKWELL_USB_STORAGE_SOURCE}
     # ble: a Bluetooth LE central over whichever stack the system has. The backend is added
     # below, once the build knows which one that is.
     src/ble/central.c

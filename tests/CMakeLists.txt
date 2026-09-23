@@ -13,6 +13,11 @@ set(INKWELL_TEST_SUPPORT
     support/https_fixture.c
 )
 
+set(INKWELL_TEST_IO_SUITES suites/io_serial.c suites/io_usb_storage.c)
+if(WIN32)
+    set(INKWELL_TEST_IO_SUITES suites/io_windows_unavailable.c)
+endif()
+
 set(INKWELL_TEST_SUITES
     suites/base_fd_socket.c
     suites/ble_central.c
@@ -32,8 +37,7 @@ set(INKWELL_TEST_SUITES
     suites/codec_sha256.c
     suites/codec_uf2.c
     suites/codec_zip.c
-    suites/io_serial.c
-    suites/io_usb_storage.c
+    ${INKWELL_TEST_IO_SUITES}
     suites/net_fetch.c
     suites/net_mqtt.c
     suites/net_reason.c
