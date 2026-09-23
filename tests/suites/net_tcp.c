@@ -16,14 +16,14 @@
 
 struct tcp_probe {
     unsigned calls;
-    int fd;
+    inkwell_socket socket;
     struct inkwell_net_failure failure;
 };
 
 static void tcp_probe_done(void *userdata, const struct inkwell_tcp_connect_result *result) {
     struct tcp_probe *probe = (struct tcp_probe *)userdata;
     probe->calls++;
-    probe->fd = result->fd;
+    probe->socket = result->socket;
     probe->failure = result->failure;
 }
 
@@ -90,7 +90,7 @@ INKWELL_TEST_CASE(tcp_connector_connects_a_literal, unit) {
     }
     struct inkwell_tcp_connector connector;
     (void)inkwell_tcp_connector_init(&connector, &loop);
-    struct tcp_probe probe = {.fd = -1};
+    struct tcp_probe probe = {.socket = INKWELL_SOCKET_INVALID};
     const struct inkwell_tcp_connect_options options = {
         .timeout_ms = 1000U,
         .no_delay = true,
@@ -101,14 +101,14 @@ INKWELL_TEST_CASE(tcp_connector_connects_a_literal, unit) {
 
     if (inkwell_tcp_connector_start(&connector, "127.0.0.1", port, &options, tcp_probe_done, &probe,
                                     0U, &failure) != 0 ||
-        (!tcp_wait(&loop, &connector, &probe)) || probe.calls != 1U || probe.fd < 0 ||
-        inkwell_net_failed(&probe.failure)) {
+        (!tcp_wait(&loop, &connector, &probe)) || probe.calls != 1U ||
+        probe.socket == INKWELL_SOCKET_INVALID || inkwell_net_failed(&probe.failure)) {
         record_failure(test_name, "the connector did not return a connected descriptor");
         goto cleanup;
     }
     int keepalive = 0;
     socklen_t keepalive_len = (socklen_t)sizeof keepalive;
-    if (getsockopt(probe.fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, &keepalive_len) != 0 ||
+    if (getsockopt((int)probe.socket, SOL_SOCKET, SO_KEEPALIVE, &keepalive, &keepalive_len) != 0 ||
         keepalive == 0) {
         record_failure(test_name, "the connected socket did not enable keepalive");
         goto cleanup;
@@ -121,7 +121,8 @@ INKWELL_TEST_CASE(tcp_connector_connects_a_literal, unit) {
 #else
     const int idle_option = TCP_KEEPALIVE;
 #endif
-    if (getsockopt(probe.fd, IPPROTO_TCP, idle_option, &idle, &idle_len) != 0 || idle != 30) {
+    if (getsockopt((int)probe.socket, IPPROTO_TCP, idle_option, &idle, &idle_len) != 0 ||
+        idle != 30) {
         record_failure(test_name,
                        "the connected socket did not use the requested keepalive idle interval");
         goto cleanup;
@@ -136,8 +137,8 @@ INKWELL_TEST_CASE(tcp_connector_connects_a_literal, unit) {
     record_success(test_name);
 
 cleanup:
-    if (probe.fd >= 0) {
-        (void)close(probe.fd);
+    if (probe.socket != INKWELL_SOCKET_INVALID) {
+        (void)inkwell_socket_close(probe.socket);
     }
     inkwell_tcp_connector_shutdown(&connector);
     inkwell_loop_shutdown(&loop);
@@ -162,7 +163,7 @@ INKWELL_TEST_CASE(tcp_connector_resolves_a_name, unit) {
     }
     struct inkwell_tcp_connector connector;
     (void)inkwell_tcp_connector_init(&connector, &loop);
-    struct tcp_probe probe = {.fd = -1};
+    struct tcp_probe probe = {.socket = INKWELL_SOCKET_INVALID};
     const struct inkwell_tcp_connect_options options = {.timeout_ms = 1000U};
 
     if (inkwell_tcp_connector_start(&connector, "localhost", port, &options, tcp_probe_done, &probe,
@@ -171,15 +172,15 @@ INKWELL_TEST_CASE(tcp_connector_resolves_a_name, unit) {
         record_failure(test_name, "the named connection did not finish");
         goto cleanup;
     }
-    if (probe.fd < 0 || inkwell_net_failed(&probe.failure)) {
+    if (probe.socket == INKWELL_SOCKET_INVALID || inkwell_net_failed(&probe.failure)) {
         record_failure(test_name, "localhost did not produce a connected descriptor");
         goto cleanup;
     }
     record_success(test_name);
 
 cleanup:
-    if (probe.fd >= 0) {
-        (void)close(probe.fd);
+    if (probe.socket != INKWELL_SOCKET_INVALID) {
+        (void)inkwell_socket_close(probe.socket);
     }
     inkwell_tcp_connector_shutdown(&connector);
     inkwell_loop_shutdown(&loop);
@@ -194,7 +195,7 @@ INKWELL_TEST_CASE(tcp_connector_cancel_suppresses_completion, unit) {
     INKWELL_TEST_FAIL_IF(inkwell_loop_init(&loop) != 0, "the loop did not start");
     struct inkwell_tcp_connector connector;
     (void)inkwell_tcp_connector_init(&connector, &loop);
-    struct tcp_probe probe = {.fd = -1};
+    struct tcp_probe probe = {.socket = INKWELL_SOCKET_INVALID};
     const struct inkwell_tcp_connect_options options = {.timeout_ms = 1000U};
 
     if (inkwell_tcp_connector_start(&connector, "inkwell-no-such-name.invalid", 4403U, &options,
@@ -219,7 +220,7 @@ cleanup:
 INKWELL_TEST_CASE(tcp_connector_enforces_its_deadline, unit) {
     struct inkwell_tcp_connector connector;
     (void)inkwell_tcp_connector_init(&connector, NULL);
-    struct tcp_probe probe = {.fd = -1};
+    struct tcp_probe probe = {.socket = INKWELL_SOCKET_INVALID};
     int pair[2] = {-1, -1};
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) {
         record_failure(test_name, "the socket pair did not open");
@@ -230,7 +231,7 @@ INKWELL_TEST_CASE(tcp_connector_enforces_its_deadline, unit) {
        pending descriptor and completion contract; how that descriptor became pending is covered
        by the loopback cases above. */
     connector.state = INKWELL_TCP_CONNECT_CONNECTING;
-    connector.fd = pair[0];
+    connector.socket = (inkwell_socket)pair[0];
     connector.options.timeout_ms = 50U;
     connector.on_done = tcp_probe_done;
     connector.userdata = &probe;
@@ -243,8 +244,8 @@ INKWELL_TEST_CASE(tcp_connector_enforces_its_deadline, unit) {
         goto cleanup;
     }
     inkwell_tcp_connector_tick(&connector, 150U);
-    if (probe.calls != 1U || probe.fd != -1 || probe.failure.reason != INKWELL_NET_TIMED_OUT ||
-        inkwell_tcp_connector_busy(&connector)) {
+    if (probe.calls != 1U || probe.socket != INKWELL_SOCKET_INVALID ||
+        probe.failure.reason != INKWELL_NET_TIMED_OUT || inkwell_tcp_connector_busy(&connector)) {
         record_failure(test_name, "the deadline did not report one timeout and return to idle");
         goto cleanup;
     }
