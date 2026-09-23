@@ -92,10 +92,12 @@ INKWELL_TEST_CASE(loop_windows_socket_read_and_remove, unit) {
         goto done;
     }
     struct socket_observation seen = {.socket = client};
-    const int token =
-        inkwell_loop_add_socket(&loop, (uintptr_t)client, INKWELL_LOOP_IN, socket_on_read, &seen);
-    if (token < 0 || inkwell_loop_add_socket(&loop, (uintptr_t)client, INKWELL_LOOP_IN,
-                                             socket_on_read, &seen) != -EEXIST) {
+    int token = -1;
+    if (inkwell_loop_watch_socket(&loop, (uintptr_t)client, INKWELL_LOOP_IN, socket_on_read, &seen,
+                                  &token) != 0 ||
+        token < 0 ||
+        inkwell_loop_add_socket(&loop, (uintptr_t)client, INKWELL_LOOP_IN, socket_on_read, &seen) !=
+            -EEXIST) {
         goto done;
     }
     if (send(peer, "z", 1, 0) != 1 || inkwell_loop_run(&loop, 100) != 0 || seen.calls != 1 ||

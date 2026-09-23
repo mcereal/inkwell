@@ -64,6 +64,18 @@ int inkwell_socket_pending_error(inkwell_socket socket);
 bool inkwell_socket_parse_literal(const char *host, uint16_t port, struct sockaddr_storage *out,
                                   socklen_t *out_len);
 
+/* TCP socket policy, with unsupported optional keepalive tunables reported as -ENOTSUP.
+ * A caller may ignore that result when platform defaults are acceptable. */
+enum inkwell_socket_option {
+    INKWELL_SOCKET_NO_DELAY,
+    INKWELL_SOCKET_KEEPALIVE,
+    INKWELL_SOCKET_KEEPALIVE_IDLE_S,
+    INKWELL_SOCKET_KEEPALIVE_INTERVAL_S,
+    INKWELL_SOCKET_KEEPALIVE_COUNT,
+};
+int inkwell_socket_set_option(inkwell_socket socket, enum inkwell_socket_option option,
+                              unsigned value);
+
 #ifdef __cplusplus
 }
 #endif

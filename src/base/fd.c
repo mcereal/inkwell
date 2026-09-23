@@ -13,6 +13,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -316,4 +317,55 @@ bool inkwell_socket_parse_literal(const char *host, uint16_t port, struct sockad
         return true;
     }
     return false;
+}
+
+int inkwell_socket_set_option(inkwell_socket socket, enum inkwell_socket_option option,
+                              unsigned value) {
+    if (socket == INKWELL_SOCKET_INVALID || value > (unsigned)INT_MAX) {
+        return -EINVAL;
+    }
+    int level = IPPROTO_TCP;
+    int name = 0;
+    switch (option) {
+    case INKWELL_SOCKET_NO_DELAY:
+        name = TCP_NODELAY;
+        break;
+    case INKWELL_SOCKET_KEEPALIVE:
+        level = SOL_SOCKET;
+        name = SO_KEEPALIVE;
+        break;
+    case INKWELL_SOCKET_KEEPALIVE_IDLE_S:
+#if defined(TCP_KEEPIDLE)
+        name = TCP_KEEPIDLE;
+#elif defined(TCP_KEEPALIVE)
+        name = TCP_KEEPALIVE;
+#else
+        return -ENOTSUP;
+#endif
+        break;
+    case INKWELL_SOCKET_KEEPALIVE_INTERVAL_S:
+#if defined(TCP_KEEPINTVL)
+        name = TCP_KEEPINTVL;
+#else
+        return -ENOTSUP;
+#endif
+        break;
+    case INKWELL_SOCKET_KEEPALIVE_COUNT:
+#if defined(TCP_KEEPCNT)
+        name = TCP_KEEPCNT;
+#else
+        return -ENOTSUP;
+#endif
+        break;
+    default:
+        return -EINVAL;
+    }
+    const int setting = (int)value;
+#if defined(_WIN32)
+    return setsockopt((SOCKET)socket, level, name, (const char *)&setting, sizeof setting) == 0
+               ? 0
+               : -socket_error(WSAGetLastError());
+#else
+    return setsockopt((int)socket, level, name, &setting, sizeof setting) == 0 ? 0 : -errno;
+#endif
 }

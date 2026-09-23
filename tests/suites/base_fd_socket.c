@@ -8,6 +8,7 @@
 #include <winsock2.h>
 #else
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #endif
 
@@ -74,6 +75,40 @@ INKWELL_TEST_CASE(socket_parse_numeric_address, unit) {
     INKWELL_TEST_FAIL_IF(
         inkwell_socket_parse_literal("example.invalid", 4403U, &address, &address_len),
         "hostname should not parse as a literal");
+    record_success(test_name);
+}
+
+INKWELL_TEST_CASE(socket_tcp_options, unit) {
+    inkwell_socket socket = INKWELL_SOCKET_INVALID;
+    INKWELL_TEST_FAIL_IF(inkwell_socket_open(AF_INET, SOCK_STREAM, 0, &socket) != 0,
+                         "TCP socket should open");
+    const int no_delay = inkwell_socket_set_option(socket, INKWELL_SOCKET_NO_DELAY, 1U);
+    const int keepalive = inkwell_socket_set_option(socket, INKWELL_SOCKET_KEEPALIVE, 1U);
+    const int bad_option = inkwell_socket_set_option(socket, (enum inkwell_socket_option)99, 1U);
+    int no_delay_value = 0;
+    int keepalive_value = 0;
+#if defined(_WIN32)
+    int len = sizeof no_delay_value;
+    const int no_delay_read =
+        getsockopt((SOCKET)socket, IPPROTO_TCP, TCP_NODELAY, (char *)&no_delay_value, &len);
+    len = sizeof keepalive_value;
+    const int keepalive_read =
+        getsockopt((SOCKET)socket, SOL_SOCKET, SO_KEEPALIVE, (char *)&keepalive_value, &len);
+#else
+    socklen_t len = sizeof no_delay_value;
+    const int no_delay_read =
+        getsockopt((int)socket, IPPROTO_TCP, TCP_NODELAY, &no_delay_value, &len);
+    len = sizeof keepalive_value;
+    const int keepalive_read =
+        getsockopt((int)socket, SOL_SOCKET, SO_KEEPALIVE, &keepalive_value, &len);
+#endif
+    const int closed = inkwell_socket_close(socket);
+    INKWELL_TEST_FAIL_IF(no_delay != 0 || keepalive != 0 || bad_option != -EINVAL,
+                         "TCP option writes should accept valid options only");
+    INKWELL_TEST_FAIL_IF(no_delay_read != 0 || no_delay_value == 0 || keepalive_read != 0 ||
+                             keepalive_value == 0,
+                         "TCP options should reach the native socket");
+    INKWELL_TEST_FAIL_IF(closed != 0, "TCP socket should close");
     record_success(test_name);
 }
 
