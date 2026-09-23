@@ -1,22 +1,12 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "inkwell/base/time.h"
+#include "platform.h"
 
 #include <time.h>
-#if defined(_WIN32)
-#include <windows.h>
-#endif
 
 uint64_t inkwell_time_monotonic_ms(void) {
-#if defined(_WIN32)
-    return (uint64_t)GetTickCount64();
-#else
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-        return 0U;
-    }
-    return (uint64_t)ts.tv_sec * 1000U + (uint64_t)ts.tv_nsec / 1000000U;
-#endif
+    return inkwell_platform_monotonic_ms();
 }
 
 /*

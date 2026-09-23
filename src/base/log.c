@@ -3,9 +3,9 @@
 #include "inkwell/base/log.h"
 
 #include "inkwell/base/env.h"
+#include "platform.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -13,35 +13,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
-#if defined(_WIN32)
-#include <io.h>
-#ifndef O_CLOEXEC
-#define O_CLOEXEC _O_NOINHERIT
-#endif
-#else
-#include <unistd.h>
-#endif
-
-#if defined(_WIN32)
-static ssize_t windows_pread(int fd, void *buffer, size_t count, off_t offset) {
-    if (_lseeki64(fd, (__int64)offset, SEEK_SET) < 0) {
-        return -1;
-    }
-    return (ssize_t)_read(fd, buffer, (unsigned)count);
-}
-
-static ssize_t windows_pwrite(int fd, const void *buffer, size_t count, off_t offset) {
-    if (_lseeki64(fd, (__int64)offset, SEEK_SET) < 0) {
-        return -1;
-    }
-    return (ssize_t)_write(fd, buffer, (unsigned)count);
-}
-
-#define pread windows_pread
-#define pwrite windows_pwrite
-#define ftruncate(fd, length) _chsize_s((fd), (__int64)(length))
-#define close _close
-#endif
 
 static enum inkwell_log_level g_log_level = INKWELL_LOG_LEVEL_INFO;
 
@@ -79,11 +50,7 @@ static void format_timestamp(char *buffer, size_t buffer_len) {
     }
 
     struct tm tm_result;
-#if defined(_WIN32)
-    if (gmtime_s(&tm_result, &ts.tv_sec) != 0) {
-#else
-    if (gmtime_r(&ts.tv_sec, &tm_result) == NULL) {
-#endif
+    if (!inkwell_platform_utc_time(ts.tv_sec, &tm_result)) {
         snprintf(buffer, buffer_len, "0000-00-00T00:00:00.000Z");
         return;
     }
@@ -297,7 +264,7 @@ static off_t log_file_line_start(int fd, off_t from, off_t size) {
         if ((off_t)want > remaining) {
             want = (size_t)remaining;
         }
-        const ssize_t got = pread(fd, chunk, want, at);
+        const ssize_t got = inkwell_platform_file_read_at(fd, chunk, want, at);
         if (got <= 0) {
             return -1;
         }
@@ -328,7 +295,7 @@ static off_t log_file_shift_to_front(int fd, off_t from, off_t size) {
         if ((off_t)want > remaining) {
             want = (size_t)remaining;
         }
-        const ssize_t got = pread(fd, chunk, want, read_at);
+        const ssize_t got = inkwell_platform_file_read_at(fd, chunk, want, read_at);
         if (got < 0) {
             return (off_t)-errno;
         }
@@ -337,8 +304,8 @@ static off_t log_file_shift_to_front(int fd, off_t from, off_t size) {
         }
         ssize_t put_total = 0;
         while (put_total < got) {
-            const ssize_t put = pwrite(fd, chunk + put_total, (size_t)(got - put_total),
-                                       write_at + (off_t)put_total);
+            const ssize_t put = inkwell_platform_file_write_at(
+                fd, chunk + put_total, (size_t)(got - put_total), write_at + (off_t)put_total);
             if (put <= 0) {
                 return (off_t)-errno;
             }
@@ -347,7 +314,7 @@ static off_t log_file_shift_to_front(int fd, off_t from, off_t size) {
         read_at += (off_t)got;
         write_at += (off_t)got;
     }
-    if (ftruncate(fd, write_at) != 0) {
+    if (inkwell_platform_file_truncate(fd, write_at) != 0) {
         return (off_t)-errno;
     }
     return write_at;
@@ -368,7 +335,7 @@ long inkwell_log_file_compact(const char *path) {
      * rewrite below never names the file again - which also makes keeping tee's inode structural
      * rather than something the code merely happens to do.
      */
-    const int fd = open(path, O_RDWR | O_CLOEXEC);
+    const int fd = inkwell_platform_file_open_rw(path);
     if (fd < 0) {
         /* Not there is not a failure: see the header on why a derived path that was never a log
            has to be a no-op rather than an error. */
@@ -378,11 +345,11 @@ long inkwell_log_file_compact(const char *path) {
     struct stat info;
     if (fstat(fd, &info) != 0) {
         const int failed = -errno;
-        (void)close(fd);
+        (void)inkwell_platform_file_close(fd);
         return failed;
     }
     if (!S_ISREG(info.st_mode) || info.st_size <= (off_t)INKWELL_LOG_FILE_MAX_BYTES) {
-        (void)close(fd);
+        (void)inkwell_platform_file_close(fd);
         return 0L;
     }
 
@@ -397,7 +364,7 @@ long inkwell_log_file_compact(const char *path) {
      * than throwing the log away.
      */
     if (resume < 0 || resume >= info.st_size) {
-        (void)close(fd);
+        (void)inkwell_platform_file_close(fd);
         return 0L;
     }
 
@@ -409,7 +376,7 @@ long inkwell_log_file_compact(const char *path) {
      * truncated the file to zero before writing the tail back.
      */
     const off_t shifted = log_file_shift_to_front(fd, resume, info.st_size);
-    (void)close(fd);
+    (void)inkwell_platform_file_close(fd);
     if (shifted < 0) {
         return (long)shifted;
     }

@@ -53,10 +53,12 @@ endif()
 set(INKWELL_CRASH_SOURCE src/runtime/crash.c)
 set(INKWELL_SIGNALS_SOURCE src/runtime/signals.c)
 set(INKWELL_WINDOWS_RUNTIME_SOURCE)
+set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_posix.c)
 if(WIN32)
     set(INKWELL_CRASH_SOURCE src/runtime/crash_windows.c)
     set(INKWELL_SIGNALS_SOURCE src/runtime/signals_windows.c)
     set(INKWELL_WINDOWS_RUNTIME_SOURCE src/runtime/windows_handle.c)
+    set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_windows.c)
 endif()
 
 add_library(inkwell STATIC
@@ -77,6 +79,7 @@ add_library(inkwell STATIC
     ${INKWELL_SIGNALS_SOURCE}
     src/runtime/timer.c
     src/runtime/wake.c
+    ${INKWELL_BASE_PLATFORM_SOURCE}
     ${INKWELL_WINDOWS_RUNTIME_SOURCE}
     # codec: bytes in, bytes out. They parse; they do not know what the bytes are for.
     src/codec/base64.c
