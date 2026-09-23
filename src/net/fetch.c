@@ -221,6 +221,22 @@ static void fetch_note(struct inkwell_fetch_conn *conn, enum inkwell_net_reason 
     conn->failure.detail = detail;
 }
 
+/*
+ * Records why a read or write on an established session failed. The TLS client has already
+ * sorted it: -ENOTCONN is the peer finishing (close_notify, or a bare EOF), -ECONNRESET the peer
+ * tearing it down, and -EPROTO the session itself failing - a record that would not decrypt or
+ * parse - which is a TLS failure with the library's code behind it, not the peer closing.
+ */
+static void fetch_note_session(struct inkwell_fetch_conn *conn, int rc) {
+    if (rc == -EPROTO) {
+        fetch_note(conn, INKWELL_NET_TLS, inkwell_tls_client_error_code(&conn->tls));
+    } else if (rc == -ENOTCONN) {
+        fetch_note(conn, INKWELL_NET_CLOSED, 0);
+    } else {
+        fetch_note(conn, inkwell_net_reason_from_errno(rc), rc);
+    }
+}
+
 /* ---- the body --------------------------------------------------------------------------- */
 
 /*
@@ -375,8 +391,7 @@ static bool fetch_on_head(struct inkwell_fetch *fetch) {
 static void fetch_on_close(struct inkwell_fetch *fetch, int rc) {
     struct inkwell_fetch_conn *const conn = fetch->conn;
     const bool clean = rc == -ENOTCONN;
-    /* Every way out of here that is a failure is the peer ending the connection early. */
-    fetch_note(conn, INKWELL_NET_CLOSED, clean ? 0 : rc);
+    fetch_note_session(conn, rc);
     if (!inkwell_http_response_head_done(&conn->response)) {
         fetch_fail(fetch, INKWELL_FETCH_NETWORK, "%s closed before replying: %s", conn->url.host,
                    clean ? "close_notify" : inkwell_tls_client_error(&conn->tls));
@@ -466,7 +481,7 @@ static void fetch_send(struct inkwell_fetch *fetch) {
             return;
         }
         if (rc < 0) {
-            fetch_note(conn, INKWELL_NET_CLOSED, rc);
+            fetch_note_session(conn, rc);
             fetch_fail(fetch, INKWELL_FETCH_NETWORK, "sending to %s: %s", conn->url.host,
                        inkwell_tls_client_error(&conn->tls));
             return;
@@ -485,7 +500,7 @@ static void fetch_handshake(struct inkwell_fetch *fetch) {
         return;
     }
     if (rc < 0) {
-        fetch_note(conn, INKWELL_NET_TLS, 0);
+        fetch_note(conn, INKWELL_NET_TLS, inkwell_tls_client_error_code(&conn->tls));
         fetch_fail(fetch, INKWELL_FETCH_TLS, "%s: %s", conn->url.host,
                    inkwell_tls_client_error(&conn->tls));
         return;
@@ -535,7 +550,7 @@ static void fetch_connected(struct inkwell_fetch *fetch) {
     const int started =
         inkwell_tls_client_start(&conn->tls, conn->fd, conn->url.host, inkwell_tls_ca_override());
     if (started < 0) {
-        fetch_note(conn, INKWELL_NET_TLS, 0);
+        fetch_note(conn, INKWELL_NET_TLS, inkwell_tls_client_error_code(&conn->tls));
         fetch_fail(fetch, INKWELL_FETCH_TLS, "%s: %s", conn->url.host,
                    inkwell_tls_client_error(&conn->tls));
         return;

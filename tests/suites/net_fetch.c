@@ -114,6 +114,13 @@ static void fetch_serve(void *userdata, const struct https_fixture_request *requ
     } else if (strcmp(target, "/short") == 0) {
         https_fixture_printf(conn, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nten bytes!");
         https_fixture_cut(conn);
+    } else if (strcmp(target, "/forged") == 0) {
+        /* A head, then an application-data record header and bytes no key produced. */
+        https_fixture_printf(conn, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n");
+        static const unsigned char k_forged[] = {
+            0x17, 0x03, 0x03, 0x00, 0x20, 1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14,
+            15,   16,   17,   18,   19,   20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
+        https_fixture_send_raw(conn, k_forged, sizeof k_forged);
     } else if (strcmp(target, "/garbage") == 0) {
         https_fixture_printf(conn, "SSH-2.0-OpenSSH\r\n\r\n");
     } else if (strcmp(target, "/slow") == 0) {
@@ -674,7 +681,7 @@ INKWELL_TEST_CASE(fetch_verifies_the_server, unit) {
 
     const struct inkwell_fetch_request stranger = {.url = "https://wrong.example.org/doc"};
     if (!harness_fetch(&h, &stranger) || h.probe.outcome[0] != INKWELL_FETCH_TLS ||
-        h.probe.failure[0].reason != INKWELL_NET_TLS) {
+        h.probe.failure[0].reason != INKWELL_NET_TLS || h.probe.failure[0].detail >= 0) {
         failure = "a certificate for other names should be refused";
         goto cleanup;
     }
@@ -859,17 +866,27 @@ INKWELL_TEST_CASE(fetch_names_the_connection_failure, unit) {
         goto cleanup;
     }
 
+    /* A record the session cannot decrypt, after a head that promised a body: the session
+       failing, with the library's code, and not the peer closing. */
+    const struct inkwell_fetch_request forged = {.url = "https://api.github.com/forged"};
+    inkwell_fetch_connect_to(&h.fetch, "127.0.0.1", h.server.port);
+    if (!harness_fetch(&h, &forged) || h.probe.outcome[1] != INKWELL_FETCH_NETWORK ||
+        h.probe.failure[1].reason != INKWELL_NET_TLS || h.probe.failure[1].detail >= 0) {
+        failure = "a record that will not decrypt is a TLS failure with a code, not a close";
+        goto cleanup;
+    }
+
     /* A name nobody can look up. Whether the answer is NXDOMAIN or a resolver that is not
        there depends on where the suite runs - net_resolve.c gates the difference - but either
        way it is a lookup's reason and never a connect's. */
     inkwell_fetch_connect_to(&h.fetch, "no-such-host.invalid", h.server.port);
     const struct inkwell_fetch_request unknown = {.url = "https://api.github.com/doc"};
     if (!harness_fetch(&h, &unknown) ||
-        (h.probe.outcome[1] != INKWELL_FETCH_NETWORK &&
-         h.probe.outcome[1] != INKWELL_FETCH_TIMED_OUT) ||
-        (h.probe.failure[1].reason != INKWELL_NET_UNKNOWN_HOST &&
-         h.probe.failure[1].reason != INKWELL_NET_LOOKUP_FAILED &&
-         h.probe.failure[1].reason != INKWELL_NET_LOOKUP_TIMED_OUT)) {
+        (h.probe.outcome[2] != INKWELL_FETCH_NETWORK &&
+         h.probe.outcome[2] != INKWELL_FETCH_TIMED_OUT) ||
+        (h.probe.failure[2].reason != INKWELL_NET_UNKNOWN_HOST &&
+         h.probe.failure[2].reason != INKWELL_NET_LOOKUP_FAILED &&
+         h.probe.failure[2].reason != INKWELL_NET_LOOKUP_TIMED_OUT)) {
         failure = "a name that does not resolve should fail as a lookup";
         goto cleanup;
     }

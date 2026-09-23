@@ -81,6 +81,10 @@ const char *inkwell_tls_client_error(const struct inkwell_tls_client *tls) {
     return tls != NULL ? tls->error : "";
 }
 
+int inkwell_tls_client_error_code(const struct inkwell_tls_client *tls) {
+    return tls != NULL ? tls->error_code : 0;
+}
+
 #else /* INKWELL_HAVE_TLS */
 
 #include <mbedtls/error.h>
@@ -212,6 +216,7 @@ static void tls_record_error(struct inkwell_tls_client *tls, int code, const cha
         (void)snprintf(detail, sizeof detail, "error %d", code);
     }
     (void)snprintf(tls->error, sizeof tls->error, "%s: %s", what, detail);
+    tls->error_code = code;
 }
 
 /* ------------------------------------------------------------------ the socket underneath */
@@ -444,6 +449,7 @@ int inkwell_tls_client_handshake(struct inkwell_tls_client *tls) {
         } else {
             inkwell_str_copy(tls->error, sizeof tls->error, "the certificate did not check out");
         }
+        tls->error_code = rc;
         tls->wants_write = false;
         return -EPROTO;
     }
@@ -526,6 +532,10 @@ void inkwell_tls_client_stop(struct inkwell_tls_client *tls) {
 
 const char *inkwell_tls_client_error(const struct inkwell_tls_client *tls) {
     return tls != NULL ? tls->error : "";
+}
+
+int inkwell_tls_client_error_code(const struct inkwell_tls_client *tls) {
+    return tls != NULL ? tls->error_code : 0;
 }
 
 #endif /* INKWELL_HAVE_TLS */
