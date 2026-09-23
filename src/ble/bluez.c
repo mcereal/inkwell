@@ -1,6 +1,9 @@
 #include "central_internal.h"
+#include "hci.h"
 
 #include "inkwell/base/array.h"
+#include "inkwell/base/fd.h"
+#include "inkwell/base/ioctl.h"
 #include "inkwell/base/log.h"
 #include "inkwell/base/text.h"
 #include "inkwell/runtime/loop.h"
@@ -11,7 +14,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 /*
  * The BlueZ backend: org.bluez over the system D-Bus, driven by libdbus with its watches put on
@@ -42,6 +48,39 @@
 #define INKWELL_BLUEZ_WATCHES 8U
 /* Calls sent without waiting whose replies are still to be logged; see send_logged(). */
 #define INKWELL_BLUEZ_UNANSWERED 8U
+
+/* Kernel Bluetooth ABI for the one operation BlueZ does not expose on D-Bus. These definitions
+ * have been stable since Linux 2.6 and avoid making libbluetooth a dependency. */
+#ifndef AF_BLUETOOTH
+#define AF_BLUETOOTH 31
+#endif
+#define INKWELL_BTPROTO_HCI 1
+#define INKWELL_HCI_CHANNEL_RAW 0
+#define INKWELL_HCI_LE_LINK 0x80U
+#define INKWELL_HCIGETCONNINFO _IOR('H', 213, int)
+
+struct inkwell_sockaddr_hci {
+    sa_family_t hci_family;
+    unsigned short hci_dev;
+    unsigned short hci_channel;
+};
+
+struct inkwell_hci_connection_info {
+    uint16_t handle;
+    uint8_t bdaddr[6];
+    uint8_t type;
+    uint8_t out;
+    uint16_t state;
+    uint32_t link_mode;
+};
+
+struct inkwell_hci_connection_info_request {
+    uint8_t bdaddr[6];
+    uint8_t type;
+    /* The kernel ABI declares this as a flexible array. One address-specific query returns one
+       entry, so one inline slot gives it the identical layout without an allocation. */
+    struct inkwell_hci_connection_info info[1];
+};
 
 /* A bond is made before a link is used (pair_begin), so a write has nothing to wait behind. */
 const unsigned inkwell_ble_backend_write_timeout_ms = 3000U;
@@ -1716,6 +1755,60 @@ int inkwell_ble_backend_mtu(struct inkwell_ble_central *central, const char *han
         }
     }
     dbus_message_unref(reply);
+    return result;
+}
+
+int inkwell_ble_backend_request_connection_interval(
+    struct inkwell_ble_central *central, const char *address,
+    const struct inkwell_ble_connection_parameters *parameters) {
+    uint8_t bdaddr[6];
+    const int dev_id = inkwell_ble_hci_adapter_index(central->adapter);
+    if (dev_id < 0 || !inkwell_ble_hci_parse_address(address, bdaddr)) {
+        return -EINVAL;
+    }
+
+    const int fd = inkwell_fd_socket(AF_BLUETOOTH, SOCK_RAW, INKWELL_BTPROTO_HCI);
+    if (fd < 0) {
+        return fd;
+    }
+    struct inkwell_sockaddr_hci bind_to;
+    memset(&bind_to, 0, sizeof bind_to);
+    bind_to.hci_family = AF_BLUETOOTH;
+    bind_to.hci_dev = (unsigned short)dev_id;
+    bind_to.hci_channel = INKWELL_HCI_CHANNEL_RAW;
+    if (bind(fd, (const struct sockaddr *)&bind_to, sizeof bind_to) < 0) {
+        const int error = -errno;
+        close(fd);
+        return error;
+    }
+
+    struct inkwell_hci_connection_info_request request;
+    memset(&request, 0, sizeof request);
+    memcpy(request.bdaddr, bdaddr, sizeof request.bdaddr);
+    request.type = INKWELL_HCI_LE_LINK;
+    if (ioctl(fd, inkwell_ioctl_request_of(INKWELL_HCIGETCONNINFO), &request) < 0) {
+        const int error = -errno;
+        close(fd);
+        return error;
+    }
+    const uint16_t handle = request.info[0].handle;
+
+    uint8_t packet[INKWELL_BLE_HCI_CONNECTION_UPDATE_LEN];
+    const size_t len =
+        inkwell_ble_hci_encode_connection_update((uint16_t)handle, parameters, packet);
+    if (len == 0U) {
+        close(fd);
+        return -EINVAL;
+    }
+    const ssize_t sent = write(fd, packet, len);
+    const int result = sent < 0 ? -errno : (sent == (ssize_t)len ? 0 : -EIO);
+    close(fd);
+    if (result == 0) {
+        inkwell_log_info("ble", "Asked for a %u.%02u ms connection interval on %s (handle %u)",
+                         (unsigned)(parameters->min_interval * 125U / 100U),
+                         (unsigned)(parameters->min_interval * 125U % 100U), address,
+                         (unsigned)handle);
+    }
     return result;
 }
 
