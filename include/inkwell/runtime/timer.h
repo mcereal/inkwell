@@ -9,8 +9,8 @@ extern "C" {
 /*
  * A timer that is a descriptor, so it waits on the loop like everything else.
  *
- * On Linux this is a timerfd on CLOCK_MONOTONIC and every call is the one it replaces. On macOS -
- * a development host, not a device - it is a kqueue holding one EVFILT_TIMER: a kqueue is itself
+ * On Linux this is a timerfd on CLOCK_MONOTONIC and every call is the one it replaces. On macOS it
+ * is a kqueue holding one EVFILT_TIMER: a kqueue is itself
  * a descriptor that polls readable while it has an event pending, so the loop's kqueue can wait
  * on it exactly as epoll waits on a timerfd. Windows registers a waitable timer under an integer
  * source key so callers retain the same platform-neutral interface.

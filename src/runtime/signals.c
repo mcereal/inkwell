@@ -103,7 +103,7 @@ static void signals_restore(void) {
 #else
 
 /*
- * kqueue's EVFILT_SIGNAL, on a development host.
+ * kqueue's EVFILT_SIGNAL, on macOS.
  *
  * It records every attempt to deliver a signal, including one whose disposition is SIG_IGN, and
  * that is how it is used: the three are ignored rather than blocked, so the default action never
