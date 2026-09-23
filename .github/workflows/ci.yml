@@ -78,8 +78,7 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1
         run: ctest --test-dir build --output-on-failure
 
-  # macOS is a development host, not a target: the loop is kqueue there and the suite is the same
-  # suite. It is here because a Linux-only call above runtime/ compiles fine on every other job,
+  # macOS is a target like Linux: the loop is kqueue there and the suite is the same suite. It is here because a Linux-only call above runtime/ compiles fine on every other job,
   # and this is the one that would fail on it.
   macos:
     name: debug (macOS)

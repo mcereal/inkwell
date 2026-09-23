@@ -19,19 +19,23 @@
 #endif
 
 /*
- * Two backends behind one table of sources.
+ * Three backends behind one table of sources.
  *
- * epoll is the one that ships, and on Linux nothing is translated: loop.h's INKWELL_LOOP_* are
+ * On Linux, epoll, and nothing is translated: loop.h's INKWELL_LOOP_* are
  * epoll's own bits, asserted below, so a mask goes into epoll_ctl() and comes back out of
  * epoll_wait() untouched.
  *
- * kqueue is for a development host - macOS, where the same UI runs in a window - and it differs
- * from epoll in the three ways the code below is shaped around. Reading and writing are separate
- * filters, so a mask becomes zero, one or two registrations and changing it is a diff. One
- * descriptor that is both readable and writable comes back as two events, so a batch is merged
- * per source before anything is dispatched, and a callback is still called once with the union
- * as it is under epoll. And end-of-file is a flag on a filter rather than an event of its own, so
- * it is mapped onto what epoll would have said; see kqueue_mask().
+ * On macOS, kqueue, which differs from epoll in the three ways the code below is shaped around.
+ * Reading and writing are separate filters, so a mask becomes zero, one or two registrations and
+ * changing it is a diff. One descriptor that is both readable and writable comes back as two
+ * events, so a batch is merged per source before anything is dispatched, and a callback is still
+ * called once with the union as it is under epoll. And end-of-file is a flag on a filter rather
+ * than an event of its own, so it is mapped onto what epoll would have said; see kqueue_mask().
+ *
+ * On Windows there is no descriptor to poll. A source is a waitable HANDLE, a timer or an event
+ * held behind an integer token, or a socket whose readiness WSAEventSelect() turns into one. The
+ * wait is WaitForMultipleObjects() over them all, which caps a loop at MAXIMUM_WAIT_OBJECTS;
+ * INKWELL_LOOP_MAX_SOURCES is below that.
  */
 #if defined(_WIN32)
 #elif defined(__linux__)

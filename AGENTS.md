@@ -5,8 +5,10 @@ says how to work in it.
 
 ## The one-paragraph version
 
-inkwell is the systems layer under [inkcell](https://github.com/mcereal/inkcell). C17, Linux
-(and macOS as a development host), no threads, one loop - epoll on Linux, kqueue on macOS. Six
+inkwell is a single-threaded C runtime for small native programs that talk to devices and
+networks; [inkcell](https://github.com/mcereal/inkcell) is the UI toolkit that stands on it, and a
+headless program uses it alone. C17, no threads, one loop, three target systems - epoll on Linux,
+kqueue on macOS, waitable handles on Windows. All three ship; none is a development host. Six
 areas: `base/` (the leaves), `runtime/` (the loop, the signals, the crash report), `codec/`
 (bytes in, bytes out), `net/` (one hostname, one socket, one TLS session, one request), `ble/`
 (one Bluetooth LE central), `io/` (the serial ports the system has). Arrows point down and
@@ -65,6 +67,12 @@ header's source by *filename*, never by path.
   `base/fd.h` for a timer, a wake, a pipe or a socket rather than calling `timerfd_create()`,
   `eventfd()`, `pipe2()` or `SOCK_NONBLOCK` itself. Those compile on Linux and nowhere else, and
   the macOS CI job is the thing that notices.
+- **A platform gap refuses; it does not disappear.** Where a system has no backend yet, the area
+  compiles a `<name>_unavailable.c` beside `<name>.c` and picks it in `CMakeLists.txt`: the header
+  is unchanged, every symbol links, every call reports itself unavailable. An `#ifdef _WIN32`
+  around a public declaration is the wrong fix - it moves the platform question into every
+  caller. Closing a gap is swapping that file for a real backend and updating the platform table
+  in `README.md`.
 - **No application vocabulary.** Not in code, not in comments. Say "a peer", "a protocol", "a
   transport". The day a comment in here says "the radio" is the day this stopped being a
   platform layer.

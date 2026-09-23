@@ -4,7 +4,7 @@
  * ioctl()'s request argument, in whatever type the libc in front of us declares it.
  *
  * The two disagree: glibc's second parameter is `unsigned long`, musl's - which the release
- * build links against - is `int`. Darwin's libc, on a development host, sides with glibc. That is
+ * build links against - is `int`. Darwin's libc sides with glibc. That is
  * invisible for most requests and not for the ones whose encoding sets the high bit: every
  * _IOR/_IOW code with a direction of "read" does, so EVIOCGBIT, EVIOCGNAME, HCIGETCONNLIST and the
  * USBDEVFS verbs all arrive as constants above INT_MAX. Handed straight to musl they are an

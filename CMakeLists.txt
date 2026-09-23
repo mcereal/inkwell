@@ -157,8 +157,8 @@ if(NOT WIN32)
     target_compile_definitions(inkwell PUBLIC _POSIX_C_SOURCE=200809L _DEFAULT_SOURCE)
 endif()
 
-# macOS is a development host, not a target: the loop is kqueue there, the device-only halves of
-# the layers above compile out, and the same UI runs in a window. _POSIX_C_SOURCE on Darwin
+# macOS: the loop is kqueue there, and the areas with a system backend pick Darwin's own (IOKit,
+# CoreBluetooth) below. _POSIX_C_SOURCE on Darwin
 # *hides* everything that is not POSIX - kqueue's timer flags, mkdtemp(), SO_NOSIGPIPE - where on
 # Linux _DEFAULT_SOURCE puts the rest back, and _DARWIN_C_SOURCE is Darwin's spelling of that.
 if(APPLE)
