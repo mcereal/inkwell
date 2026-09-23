@@ -50,6 +50,76 @@ static bool probe_pair(int fds[2]) {
     return true;
 }
 
+static int stream_test_ready(int fd, uint32_t events, void *userdata) {
+    (void)fd;
+    (void)events;
+    (void)userdata;
+    return 0;
+}
+
+INKWELL_TEST_CASE(stream_file_watch_uses_descriptor_for_updates_and_close, unit) {
+    const char *failure = NULL;
+    int fds[2];
+    INKWELL_TEST_FAIL_IF(!probe_pair(fds), "could not make a socket pair");
+
+    struct inkwell_loop loop;
+    if (inkwell_loop_init(&loop) != 0) {
+        (void)close(fds[0]);
+        (void)close(fds[1]);
+        record_failure(test_name, "loop should initialize");
+        return;
+    }
+    struct inkwell_stream_slot slots[1];
+    uint8_t queue[1];
+    struct inkwell_stream stream;
+    (void)inkwell_stream_init(&stream, "test", slots, 1U, queue, sizeof queue);
+    if (inkwell_stream_open(&stream, fds[0], INKWELL_STREAM_FILE, &loop, stream_test_ready, NULL) !=
+        0) {
+        failure = "file descriptor should register";
+        goto done;
+    }
+
+    /* Fill the outgoing buffer so send() must arm OUT on the registered descriptor. */
+    uint8_t fill[4096] = {0};
+    while (write(fds[0], fill, sizeof fill) > 0) {
+    }
+    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        failure = "nonblocking socket should fill";
+        goto done;
+    }
+    const uint8_t byte = 1U;
+    if (inkwell_stream_send(&stream, &byte, 1U, 0U) != 0 || inkwell_stream_queued(&stream) != 1U) {
+        failure = "blocked write should stay queued";
+        goto done;
+    }
+    bool out_armed = false;
+    for (int i = 0; i < INKWELL_LOOP_MAX_SOURCES; ++i) {
+        if (loop.sources[i].active && loop.sources[i].fd == fds[0]) {
+            out_armed = (loop.sources[i].events & INKWELL_LOOP_OUT) != 0U;
+        }
+    }
+    if (!out_armed) {
+        failure = "OUT should be armed on the file descriptor";
+        goto done;
+    }
+done:
+    if (inkwell_stream_is_open(&stream)) {
+        inkwell_stream_close(&stream);
+        if (inkwell_loop_remove_fd(&loop, fds[0]) != -ENOENT && failure == NULL) {
+            failure = "close should remove the file descriptor watch";
+        }
+    } else {
+        (void)close(fds[0]);
+    }
+    (void)close(fds[1]);
+    inkwell_loop_shutdown(&loop);
+    if (failure != NULL) {
+        record_failure(test_name, failure);
+    } else {
+        record_success(test_name);
+    }
+}
+
 INKWELL_TEST_CASE(stream_round_trips_bytes, unit) {
     int fds[2];
     INKWELL_TEST_FAIL_IF(!probe_pair(fds), "could not make a socket pair");

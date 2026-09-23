@@ -242,10 +242,11 @@ int inkwell_stream_open(struct inkwell_stream *stream, int fd, enum inkwell_stre
 
     int token = -1;
     if (loop != NULL) {
-        token = inkwell_loop_add_fd(loop, fd, INKWELL_LOOP_IN, callback, userdata);
-        if (token < 0) {
-            return token;
+        const int added = inkwell_loop_add_fd(loop, fd, INKWELL_LOOP_IN, callback, userdata);
+        if (added < 0) {
+            return added;
         }
+        token = fd;
     }
 
     stream->fd = fd;
