@@ -108,6 +108,11 @@ struct inkwell_fetch_conn {
     /* ---- where the body goes */
     int out_fd;
     uint64_t out_written;
+
+    /* Why the connection failed, when it did - see inkwell_fetch_result.failure. Cleared at the
+       start of every hop and on every connect that succeeds, so a request that got past a dead
+       address and then drew a 404 does not report the dead address. */
+    struct inkwell_net_failure failure;
     char *body;
     size_t body_len;
 
@@ -175,12 +180,17 @@ static void fetch_complete(struct inkwell_fetch *fetch, enum inkwell_fetch_outco
         conn->body_len = 0U;
     }
 
+    const bool connection_failed = outcome == INKWELL_FETCH_NETWORK ||
+                                   outcome == INKWELL_FETCH_TLS ||
+                                   outcome == INKWELL_FETCH_TIMED_OUT;
     const struct inkwell_fetch_result result = {
         .outcome = outcome,
         .status = inkwell_http_response_head_done(&conn->response) ? conn->response.status : 0,
         .body = conn->body,
         .len = conn->body_len,
         .detail = conn->detail,
+        .failure = connection_failed ? conn->failure : (struct inkwell_net_failure){0},
+        .host = conn->url.host,
     };
     if (conn->on_done != NULL) {
         conn->on_done(conn->userdata, &result);
@@ -202,6 +212,29 @@ static void fetch_fail(struct inkwell_fetch *fetch, enum inkwell_fetch_outcome o
     vsnprintf(conn->detail, sizeof conn->detail, format, args);
     va_end(args);
     fetch_complete(fetch, outcome);
+}
+
+/* Records why the connection failed, for the result. The detail string is still the log's. */
+static void fetch_note(struct inkwell_fetch_conn *conn, enum inkwell_net_reason reason,
+                       int detail) {
+    conn->failure.reason = reason;
+    conn->failure.detail = detail;
+}
+
+/*
+ * Records why a read or write on an established session failed. The TLS client has already
+ * sorted it: -ENOTCONN is the peer finishing (close_notify, or a bare EOF), -ECONNRESET the peer
+ * tearing it down, and -EPROTO the session itself failing - a record that would not decrypt or
+ * parse - which is a TLS failure with the library's code behind it, not the peer closing.
+ */
+static void fetch_note_session(struct inkwell_fetch_conn *conn, int rc) {
+    if (rc == -EPROTO) {
+        fetch_note(conn, INKWELL_NET_TLS, inkwell_tls_client_error_code(&conn->tls));
+    } else if (rc == -ENOTCONN) {
+        fetch_note(conn, INKWELL_NET_CLOSED, 0);
+    } else {
+        fetch_note(conn, inkwell_net_reason_from_errno(rc), rc);
+    }
 }
 
 /* ---- the body --------------------------------------------------------------------------- */
@@ -358,6 +391,7 @@ static bool fetch_on_head(struct inkwell_fetch *fetch) {
 static void fetch_on_close(struct inkwell_fetch *fetch, int rc) {
     struct inkwell_fetch_conn *const conn = fetch->conn;
     const bool clean = rc == -ENOTCONN;
+    fetch_note_session(conn, rc);
     if (!inkwell_http_response_head_done(&conn->response)) {
         fetch_fail(fetch, INKWELL_FETCH_NETWORK, "%s closed before replying: %s", conn->url.host,
                    clean ? "close_notify" : inkwell_tls_client_error(&conn->tls));
@@ -447,6 +481,7 @@ static void fetch_send(struct inkwell_fetch *fetch) {
             return;
         }
         if (rc < 0) {
+            fetch_note_session(conn, rc);
             fetch_fail(fetch, INKWELL_FETCH_NETWORK, "sending to %s: %s", conn->url.host,
                        inkwell_tls_client_error(&conn->tls));
             return;
@@ -465,6 +500,7 @@ static void fetch_handshake(struct inkwell_fetch *fetch) {
         return;
     }
     if (rc < 0) {
+        fetch_note(conn, INKWELL_NET_TLS, inkwell_tls_client_error_code(&conn->tls));
         fetch_fail(fetch, INKWELL_FETCH_TLS, "%s: %s", conn->url.host,
                    inkwell_tls_client_error(&conn->tls));
         return;
@@ -499,6 +535,7 @@ static void fetch_connected(struct inkwell_fetch *fetch) {
         error = errno;
     }
     if (error != 0) {
+        fetch_note(conn, inkwell_net_reason_from_errno(error), -error);
         snprintf(conn->detail, sizeof conn->detail, "connecting to %s: %s", conn->url.host,
                  strerror(error));
         fetch_drop_socket(fetch, conn);
@@ -507,11 +544,13 @@ static void fetch_connected(struct inkwell_fetch *fetch) {
     }
     /* This family works on this network; the next hop and the next request try it first. */
     fetch->preferred_family = conn->addresses[conn->address_next - 1U].address.ss_family;
+    fetch_note(conn, INKWELL_NET_OK, 0);
     /* Checked against the URL's host, not the address it resolved to: a certificate is issued
        for a name. The override is read per request, so a test can set it around one. */
     const int started =
         inkwell_tls_client_start(&conn->tls, conn->fd, conn->url.host, inkwell_tls_ca_override());
     if (started < 0) {
+        fetch_note(conn, INKWELL_NET_TLS, inkwell_tls_client_error_code(&conn->tls));
         fetch_fail(fetch, INKWELL_FETCH_TLS, "%s: %s", conn->url.host,
                    inkwell_tls_client_error(&conn->tls));
         return;
@@ -555,19 +594,23 @@ static bool fetch_open(struct inkwell_fetch *fetch, const struct inkwell_resolve
     struct inkwell_fetch_conn *const conn = fetch->conn;
     const int fd = inkwell_fd_socket(address->address.ss_family, SOCK_STREAM, 0);
     if (fd < 0) {
+        fetch_note(conn, inkwell_net_reason_from_errno(fd), fd);
         snprintf(conn->detail, sizeof conn->detail, "socket: %s", strerror(-fd));
         return false;
     }
     if (connect(fd, (const struct sockaddr *)&address->address, address->len) < 0 &&
         errno != EINPROGRESS) {
+        fetch_note(conn, inkwell_net_reason_from_errno(errno), -errno);
         snprintf(conn->detail, sizeof conn->detail, "connecting to %s: %s", conn->url.host,
                  strerror(errno));
         close(fd);
         return false;
     }
     conn->fd = fd;
-    if (inkwell_loop_add_fd(fetch->loop, fd, (uint32_t)(INKWELL_LOOP_IN | INKWELL_LOOP_OUT),
-                            fetch_on_fd, fetch) < 0) {
+    const int added = inkwell_loop_add_fd(
+        fetch->loop, fd, (uint32_t)(INKWELL_LOOP_IN | INKWELL_LOOP_OUT), fetch_on_fd, fetch);
+    if (added < 0) {
+        fetch_note(conn, INKWELL_NET_UNREACHABLE, added);
         snprintf(conn->detail, sizeof conn->detail, "no room on the loop for %s", conn->url.host);
         fetch_drop_socket(fetch, conn);
         return false;
@@ -614,6 +657,12 @@ static void fetch_on_resolved(void *userdata, const struct inkwell_resolve_resul
         return;
     }
     if (result->outcome != INKWELL_RESOLVE_OK || result->address_count == 0U) {
+        /* A lookup that succeeded with nothing in it is a name with no address record. */
+        fetch_note(conn,
+                   result->outcome == INKWELL_RESOLVE_OK
+                       ? INKWELL_NET_UNKNOWN_HOST
+                       : inkwell_net_reason_from_resolve(result->outcome),
+                   result->error);
         fetch_fail(fetch, INKWELL_FETCH_NETWORK, "could not resolve %s (%s)", conn->url.host,
                    result->outcome == INKWELL_RESOLVE_NOT_FOUND   ? "no such name"
                    : result->outcome == INKWELL_RESOLVE_TIMED_OUT ? "timed out"
@@ -652,6 +701,7 @@ static void fetch_hop(struct inkwell_fetch *fetch) {
     struct inkwell_fetch_conn *const conn = fetch->conn;
     conn->phase = FETCH_RESOLVING;
     conn->head_seen = false;
+    fetch_note(conn, INKWELL_NET_OK, 0);
     conn->address_count = 0U;
     conn->address_next = 0U;
     inkwell_http_response_init(&conn->response, conn->method == INKWELL_FETCH_HEAD);
@@ -664,6 +714,7 @@ static void fetch_hop(struct inkwell_fetch *fetch) {
                 inkwell_resolve_start(&fetch->resolve, fetch->connect_host, fetch->connect_port,
                                       fetch_on_resolved, fetch, fetch->now_ms);
             if (started < 0) {
+                fetch_note(conn, INKWELL_NET_LOOKUP_FAILED, started);
                 fetch_fail(fetch, INKWELL_FETCH_NETWORK, "could not start a lookup for %s: %s",
                            fetch->connect_host, strerror(-started));
             }
@@ -681,6 +732,7 @@ static void fetch_hop(struct inkwell_fetch *fetch) {
     const int started = inkwell_resolve_start(&fetch->resolve, conn->url.host, conn->url.port,
                                               fetch_on_resolved, fetch, fetch->now_ms);
     if (started < 0) {
+        fetch_note(conn, INKWELL_NET_LOOKUP_FAILED, started);
         fetch_fail(fetch, INKWELL_FETCH_NETWORK, "could not start a lookup for %s: %s",
                    conn->url.host, strerror(-started));
     }
@@ -818,10 +870,15 @@ void inkwell_fetch_tick(struct inkwell_fetch *fetch, uint64_t now_ms) {
     }
     if (now_ms >= conn->deadline_ms) {
         /* The caller knows which step this was and says so itself. */
+        fetch_note(conn,
+                   conn->phase == FETCH_RESOLVING ? INKWELL_NET_LOOKUP_TIMED_OUT
+                                                  : INKWELL_NET_TIMED_OUT,
+                   0);
         fetch_fail(fetch, INKWELL_FETCH_TIMED_OUT, "%s did not finish in time", conn->url.host);
         return;
     }
     if (conn->phase == FETCH_CONNECTING && now_ms >= conn->attempt_deadline_ms) {
+        fetch_note(conn, INKWELL_NET_TIMED_OUT, -ETIMEDOUT);
         snprintf(conn->detail, sizeof conn->detail, "connecting to %s: no answer in %u ms",
                  conn->url.host, FETCH_CONNECT_ATTEMPT_MS);
         fetch_drop_socket(fetch, conn);

@@ -157,7 +157,7 @@ static void mqtt_fail_own(struct inkwell_mqtt_client *proxy, enum inkwell_mqtt_r
 static void mqtt_fail_tls(struct inkwell_mqtt_client *proxy) {
     if (!mqtt_has_failure(proxy)) {
         proxy->failure.net.reason = INKWELL_NET_TLS;
-        proxy->failure.net.detail = 0;
+        proxy->failure.net.detail = inkwell_tls_client_error_code(&proxy->tls);
     }
     mqtt_back_off(proxy, inkwell_net_reason_name(INKWELL_NET_TLS),
                   inkwell_tls_client_error(&proxy->tls));

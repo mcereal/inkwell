@@ -82,6 +82,7 @@ static const char k_decoy_pem[] =
 
 struct https_fixture_conn {
     mbedtls_ssl_context *ssl;
+    int fd;
     const struct https_fixture_request *request;
     bool cut;
 };
@@ -182,6 +183,13 @@ void https_fixture_cut(struct https_fixture_conn *conn) {
     conn->cut = true;
 }
 
+void https_fixture_send_raw(struct https_fixture_conn *conn, const void *data, size_t len) {
+    if (!conn->cut) {
+        (void)send(conn->fd, data, len, MSG_NOSIGNAL);
+    }
+    conn->cut = true;
+}
+
 /* ---- the child ------------------------------------------------------------------------- */
 
 /* Case-blind: which header a line is. Returns the value, trimmed at the front, or NULL. */
@@ -263,7 +271,7 @@ static void fixture_serve(mbedtls_ssl_context *ssl, int fd, const char *log_path
         return;
     }
     fixture_log(log_path, &request);
-    struct https_fixture_conn conn = {.ssl = ssl, .request = &request, .cut = false};
+    struct https_fixture_conn conn = {.ssl = ssl, .fd = fd, .request = &request, .cut = false};
     handler(userdata, &request, &conn);
     if (!conn.cut) {
         (void)mbedtls_ssl_close_notify(ssl);

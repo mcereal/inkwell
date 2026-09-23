@@ -64,6 +64,9 @@ struct inkwell_tls_client {
      */
     bool more_to_read;
     char error[160];
+    /* The library's own negative code behind `error`, or 0 - see inkwell_tls_client_error_code().
+     */
+    int error_code;
 };
 
 /* True when this build has Mbed TLS at all. False makes every start() fail with -ENOTSUP. */
@@ -166,6 +169,15 @@ void inkwell_tls_client_stop(struct inkwell_tls_client *tls);
 
 /* Why the last call failed, in words, or "" when none has. Never NULL. */
 const char *inkwell_tls_client_error(const struct inkwell_tls_client *tls);
+
+/*
+ * The TLS library's own code behind inkwell_tls_client_error() - negative, and only meaningful
+ * to someone with the library's headers open - or 0 when the last failure had none: nothing has
+ * failed, the peer closed cleanly, or the failure was this file's (a root that would not load)
+ * rather than the library's. It is what `detail` carries for INKWELL_NET_TLS in net/reason.h:
+ * worth logging, never worth showing.
+ */
+int inkwell_tls_client_error_code(const struct inkwell_tls_client *tls);
 
 #ifdef __cplusplus
 }

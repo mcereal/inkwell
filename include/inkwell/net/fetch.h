@@ -30,6 +30,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "inkwell/net/reason.h"
 #include "inkwell/net/resolve.h"
 
 #ifdef __cplusplus
@@ -61,7 +62,8 @@ enum inkwell_fetch_outcome {
     INKWELL_FETCH_HTTP_STATUS,
     INKWELL_FETCH_TOO_LARGE, /* the reply passed the request's cap and was abandoned */
     /* The server could not be reached, or the connection dropped before the reply was whole: a
-       name that does not resolve, a refused connect, a body cut short. Worth retrying. */
+       name that does not resolve, a refused connect, a body cut short. Worth retrying - and
+       which of those it was is `failure` on the result, for a caller that says more than that. */
     INKWELL_FETCH_NETWORK,
     /* The server's certificate did not verify, or the handshake failed. Not worth retrying. */
     INKWELL_FETCH_TLS,
@@ -87,6 +89,24 @@ struct inkwell_fetch_result {
     /* What went wrong, in words, for a log line - a TLS error, an errno, what was wrong with the
        reply. "" on success; never NULL. Valid for the duration of the callback. */
     const char *detail;
+    /*
+     * Why the connection failed, as a reason and a number (net/reason.h), for NETWORK, TLS and
+     * TIMED_OUT; INKWELL_NET_OK for every other outcome, whose problem was the reply rather than
+     * the way to it.
+     *
+     * The outcome says what the reader would do next and this says what happened, and they are
+     * kept apart for the reason net/reason.h gives: NETWORK is one thing to do about four things
+     * that happened - no such host, a lookup that failed, a refused connect, a peer that hung up
+     * - and a caller that wants to say which cannot work it back out of the outcome. A TIMED_OUT
+     * request is LOOKUP_TIMED_OUT while the name was still being looked up and TIMED_OUT after.
+     */
+    struct inkwell_net_failure failure;
+    /*
+     * The host of the hop the request ended on. Not the subject net/reason.h says a caller
+     * already has: after a redirect it is a host the caller never named, and a failure there is
+     * a failure somewhere else. Never NULL; valid for the duration of the callback.
+     */
+    const char *host;
 };
 
 /*

@@ -100,5 +100,9 @@ void https_fixture_reply_file(struct https_fixture_conn *conn,
                               const struct https_fixture_request *request, const char *path);
 /* Ends the connection without a close_notify, the way a dropped network does. */
 void https_fixture_cut(struct https_fixture_conn *conn);
+/* Writes `data` on the socket underneath the session, as bytes the client will read as a TLS
+   record - one it cannot decrypt - and ends the connection. For a session that fails after the
+   handshake rather than a peer that closes. */
+void https_fixture_send_raw(struct https_fixture_conn *conn, const void *data, size_t len);
 
 #endif /* INKWELL_HAVE_TLS */
