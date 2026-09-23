@@ -15,7 +15,8 @@ extern "C" {
  * reports what the USB tree says - the interface, the device it hangs off, whether that device
  * is a UART bridge or its own MCU's USB, whether a mass-storage interface sits beside it - and
  * never what the device *is for*. Which of these ports is worth talking to is the caller's
- * question.
+ * question. Until a native Windows backend exists, the scan reports no ports and device
+ * operations return -ENOTSUP; the mock seam remains available for tests.
  *
  * Two of the calls exist for kernels without CDC-ACM - the TrimUI Brick's TinaLinux 4.9 has
  * CONFIG_USB_ACM off and no module, so a native-USB device enumerates and then gets no driver

@@ -56,6 +56,18 @@ int inkwell_fd_close(int fd) {
 #endif
 }
 
+int inkwell_fd_dup(int fd) {
+    if (fd < 0) {
+        return -EINVAL;
+    }
+#if defined(_WIN32)
+    const int duplicate = _dup(fd);
+#else
+    const int duplicate = dup(fd);
+#endif
+    return duplicate >= 0 ? duplicate : -errno;
+}
+
 int inkwell_fd_to_socket(int fd, inkwell_socket *out) {
     if (fd < 0 || out == NULL) {
         return -EINVAL;

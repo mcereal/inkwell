@@ -28,7 +28,8 @@ struct inkwell_usb_storage_target {
 
 /* Find the block device published by the USB device containing a serial interface. An interface
    id such as "2-1:1.2" is matched at its device directory, "2-1", so a sibling storage interface
-   is found too. Returns -ENOENT while the block device has not appeared. Linux sysfs only. */
+   is found too. Returns -ENOENT while the block device has not appeared. Linux sysfs only;
+   until a native backend exists, Windows returns -ENOTSUP for discovery and writes. */
 int inkwell_usb_storage_find(const struct inkwell_serial_port_info *port,
                              struct inkwell_usb_storage_target *out);
 
