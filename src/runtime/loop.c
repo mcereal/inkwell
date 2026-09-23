@@ -54,7 +54,7 @@ _Static_assert(INKWELL_LOOP_HUP == EPOLLHUP, "INKWELL_LOOP_HUP is EPOLLHUP");
 static long socket_events(uint32_t events) {
     long wanted = FD_CLOSE;
     if ((events & INKWELL_LOOP_IN) != 0U) {
-        wanted |= FD_READ;
+        wanted |= FD_READ | FD_ACCEPT;
     }
     if ((events & INKWELL_LOOP_OUT) != 0U) {
         wanted |= FD_WRITE | FD_CONNECT;
@@ -483,7 +483,7 @@ static uint32_t socket_ready(struct inkwell_loop_source *source) {
         return INKWELL_LOOP_ERR;
     }
     uint32_t mask = 0U;
-    if ((reported.lNetworkEvents & FD_READ) != 0) {
+    if ((reported.lNetworkEvents & (FD_READ | FD_ACCEPT)) != 0) {
         mask |= INKWELL_LOOP_IN;
     }
     if ((reported.lNetworkEvents & (FD_WRITE | FD_CONNECT)) != 0) {
@@ -496,6 +496,7 @@ static uint32_t socket_ready(struct inkwell_loop_source *source) {
         long event;
         int bit;
     } errors[] = {{FD_READ, FD_READ_BIT},
+                  {FD_ACCEPT, FD_ACCEPT_BIT},
                   {FD_WRITE, FD_WRITE_BIT},
                   {FD_CONNECT, FD_CONNECT_BIT},
                   {FD_CLOSE, FD_CLOSE_BIT}};

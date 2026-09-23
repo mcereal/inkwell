@@ -15,6 +15,22 @@ struct socket_observation {
     uint32_t events;
 };
 
+struct accept_observation {
+    SOCKET listener;
+    SOCKET peer;
+    uint32_t events;
+};
+
+static int socket_on_accept(int token, uint32_t events, void *userdata) {
+    (void)token;
+    struct accept_observation *seen = (struct accept_observation *)userdata;
+    seen->events |= events;
+    if ((events & INKWELL_LOOP_IN) != 0U) {
+        seen->peer = accept(seen->listener, NULL, NULL);
+    }
+    return 0;
+}
+
 static int socket_on_read(int token, uint32_t events, void *userdata) {
     (void)token;
     struct socket_observation *seen = (struct socket_observation *)userdata;
@@ -52,16 +68,29 @@ INKWELL_TEST_CASE(loop_windows_socket_read_and_remove, unit) {
     if (getsockname(listener, (struct sockaddr *)&address, &address_len) != 0) {
         goto done;
     }
+    if (inkwell_loop_init(&loop) != 0) {
+        goto done;
+    }
+    loop_open = true;
+    struct accept_observation accepted = {.listener = listener, .peer = INVALID_SOCKET};
+    const int listen_token = inkwell_loop_add_socket(&loop, (uintptr_t)listener, INKWELL_LOOP_IN,
+                                                     socket_on_accept, &accepted);
+    if (listen_token < 0) {
+        goto done;
+    }
     client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (client == INVALID_SOCKET ||
         connect(client, (struct sockaddr *)&address, sizeof address) != 0) {
         goto done;
     }
-    peer = accept(listener, NULL, NULL);
-    if (peer == INVALID_SOCKET || inkwell_loop_init(&loop) != 0) {
+    const int accepted_run = inkwell_loop_run(&loop, 100);
+    peer = accepted.peer;
+    if (accepted_run != 0 || peer == INVALID_SOCKET || (accepted.events & INKWELL_LOOP_IN) == 0U) {
         goto done;
     }
-    loop_open = true;
+    if (inkwell_loop_remove_fd(&loop, listen_token) != 0) {
+        goto done;
+    }
     struct socket_observation seen = {.socket = client};
     const int token =
         inkwell_loop_add_socket(&loop, (uintptr_t)client, INKWELL_LOOP_IN, socket_on_read, &seen);
