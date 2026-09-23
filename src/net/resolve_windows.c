@@ -7,6 +7,7 @@
 #include "../runtime/windows_handle.h"
 
 #include <errno.h>
+#include <process.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,9 @@ struct resolve_windows_backend {
     PADDRINFOEXW results;
     HANDLE cancel_handle;
     int event_token;
+    wchar_t host[256];
+    wchar_t service[8];
+    ADDRINFOEXW hints;
     bool winsock_started;
     bool timed_out;
 };
@@ -86,15 +90,11 @@ static void resolve_pick(const ADDRINFOEXW *results, struct inkwell_resolve_resu
     }
 }
 
-static void resolve_release(struct inkwell_resolve *resolve) {
-    struct resolve_windows_backend *backend = (struct resolve_windows_backend *)resolve->backend;
+static void resolve_backend_release(struct resolve_windows_backend *backend) {
     if (backend == NULL) {
         return;
     }
     if (backend->event_token >= 0) {
-        if (resolve->loop != NULL) {
-            (void)inkwell_loop_remove_fd(resolve->loop, backend->event_token);
-        }
         inkwell_windows_handle_close(backend->event_token);
     }
     if (backend->results != NULL) {
@@ -104,7 +104,18 @@ static void resolve_release(struct inkwell_resolve *resolve) {
         (void)WSACleanup();
     }
     free(backend);
+}
+
+static void resolve_release(struct inkwell_resolve *resolve) {
+    struct resolve_windows_backend *backend = (struct resolve_windows_backend *)resolve->backend;
+    if (backend == NULL) {
+        return;
+    }
+    if (backend->event_token >= 0 && resolve->loop != NULL) {
+        (void)inkwell_loop_remove_fd(resolve->loop, backend->event_token);
+    }
     resolve->backend = NULL;
+    resolve_backend_release(backend);
 }
 
 static void resolve_complete(struct inkwell_resolve *resolve, int error) {
@@ -161,7 +172,7 @@ int inkwell_resolve_init(struct inkwell_resolve *resolve, struct inkwell_loop *l
     return 0;
 }
 
-static void resolve_cancel_request(struct inkwell_resolve *resolve, bool wait) {
+static void resolve_cancel_request(struct inkwell_resolve *resolve) {
     struct resolve_windows_backend *backend =
         resolve != NULL ? (struct resolve_windows_backend *)resolve->backend : NULL;
     if (backend == NULL) {
@@ -170,9 +181,13 @@ static void resolve_cancel_request(struct inkwell_resolve *resolve, bool wait) {
     if (backend->cancel_handle != NULL) {
         (void)GetAddrInfoExCancel(&backend->cancel_handle);
     }
-    if (wait && backend->overlapped.hEvent != NULL) {
-        (void)WaitForSingleObject(backend->overlapped.hEvent, INFINITE);
-    }
+}
+
+static unsigned __stdcall resolve_reap_cancelled(void *userdata) {
+    struct resolve_windows_backend *backend = (struct resolve_windows_backend *)userdata;
+    (void)WaitForSingleObject(backend->overlapped.hEvent, INFINITE);
+    resolve_backend_release(backend);
+    return 0U;
 }
 
 void inkwell_resolve_shutdown(struct inkwell_resolve *resolve) {
@@ -199,18 +214,16 @@ int inkwell_resolve_start(struct inkwell_resolve *resolve, const char *host, uin
         return -EBUSY;
     }
 
-    wchar_t wide_host[256];
-    wchar_t wide_service[8];
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, host, -1, wide_host,
-                            (int)(sizeof wide_host / sizeof wide_host[0])) == 0 ||
-        swprintf(wide_service, sizeof wide_service / sizeof wide_service[0], L"%u",
-                 (unsigned)port) < 0) {
-        return -EINVAL;
-    }
-
     struct resolve_windows_backend *backend = calloc(1U, sizeof *backend);
     if (backend == NULL) {
         return -ENOMEM;
+    }
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, host, -1, backend->host,
+                            (int)(sizeof backend->host / sizeof backend->host[0])) == 0 ||
+        swprintf(backend->service, sizeof backend->service / sizeof backend->service[0], L"%u",
+                 (unsigned)port) < 0) {
+        free(backend);
+        return -EINVAL;
     }
     backend->event_token = -1;
     WSADATA winsock;
@@ -234,12 +247,10 @@ int inkwell_resolve_start(struct inkwell_resolve *resolve, const char *host, uin
         return error;
     }
 
-    ADDRINFOEXW hints;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-    hints.ai_flags = AI_ADDRCONFIG;
+    backend->hints.ai_family = AF_UNSPEC;
+    backend->hints.ai_socktype = SOCK_STREAM;
+    backend->hints.ai_protocol = IPPROTO_TCP;
+    backend->hints.ai_flags = AI_ADDRCONFIG;
 
     resolve->backend = backend;
     resolve->deadline_ms = now_ms + INKWELL_RESOLVE_TIMEOUT_MS;
@@ -254,9 +265,9 @@ int inkwell_resolve_start(struct inkwell_resolve *resolve, const char *host, uin
         return added;
     }
 
-    const int started =
-        GetAddrInfoExW(wide_host, wide_service, NS_DNS, NULL, &hints, &backend->results, NULL,
-                       &backend->overlapped, NULL, &backend->cancel_handle);
+    const int started = GetAddrInfoExW(backend->host, backend->service, NS_DNS, NULL,
+                                       &backend->hints, &backend->results, NULL,
+                                       &backend->overlapped, NULL, &backend->cancel_handle);
     if (started != 0 && started != WSA_IO_PENDING) {
         resolve_release(resolve);
         resolve->on_done = NULL;
@@ -277,7 +288,7 @@ void inkwell_resolve_tick(struct inkwell_resolve *resolve, uint64_t now_ms) {
     struct resolve_windows_backend *backend = (struct resolve_windows_backend *)resolve->backend;
     if (!backend->timed_out) {
         backend->timed_out = true;
-        resolve_cancel_request(resolve, false);
+        resolve_cancel_request(resolve);
     }
 }
 
@@ -285,9 +296,22 @@ void inkwell_resolve_cancel(struct inkwell_resolve *resolve) {
     if (resolve == NULL || resolve->backend == NULL) {
         return;
     }
-    resolve_cancel_request(resolve, true);
-    resolve_release(resolve);
+    struct resolve_windows_backend *backend = (struct resolve_windows_backend *)resolve->backend;
+    resolve_cancel_request(resolve);
+    if (backend->event_token >= 0 && resolve->loop != NULL) {
+        (void)inkwell_loop_remove_fd(resolve->loop, backend->event_token);
+    }
+    resolve->backend = NULL;
     resolve->on_done = NULL;
     resolve->userdata = NULL;
     resolve->deadline_ms = 0U;
+
+    const uintptr_t thread = _beginthreadex(NULL, 0U, resolve_reap_cancelled, backend, 0U, NULL);
+    if (thread != 0U) {
+        (void)CloseHandle((HANDLE)thread);
+        return;
+    }
+    /* Resource exhaustion is already exceptional, and blocking the loop would make it worse.
+       Keep the request storage alive for the OS rather than risking a use-after-free. */
+    inkwell_log_error("resolve", "Could not start the cancelled-lookup reaper; leaking its state");
 }
