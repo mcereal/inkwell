@@ -222,6 +222,17 @@ int inkwell_ble_find_adapter(struct inkwell_ble_central *central, char *name, si
 /* Sent, not waited for. -ENETDOWN at once when the stack already knows the adapter is off. */
 int inkwell_ble_start_discovery(struct inkwell_ble_central *central);
 int inkwell_ble_stop_discovery(struct inkwell_ble_central *central);
+/*
+ * Whether the adapter is scanning, as the stack reports it: 1 or 0, -EAGAIN while it has not
+ * said, -ENOSYS where there is no stack.
+ *
+ * The two calls above are sent and not waited for, so 0 from them means only that the stack
+ * was asked. A refusal arrives later and is logged - BlueZ answers InProgress to a start that
+ * lands on a stop still settling - and a caller keeping its own "scanning" flag from the request
+ * then believes in a scan that is not running, hears nothing, and waits on it forever. Compare
+ * this against what was asked for and ask again when they disagree.
+ */
+int inkwell_ble_discovering(struct inkwell_ble_central *central);
 /* Every peripheral the stack holds that advertises `service_uuid`, compared without regard to
    case. Read from memory, except that on BlueZ the first lookup of any kind after bluetoothd
    starts fetches its object tree, bounded to a second. */
@@ -295,6 +306,26 @@ int inkwell_ble_find_characteristic(struct inkwell_ble_central *central, const c
 int inkwell_ble_characteristic_mtu(struct inkwell_ble_central *central, const char *handle,
                                    uint16_t *out_mtu);
 /*
+ * Whether the kernel still holds an LE link to `address`, in any state: 1 or 0.
+ *
+ * Not the same question as Device1.Connected. A disconnect the controller never confirms leaves
+ * the kernel's connection in BT_DISCONN after bluetoothd has already said the device is gone, and
+ * every Connect to it then fails at once with "Operation already in progress" - seen on Linux 4.9
+ * when one peripheral is disconnected and another connected within a second or two. A caller
+ * moving from one peripheral to another can ask this before connecting, and tell that failure
+ * from a peripheral that is merely busy. -ENOTSUP where the stack does not expose it; on Linux it
+ * opens a raw HCI socket, which needs CAP_NET_RAW.
+ */
+int inkwell_ble_link_held(struct inkwell_ble_central *central, const char *address);
+/*
+ * Resets the adapter's controller (HCIDEVRESET, what `hciconfig hci0 reset` does), which drops
+ * every link and every connection the kernel was holding - the one way out of the state above.
+ * Everything on the adapter goes down with it, discovery included, so it is a last resort.
+ * -ENOTSUP where the stack does not expose it; on Linux it needs CAP_NET_RAW for the raw HCI
+ * socket it is sent on as well as CAP_NET_ADMIN for the reset itself.
+ */
+int inkwell_ble_reset_adapter(struct inkwell_ble_central *central);
+/*
  * Asks the controller to change the interval on the open LE link to `address`.
  *
  * Call this after selecting an adapter and opening the connection. BlueZ has no D-Bus method for
@@ -363,8 +394,17 @@ struct inkwell_ble_mock_config {
     const char *adapter_name;
     int request_connection_interval_result;
     unsigned *request_connection_interval_calls;
+    /* inkwell_ble_link_held(): the first `link_held_queries` answers are 1, then 0 - a kernel
+       that takes that many polls to let go of a link. */
+    unsigned link_held_queries;
+    unsigned *link_held_calls;
+    int reset_adapter_result;
+    unsigned *reset_adapter_calls;
     int start_discovery_result;
     int stop_discovery_result;
+    /* A start that answers 0 and does not scan: BlueZ's InProgress refusal, which arrives after
+       the call has returned. inkwell_ble_discovering() is the only thing that tells. */
+    bool start_discovery_lost;
     /* Bumped on every start/stop, so a test can assert that a scan is down for the whole of a
        link rather than only that it was stopped once. */
     unsigned *start_discovery_calls;

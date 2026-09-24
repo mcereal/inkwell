@@ -58,6 +58,7 @@
 #define INKWELL_HCI_CHANNEL_RAW 0
 #define INKWELL_HCI_LE_LINK 0x80U
 #define INKWELL_HCIGETCONNINFO _IOR('H', 213, int)
+#define INKWELL_HCIDEVRESET _IOW('H', 203, int)
 
 struct inkwell_sockaddr_hci {
     sa_family_t hci_family;
@@ -109,6 +110,8 @@ struct bluez_object {
     unsigned interfaces;
     /* Adapter1: Powered, when bluetoothd has said it is false. */
     bool powered_off;
+    /* Adapter1: Discovering, as bluetoothd last said - not as it was last asked. */
+    bool discovering;
     /* Device1 */
     char address[INKWELL_BLE_ADDRESS_MAX];
     char name[INKWELL_BLE_NAME_MAX];
@@ -240,6 +243,12 @@ static int error_to_errno(const char *name, const char *message) {
         if (strcasecmp(message, "Page Timeout") == 0 ||
             strcasecmp(message, "Connection Timeout") == 0) {
             return -ETIMEDOUT;
+        }
+        /* The kernel's EALREADY, which Device1.Connect passes on under org.bluez.Error.Failed:
+           it still holds a connection to the device - possibly one it never finished tearing
+           down; see inkwell_ble_link_held(). */
+        if (strcasecmp(message, "Operation already in progress") == 0) {
+            return -EALREADY;
         }
     }
     return -EIO;
@@ -670,6 +679,10 @@ static int object_set_property(struct bluez_object *object, unsigned interface, 
             dbus_bool_t powered = TRUE;
             dbus_message_iter_get_basic(variant, &powered);
             object->powered_off = powered == FALSE;
+        } else if (strcmp(name, "Discovering") == 0 && type == DBUS_TYPE_BOOLEAN) {
+            dbus_bool_t discovering = FALSE;
+            dbus_message_iter_get_basic(variant, &discovering);
+            object->discovering = discovering != FALSE;
         }
         return 0;
     }
@@ -1177,6 +1190,30 @@ int inkwell_ble_backend_discovery(struct inkwell_ble_central *central, bool on) 
         return -ENOMEM;
     }
     return send_logged(central, message, method);
+}
+
+/* From the copy, which bluetoothd's PropertiesChanged keeps current: the answer to a
+   Start/StopDiscovery that was sent and not waited for, whichever way it went. */
+int inkwell_ble_backend_discovering(struct inkwell_ble_central *central) {
+    if (connection_of(central) == NULL) {
+        return -ENOTCONN;
+    }
+    struct bluez_backend *backend = backend_of(central);
+    /* Asked before anything has looked the tree up: fetch it without waiting, since this is a
+       question a caller polls, and the reply carries Discovering with everything else. */
+    if (!backend->objects_loaded) {
+        if (backend->objects_serial == 0U) {
+            objects_request(central);
+        }
+        return -EAGAIN;
+    }
+    const char *adapter =
+        central->adapter[0] != '\0' ? central->adapter : INKWELL_BLUEZ_DEFAULT_ADAPTER;
+    const struct bluez_object *object = object_find(backend, adapter);
+    if (object == NULL) {
+        return -EAGAIN;
+    }
+    return object->discovering ? 1 : 0;
 }
 
 int inkwell_ble_backend_connect(struct inkwell_ble_central *central, const char *address,
@@ -1758,15 +1795,12 @@ int inkwell_ble_backend_mtu(struct inkwell_ble_central *central, const char *han
     return result;
 }
 
-int inkwell_ble_backend_request_connection_interval(
-    struct inkwell_ble_central *central, const char *address,
-    const struct inkwell_ble_connection_parameters *parameters) {
-    uint8_t bdaddr[6];
-    const int dev_id = inkwell_ble_hci_adapter_index(central->adapter);
-    if (dev_id < 0 || !inkwell_ble_hci_parse_address(address, bdaddr)) {
+/* A raw HCI socket bound to the adapter in use, its index in *dev_id; a negative errno if not. */
+static int hci_socket(const struct inkwell_ble_central *central, int *dev_id) {
+    *dev_id = inkwell_ble_hci_adapter_index(central->adapter);
+    if (*dev_id < 0) {
         return -EINVAL;
     }
-
     const int fd = inkwell_fd_socket(AF_BLUETOOTH, SOCK_RAW, INKWELL_BTPROTO_HCI);
     if (fd < 0) {
         return fd;
@@ -1774,24 +1808,83 @@ int inkwell_ble_backend_request_connection_interval(
     struct inkwell_sockaddr_hci bind_to;
     memset(&bind_to, 0, sizeof bind_to);
     bind_to.hci_family = AF_BLUETOOTH;
-    bind_to.hci_dev = (unsigned short)dev_id;
+    bind_to.hci_dev = (unsigned short)*dev_id;
     bind_to.hci_channel = INKWELL_HCI_CHANNEL_RAW;
     if (bind(fd, (const struct sockaddr *)&bind_to, sizeof bind_to) < 0) {
         const int error = -errno;
         close(fd);
         return error;
     }
+    return fd;
+}
 
+/* The kernel's LE connection to `bdaddr`: 0 with *info filled, -ENOENT when it holds none. */
+static int hci_connection(int fd, const uint8_t bdaddr[6],
+                          struct inkwell_hci_connection_info *info) {
     struct inkwell_hci_connection_info_request request;
     memset(&request, 0, sizeof request);
     memcpy(request.bdaddr, bdaddr, sizeof request.bdaddr);
     request.type = INKWELL_HCI_LE_LINK;
     if (ioctl(fd, inkwell_ioctl_request_of(INKWELL_HCIGETCONNINFO), &request) < 0) {
-        const int error = -errno;
-        close(fd);
-        return error;
+        return -errno;
     }
-    const uint16_t handle = request.info[0].handle;
+    *info = request.info[0];
+    return 0;
+}
+
+int inkwell_ble_backend_link_held(struct inkwell_ble_central *central, const char *address) {
+    uint8_t bdaddr[6];
+    if (!inkwell_ble_hci_parse_address(address, bdaddr)) {
+        return -EINVAL;
+    }
+    int dev_id = -1;
+    const int fd = hci_socket(central, &dev_id);
+    if (fd < 0) {
+        return fd;
+    }
+    struct inkwell_hci_connection_info info;
+    const int result = hci_connection(fd, bdaddr, &info);
+    close(fd);
+    if (result == -ENOENT) {
+        return 0;
+    }
+    return result < 0 ? result : 1;
+}
+
+int inkwell_ble_backend_reset_adapter(struct inkwell_ble_central *central) {
+    int dev_id = -1;
+    const int fd = hci_socket(central, &dev_id);
+    if (fd < 0) {
+        return fd;
+    }
+    const int result =
+        ioctl(fd, inkwell_ioctl_request_of(INKWELL_HCIDEVRESET), dev_id) < 0 ? -errno : 0;
+    close(fd);
+    if (result == 0) {
+        inkwell_log_warn("ble", "Reset the controller behind %s", central->adapter);
+    }
+    return result;
+}
+
+int inkwell_ble_backend_request_connection_interval(
+    struct inkwell_ble_central *central, const char *address,
+    const struct inkwell_ble_connection_parameters *parameters) {
+    uint8_t bdaddr[6];
+    if (!inkwell_ble_hci_parse_address(address, bdaddr)) {
+        return -EINVAL;
+    }
+    int dev_id = -1;
+    const int fd = hci_socket(central, &dev_id);
+    if (fd < 0) {
+        return fd;
+    }
+    struct inkwell_hci_connection_info info;
+    const int found = hci_connection(fd, bdaddr, &info);
+    if (found < 0) {
+        close(fd);
+        return found;
+    }
+    const uint16_t handle = info.handle;
 
     uint8_t packet[INKWELL_BLE_HCI_CONNECTION_UPDATE_LEN];
     const size_t len =

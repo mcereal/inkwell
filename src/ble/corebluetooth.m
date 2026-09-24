@@ -700,6 +700,17 @@ int inkwell_ble_backend_discovery(struct inkwell_ble_central *central, bool on) 
     return result;
 }
 
+/* The scan here is started and stopped synchronously on the queue, so the flag is the stack's
+   state rather than a request still in flight. */
+int inkwell_ble_backend_discovering(struct inkwell_ble_central *central) {
+    IWCentral *object = object_of(central);
+    __block int result = 0;
+    dispatch_sync(object.queue, ^{
+      result = object.scanning ? 1 : 0;
+    });
+    return result;
+}
+
 int inkwell_ble_backend_list_by_service(struct inkwell_ble_central *central,
                                         const char *service_uuid,
                                         struct inkwell_ble_device *devices, size_t capacity,
@@ -940,6 +951,17 @@ int inkwell_ble_backend_mtu(struct inkwell_ble_central *central, const char *han
     }
     *out_mtu = (uint16_t)(payload + 3U);
     return 0;
+}
+
+int inkwell_ble_backend_link_held(struct inkwell_ble_central *central, const char *address) {
+    (void)central;
+    (void)address;
+    return -ENOTSUP;
+}
+
+int inkwell_ble_backend_reset_adapter(struct inkwell_ble_central *central) {
+    (void)central;
+    return -ENOTSUP;
 }
 
 int inkwell_ble_backend_request_connection_interval(

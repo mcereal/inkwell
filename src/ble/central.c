@@ -48,6 +48,7 @@ struct inkwell_ble_mock_state {
     /* Whether a scan is up, for config.connect_needs_the_scan. Starts false: a mock that has
        never been told to scan has nothing that could have been dropped by stopping one. */
     bool scanning;
+    unsigned link_held_calls; /* when the config gives no counter of its own */
     unsigned write_calls;
     unsigned pair_polls;
     /* A subscribe in flight, and the calls it has answered -EAGAIN to. */
@@ -129,6 +130,7 @@ static void mock_reset_counters(void) {
     g_mock.connect_polls = 0U;
     g_mock.connected_polls = 0U;
     g_mock.scanning = false;
+    g_mock.link_held_calls = 0U;
     g_mock.write_calls = 0U;
     g_mock.subscribing = false;
     g_mock.subscribe_polls = 0U;
@@ -173,7 +175,7 @@ static int mock_discovery(bool on) {
         if (g_mock.config.start_discovery_calls != NULL) {
             ++*g_mock.config.start_discovery_calls;
         }
-        if (g_mock.config.start_discovery_result == 0) {
+        if (g_mock.config.start_discovery_result == 0 && !g_mock.config.start_discovery_lost) {
             g_mock.scanning = true;
         }
         return g_mock.config.start_discovery_result;
@@ -488,6 +490,44 @@ int inkwell_ble_find_adapter(struct inkwell_ble_central *central, char *name, si
     return inkwell_ble_backend_find_adapter(central, name, name_len);
 }
 
+int inkwell_ble_link_held(struct inkwell_ble_central *central, const char *address) {
+    if (central == NULL || address == NULL || address[0] == '\0') {
+        return -EINVAL;
+    }
+    if (scripted()) {
+        unsigned calls = 0U;
+        if (g_mock.config.link_held_calls != NULL) {
+            calls = ++*g_mock.config.link_held_calls;
+        } else {
+            calls = ++g_mock.link_held_calls;
+        }
+        return calls <= g_mock.config.link_held_queries ? 1 : 0;
+    }
+    if (!central->open) {
+        return -ENOTCONN;
+    }
+    return inkwell_ble_backend_link_held(central, address);
+}
+
+int inkwell_ble_reset_adapter(struct inkwell_ble_central *central) {
+    if (central == NULL) {
+        return -EINVAL;
+    }
+    if (scripted()) {
+        if (g_mock.config.reset_adapter_calls != NULL) {
+            ++*g_mock.config.reset_adapter_calls;
+        }
+        if (g_mock.config.reset_adapter_result == 0) {
+            g_mock.scanning = false; /* a reset takes discovery down with everything else */
+        }
+        return g_mock.config.reset_adapter_result;
+    }
+    if (!central->open) {
+        return -ENOTCONN;
+    }
+    return inkwell_ble_backend_reset_adapter(central);
+}
+
 int inkwell_ble_request_connection_interval(
     struct inkwell_ble_central *central, const char *address,
     const struct inkwell_ble_connection_parameters *parameters) {
@@ -518,6 +558,19 @@ int inkwell_ble_start_discovery(struct inkwell_ble_central *central) {
         return -ENOTCONN;
     }
     return inkwell_ble_backend_discovery(central, true);
+}
+
+int inkwell_ble_discovering(struct inkwell_ble_central *central) {
+    if (central == NULL) {
+        return -EINVAL;
+    }
+    if (scripted()) {
+        return g_mock.scanning ? 1 : 0;
+    }
+    if (!central->open) {
+        return -ENOTCONN;
+    }
+    return inkwell_ble_backend_discovering(central);
 }
 
 int inkwell_ble_stop_discovery(struct inkwell_ble_central *central) {

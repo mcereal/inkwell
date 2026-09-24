@@ -49,6 +49,8 @@ int inkwell_ble_backend_check_ready(struct inkwell_ble_central *central);
 int inkwell_ble_backend_find_adapter(struct inkwell_ble_central *central, char *name,
                                      size_t name_len);
 int inkwell_ble_backend_discovery(struct inkwell_ble_central *central, bool on);
+/* 1 or 0 as the stack reports it, -EAGAIN while it has not said. */
+int inkwell_ble_backend_discovering(struct inkwell_ble_central *central);
 int inkwell_ble_backend_list_by_service(struct inkwell_ble_central *central,
                                         const char *service_uuid,
                                         struct inkwell_ble_device *devices, size_t capacity,
@@ -92,6 +94,8 @@ int inkwell_ble_backend_find_characteristic(struct inkwell_ble_central *central,
                                             char *out_handle, size_t out_len);
 int inkwell_ble_backend_mtu(struct inkwell_ble_central *central, const char *handle,
                             uint16_t *out_mtu);
+int inkwell_ble_backend_link_held(struct inkwell_ble_central *central, const char *address);
+int inkwell_ble_backend_reset_adapter(struct inkwell_ble_central *central);
 int inkwell_ble_backend_request_connection_interval(
     struct inkwell_ble_central *central, const char *address,
     const struct inkwell_ble_connection_parameters *parameters);

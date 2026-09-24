@@ -45,6 +45,11 @@ int inkwell_ble_backend_discovery(struct inkwell_ble_central *central, bool on) 
     return -ENOSYS;
 }
 
+int inkwell_ble_backend_discovering(struct inkwell_ble_central *central) {
+    (void)central;
+    return -ENOSYS;
+}
+
 int inkwell_ble_backend_list_by_service(struct inkwell_ble_central *central,
                                         const char *service_uuid,
                                         struct inkwell_ble_device *devices, size_t capacity,
@@ -162,6 +167,17 @@ int inkwell_ble_backend_mtu(struct inkwell_ble_central *central, const char *han
     (void)handle;
     (void)out_mtu;
     return -ENOSYS;
+}
+
+int inkwell_ble_backend_link_held(struct inkwell_ble_central *central, const char *address) {
+    (void)central;
+    (void)address;
+    return -ENOTSUP;
+}
+
+int inkwell_ble_backend_reset_adapter(struct inkwell_ble_central *central) {
+    (void)central;
+    return -ENOTSUP;
 }
 
 int inkwell_ble_backend_request_connection_interval(
