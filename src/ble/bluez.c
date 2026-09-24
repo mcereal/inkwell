@@ -244,6 +244,12 @@ static int error_to_errno(const char *name, const char *message) {
             strcasecmp(message, "Connection Timeout") == 0) {
             return -ETIMEDOUT;
         }
+        /* The kernel's EALREADY, which Device1.Connect passes on under org.bluez.Error.Failed:
+           it still holds a connection to the device - possibly one it never finished tearing
+           down; see inkwell_ble_link_held(). */
+        if (strcasecmp(message, "Operation already in progress") == 0) {
+            return -EALREADY;
+        }
     }
     return -EIO;
 }

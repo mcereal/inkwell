@@ -498,7 +498,10 @@ static const char *test_subscribe(DBusConnection *server, struct inkwell_loop *l
     unsigned values = 0U;
     inkwell_ble_set_notification_handler(client, notified, &values);
     const char *failure = NULL;
-    for (unsigned pass = 0U; pass < 2U && failure == NULL; ++pass) {
+    /* Pass 1 is the kernel's EALREADY as Device1.Connect and StartNotify both pass it on. */
+    static const char *const refusals[] = {"Not paired", "Operation already in progress"};
+    static const int errnos[] = {-EACCES, -EALREADY, 0};
+    for (unsigned pass = 0U; pass < 3U && failure == NULL; ++pass) {
         if (inkwell_ble_subscribe(client, CHARACTERISTIC_PATH) != -EAGAIN) {
             failure = "subscribe did not yield";
             break;
@@ -511,8 +514,8 @@ static const char *test_subscribe(DBusConnection *server, struct inkwell_loop *l
             break;
         }
         DBusMessage *reply =
-            pass == 0U ? dbus_message_new_error(call, "org.bluez.Error.Failed", "Not paired")
-                       : dbus_message_new_method_return(call);
+            pass < 2U ? dbus_message_new_error(call, "org.bluez.Error.Failed", refusals[pass])
+                      : dbus_message_new_method_return(call);
         dbus_message_unref(call);
         emit(server, reply);
         int result = -EAGAIN;
@@ -520,7 +523,7 @@ static const char *test_subscribe(DBusConnection *server, struct inkwell_loop *l
             inkwell_loop_run(loop, 1);
             result = inkwell_ble_subscribe(client, CHARACTERISTIC_PATH);
         }
-        if (result != (pass == 0U ? -EACCES : 0))
+        if (result != errnos[pass])
             failure = "the StartNotify reply was not returned as the right errno";
     }
     if (failure == NULL) {
