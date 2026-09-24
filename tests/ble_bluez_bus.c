@@ -322,6 +322,33 @@ static bool request_name(DBusConnection *server) {
 }
 
 /*
+ * Whether the adapter is scanning is read from the copy, and asking before anything else has
+ * looked the tree up fetches it - without waiting, since it is a question callers poll - rather
+ * than answering "not yet" for ever.
+ */
+static const char *test_discovering_fetches_the_tree(DBusConnection *server,
+                                                     struct inkwell_loop *loop,
+                                                     struct inkwell_ble_central *client) {
+    if (inkwell_ble_discovering(client) != -EAGAIN)
+        return "discovering answered before the tree was ever fetched";
+    DBusMessage *call = request_named(server, loop, "GetManagedObjects");
+    if (call == NULL)
+        return "asking whether the adapter scans did not fetch the tree";
+    DBusMessage *reply = dbus_message_new_method_return(call);
+    dbus_message_unref(call);
+    DBusMessageIter iter, objects;
+    dbus_message_iter_init_append(reply, &iter);
+    dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{oa{sa{sv}}}", &objects);
+    append_object(&objects, "/org/bluez/hci0", "org.bluez.Adapter1", NULL);
+    dbus_message_iter_close_container(&iter, &objects);
+    emit(server, reply);
+    settle(server, loop, client);
+    if (inkwell_ble_discovering(client) != 0)
+        return "discovering was not answered from the fetched tree";
+    return NULL;
+}
+
+/*
  * A listing reads a copy of the object tree, fetched once and kept current by signals - never a
  * GetManagedObjects per call. A bluetoothd that restarts is fetched again, without blocking, and
  * one that is gone empties the copy rather than leaving its devices listed.
@@ -672,6 +699,9 @@ int main(void) {
     }
     if (call != NULL) {
         dbus_message_unref(call);
+    }
+    if (failure == NULL) {
+        failure = test_discovering_fetches_the_tree(server, &loop, &client);
     }
     if (failure == NULL) {
         failure = test_operations(server, &loop, &client, input_fd, &inputs);

@@ -1198,11 +1198,18 @@ int inkwell_ble_backend_discovering(struct inkwell_ble_central *central) {
     if (connection_of(central) == NULL) {
         return -ENOTCONN;
     }
+    struct bluez_backend *backend = backend_of(central);
+    /* Asked before anything has looked the tree up: fetch it without waiting, since this is a
+       question a caller polls, and the reply carries Discovering with everything else. */
+    if (!backend->objects_loaded) {
+        if (backend->objects_serial == 0U) {
+            objects_request(central);
+        }
+        return -EAGAIN;
+    }
     const char *adapter =
         central->adapter[0] != '\0' ? central->adapter : INKWELL_BLUEZ_DEFAULT_ADAPTER;
-    struct bluez_backend *backend = backend_of(central);
-    const struct bluez_object *object =
-        backend->objects_loaded ? object_find(backend, adapter) : NULL;
+    const struct bluez_object *object = object_find(backend, adapter);
     if (object == NULL) {
         return -EAGAIN;
     }

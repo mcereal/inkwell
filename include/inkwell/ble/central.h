@@ -306,6 +306,26 @@ int inkwell_ble_find_characteristic(struct inkwell_ble_central *central, const c
 int inkwell_ble_characteristic_mtu(struct inkwell_ble_central *central, const char *handle,
                                    uint16_t *out_mtu);
 /*
+ * Whether the kernel still holds an LE link to `address`, in any state: 1 or 0.
+ *
+ * Not the same question as Device1.Connected. A disconnect the controller never confirms leaves
+ * the kernel's connection in BT_DISCONN after bluetoothd has already said the device is gone, and
+ * every Connect to it then fails at once with "Operation already in progress" - seen on Linux 4.9
+ * when one peripheral is disconnected and another connected within a second or two. A caller
+ * moving from one peripheral to another can ask this before connecting, and tell that failure
+ * from a peripheral that is merely busy. -ENOTSUP where the stack does not expose it; on Linux it
+ * opens a raw HCI socket, which needs CAP_NET_RAW.
+ */
+int inkwell_ble_link_held(struct inkwell_ble_central *central, const char *address);
+/*
+ * Resets the adapter's controller (HCIDEVRESET, what `hciconfig hci0 reset` does), which drops
+ * every link and every connection the kernel was holding - the one way out of the state above.
+ * Everything on the adapter goes down with it, discovery included, so it is a last resort.
+ * -ENOTSUP where the stack does not expose it; on Linux it needs CAP_NET_RAW for the raw HCI
+ * socket it is sent on as well as CAP_NET_ADMIN for the reset itself.
+ */
+int inkwell_ble_reset_adapter(struct inkwell_ble_central *central);
+/*
  * Asks the controller to change the interval on the open LE link to `address`.
  *
  * Call this after selecting an adapter and opening the connection. BlueZ has no D-Bus method for
@@ -314,24 +334,6 @@ int inkwell_ble_characteristic_mtu(struct inkwell_ble_central *central, const ch
  * awaited. -ENOENT means there is no open LE link to the address; -ENOTSUP means this stack does
  * not expose interval control. On Linux the raw HCI socket also requires CAP_NET_RAW.
  */
-/*
- * Whether the kernel still holds an LE link to `address`, in any state: 1 or 0.
- *
- * Not the same question as Device1.Connected. A disconnect the controller never confirms leaves
- * the kernel's connection in BT_DISCONN after bluetoothd has already said the device is gone, and
- * every Connect to it then fails at once with "Operation already in progress" (Linux 4.9 on the
- * TrimUI Brick, switching radios within a second or two). A caller moving from one peripheral to
- * another can ask this before connecting, and tell that failure from a peripheral that is merely
- * busy. -ENOTSUP where the stack does not expose it; on Linux the HCI socket needs CAP_NET_RAW.
- */
-int inkwell_ble_link_held(struct inkwell_ble_central *central, const char *address);
-/*
- * Resets the adapter's controller (HCIDEVRESET, what `hciconfig hci0 reset` does), which drops
- * every link and every connection the kernel was holding - the one way out of the state above.
- * Everything on the adapter goes down with it, discovery included, so it is a last resort.
- * -ENOTSUP where the stack does not expose it; on Linux it needs CAP_NET_ADMIN.
- */
-int inkwell_ble_reset_adapter(struct inkwell_ble_central *central);
 int inkwell_ble_request_connection_interval(
     struct inkwell_ble_central *central, const char *address,
     const struct inkwell_ble_connection_parameters *parameters);
