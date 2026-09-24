@@ -11,12 +11,14 @@ extern "C" {
 /*
  * USB serial ports: which ones there are, what is on the other end of each, and opening one.
  *
- * The scan reads sysfs on Linux and the I/O Registry on macOS, and elsewhere finds nothing. It
- * reports what the USB tree says - the interface, the device it hangs off, whether that device
- * is a UART bridge or its own MCU's USB, whether a mass-storage interface sits beside it - and
- * never what the device *is for*. Which of these ports is worth talking to is the caller's
- * question. Until a native Windows backend exists, the scan reports no ports and device
- * operations return -ENOTSUP; the mock seam remains available for tests.
+ * The scan reads sysfs on Linux, the I/O Registry on macOS and SetupAPI on Windows. It reports
+ * what the USB tree says - the interface, the device it hangs off, whether that device is a UART
+ * bridge or its own MCU's USB, whether a mass-storage interface sits beside it - and never what
+ * the device *is for*. Which of these ports is worth talking to is the caller's question.
+ *
+ * On Windows the descriptor an open returns is not the CRT's: a COM port has no non-blocking
+ * one, so it is the loop's token for the port's event, and inkwell_fd_read/_write/_close are
+ * what reach it. Hand it to the loop and a stream as any other; do not hand it to _read().
  *
  * Two of the calls exist for kernels without CDC-ACM - the TrimUI Brick's TinaLinux 4.9 has
  * CONFIG_USB_ACM off and no module, so a native-USB device enumerates and then gets no driver
@@ -47,9 +49,9 @@ enum inkwell_serial_kind {
 
 struct inkwell_serial_port_info {
     /* Stable across a replug into the same socket: the sysfs interface name ("1-1:1.1") on
-       Linux, the callout path on macOS. */
+       Linux, the callout path on macOS, the device instance ID on Windows. */
     char id[64];
-    /* "/dev/ttyUSB0"; empty until the interface has a driver bound. */
+    /* "/dev/ttyUSB0", or "COM4"; empty until the interface has a driver bound. */
     char path[64];
     /* The USB product string, falling back to "USB serial VVVV:PPPP". */
     char name[64];
@@ -84,7 +86,8 @@ size_t inkwell_serial_scan(struct inkwell_serial_port_info *out, size_t capacity
    `bound` once its tty appears. Returns 0 when it has, -EAGAIN while it has not - call again
    with the same `port` until it answers something else, and give up when the caller's patience
    does (a second has always been plenty) - or a negative errno. A port that is already bound
-   answers 0 at once. Linux only; -ENOTSUP elsewhere. */
+   answers 0 at once, which on Windows is every port the scan reports. Linux only otherwise;
+   -ENOTSUP elsewhere. */
 int inkwell_serial_bind(struct inkwell_serial_port_info *port);
 
 /* One CDC SET_CONTROL_LINE_STATE to the port's control interface through usbfs. Returns 0,

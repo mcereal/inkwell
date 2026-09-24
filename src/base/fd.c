@@ -19,12 +19,55 @@
 #include <unistd.h>
 #endif
 
+#if defined(_WIN32)
+#define INKWELL_FD_DEVICES 8
+
+struct fd_device {
+    int fd;
+    const struct inkwell_fd_device_ops *ops;
+    void *context;
+};
+
+/* Only the loop's thread reads or writes a device, as it is the only thread that reads or writes
+   anything else here. An unused entry has no ops. */
+static struct fd_device s_devices[INKWELL_FD_DEVICES];
+
+static struct fd_device *fd_device_find(int fd) {
+    for (size_t i = 0; i < INKWELL_FD_DEVICES; ++i) {
+        if (s_devices[i].ops != NULL && s_devices[i].fd == fd) {
+            return &s_devices[i];
+        }
+    }
+    return NULL;
+}
+
+int inkwell_fd_attach_device(int fd, const struct inkwell_fd_device_ops *ops, void *context) {
+    if (fd < 0 || ops == NULL || ops->read == NULL || ops->write == NULL || ops->close == NULL) {
+        return -EINVAL;
+    }
+    if (fd_device_find(fd) != NULL) {
+        return -EEXIST;
+    }
+    for (size_t i = 0; i < INKWELL_FD_DEVICES; ++i) {
+        if (s_devices[i].ops == NULL) {
+            s_devices[i] = (struct fd_device){.fd = fd, .ops = ops, .context = context};
+            return 0;
+        }
+    }
+    return -ENOSPC;
+}
+#endif
+
 int inkwell_fd_read(int fd, void *bytes, size_t len) {
     if (fd < 0 || (bytes == NULL && len != 0U)) {
         return -EINVAL;
     }
     const unsigned count = (unsigned)(len > INT_MAX ? INT_MAX : len);
 #if defined(_WIN32)
+    const struct fd_device *device = fd_device_find(fd);
+    if (device != NULL) {
+        return device->ops->read(device->context, bytes, count);
+    }
     const int result = _read(fd, bytes, count);
 #else
     const int result = (int)read(fd, bytes, count);
@@ -38,6 +81,10 @@ int inkwell_fd_write(int fd, const void *bytes, size_t len) {
     }
     const unsigned count = (unsigned)(len > INT_MAX ? INT_MAX : len);
 #if defined(_WIN32)
+    const struct fd_device *device = fd_device_find(fd);
+    if (device != NULL) {
+        return device->ops->write(device->context, bytes, count);
+    }
     const int result = _write(fd, bytes, count);
 #else
     const int result = (int)write(fd, bytes, count);
@@ -50,6 +97,12 @@ int inkwell_fd_close(int fd) {
         return -EINVAL;
     }
 #if defined(_WIN32)
+    struct fd_device *device = fd_device_find(fd);
+    if (device != NULL) {
+        const struct fd_device detached = *device;
+        *device = (struct fd_device){0};
+        return detached.ops->close(detached.context);
+    }
     return _close(fd) == 0 ? 0 : -errno;
 #else
     return close(fd) == 0 ? 0 : -errno;
@@ -61,6 +114,9 @@ int inkwell_fd_dup(int fd) {
         return -EINVAL;
     }
 #if defined(_WIN32)
+    if (fd_device_find(fd) != NULL) {
+        return -ENOTSUP;
+    }
     const int duplicate = _dup(fd);
 #else
     const int duplicate = dup(fd);

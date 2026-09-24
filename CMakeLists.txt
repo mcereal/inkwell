@@ -69,9 +69,9 @@ if(WIN32)
     # unavailable until it can adopt native Winsock handles. MQTT is on inkwell_socket and
     # builds everywhere; only its TLS option is refused here, by tls.c.
     set(INKWELL_FETCH_SOURCE src/net/fetch_unavailable.c)
-    # Device discovery and raw block writes need native Windows backends. Until then they
-    # refuse explicitly, without pulling POSIX ioctl, termios, mount or fork into the build.
-    set(INKWELL_SERIAL_SOURCE src/io/serial_unavailable.c)
+    # Serial ports are SetupAPI and overlapped COM I/O. Raw block writes still need a native
+    # backend, and refuse explicitly without pulling POSIX ioctl, mount or fork into the build.
+    set(INKWELL_SERIAL_SOURCE src/io/serial_windows.c)
     set(INKWELL_USB_STORAGE_SOURCE src/io/usb_storage_unavailable.c)
 endif()
 
@@ -147,6 +147,8 @@ target_include_directories(inkwell PUBLIC
 target_link_libraries(inkwell PRIVATE inkwell_options)
 if(WIN32)
     target_link_libraries(inkwell PUBLIC ws2_32)
+    # The serial scan: SetupAPI finds the COM ports, the configuration manager their USB facts.
+    target_link_libraries(inkwell PRIVATE setupapi cfgmgr32)
 endif()
 add_library(inkwell::inkwell ALIAS inkwell)
 
