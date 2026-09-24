@@ -105,8 +105,9 @@ per system, so nothing above this layer names any of them.
 | Crash report | yes | yes | yes |
 | Codecs | yes | yes | yes |
 | TCP connector, byte stream | yes | yes | yes, over Winsock |
-| Resolver | forked child | forked child | refuses |
-| TLS, HTTPS, MQTT | Mbed TLS | Mbed TLS | refuses |
+| Resolver | forked child | forked child | overlapped `GetAddrInfoExW` |
+| TLS, HTTPS | Mbed TLS | Mbed TLS | refuses |
+| MQTT client | yes, TLS through Mbed TLS | yes, TLS through Mbed TLS | yes, over Winsock; refuses TLS |
 | Bluetooth LE central | BlueZ over libdbus-1 | CoreBluetooth | refuses |
 | Serial ports | sysfs, plus the usbfs line-state request for a native-USB device | I/O Registry | refuses |
 | USB mass-storage writes | sysfs, `/proc/mounts` | finds no drive | refuses |

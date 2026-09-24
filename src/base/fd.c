@@ -81,6 +81,19 @@ int inkwell_fd_to_socket(int fd, inkwell_socket *out) {
 #endif
 }
 
+int inkwell_socket_to_fd(inkwell_socket socket, int *out) {
+    if (socket == INKWELL_SOCKET_INVALID || out == NULL) {
+        return -EINVAL;
+    }
+    *out = -1;
+#if defined(_WIN32)
+    return -ENOTSUP;
+#else
+    *out = (int)socket;
+    return 0;
+#endif
+}
+
 #if defined(_WIN32)
 static INIT_ONCE kWinsockOnce = INIT_ONCE_STATIC_INIT;
 static int s_winsock_error = EIO;
@@ -253,7 +266,7 @@ int inkwell_socket_open(int domain, int type, int protocol, inkwell_socket *out)
         return -socket_error(WSAGetLastError());
     }
     u_long nonblocking = 1;
-    if (ioctlsocket(socket, FIONBIO, &nonblocking) != 0) {
+    if (ioctlsocket(socket, (long)FIONBIO, &nonblocking) != 0) {
         const int error = socket_error(WSAGetLastError());
         (void)closesocket(socket);
         return -error;

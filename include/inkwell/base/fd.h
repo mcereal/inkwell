@@ -63,6 +63,9 @@ typedef uintptr_t inkwell_socket;
 /* POSIX accepts a socket as an int descriptor; Windows does not. This compatibility bridge
  * returns -ENOTSUP on Windows so an int cannot accidentally truncate a native SOCKET. */
 int inkwell_fd_to_socket(int fd, inkwell_socket *out);
+/* The same bridge the other way, for an API that still takes an int descriptor. -ENOTSUP on
+ * Windows, with `*out` left at -1, for the same reason. */
+int inkwell_socket_to_fd(inkwell_socket socket, int *out);
 
 int inkwell_socket_open(int domain, int type, int protocol, inkwell_socket *out);
 int inkwell_socket_close(inkwell_socket socket);

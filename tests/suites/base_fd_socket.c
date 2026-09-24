@@ -53,6 +53,28 @@ INKWELL_TEST_CASE(socket_rejects_invalid_handle, unit) {
                          "recv should reject an invalid socket");
     INKWELL_TEST_FAIL_IF(inkwell_socket_pending_error(invalid) != -EINVAL,
                          "SO_ERROR should reject an invalid socket");
+    int fd = 0;
+    INKWELL_TEST_FAIL_IF(inkwell_socket_to_fd(invalid, &fd) != -EINVAL,
+                         "the descriptor bridge should reject an invalid socket");
+    record_success(test_name);
+}
+
+INKWELL_TEST_CASE(socket_bridges_to_a_descriptor_only_where_one_is_a_socket, unit) {
+    inkwell_socket socket = INKWELL_SOCKET_INVALID;
+    INKWELL_TEST_FAIL_IF(inkwell_socket_open(AF_INET, SOCK_STREAM, 0, &socket) != 0,
+                         "socket should open");
+    int fd = 0;
+    const int bridged = inkwell_socket_to_fd(socket, &fd);
+    inkwell_socket back = INKWELL_SOCKET_INVALID;
+#if defined(_WIN32)
+    const bool held = bridged == -ENOTSUP && fd == -1;
+#else
+    const bool held = bridged == 0 && fd >= 0 && inkwell_fd_to_socket(fd, &back) == 0 &&
+                      back == socket;
+#endif
+    (void)back;
+    (void)inkwell_socket_close(socket);
+    INKWELL_TEST_FAIL_IF(!held, "a SOCKET must not narrow to an int; a POSIX socket round-trips");
     record_success(test_name);
 }
 

@@ -71,6 +71,10 @@ static void windows_broker_close(struct windows_broker *broker) {
     }
 }
 
+static bool windows_mqtt_waiting(const struct inkwell_mqtt_client *client) {
+    return inkwell_mqtt_client_state(client) == INKWELL_MQTT_CLIENT_WAITING;
+}
+
 /* One turn of everything the client needs to make progress. */
 static void windows_mqtt_turn(struct inkwell_loop *loop, struct inkwell_mqtt_client *client,
                               uint64_t *now_ms) {
@@ -82,8 +86,8 @@ static void windows_mqtt_turn(struct inkwell_loop *loop, struct inkwell_mqtt_cli
 /* Accepts the client's connection and reads one whole packet from it, turning the loop between
    attempts: the client only writes when the loop runs, so a blocking read would deadlock. */
 static bool windows_broker_read(struct windows_broker *broker, struct inkwell_loop *loop,
-                                struct inkwell_mqtt_client *client, uint64_t *now_ms,
-                                uint8_t *type, uint8_t *body, size_t *body_len) {
+                                struct inkwell_mqtt_client *client, uint64_t *now_ms, uint8_t *type,
+                                uint8_t *body, size_t *body_len) {
     for (unsigned turn = 0U; turn < 200U; ++turn) {
         if (broker->peer == INVALID_SOCKET) {
             broker->peer = accept((SOCKET)broker->listener, NULL, NULL);
@@ -201,9 +205,11 @@ INKWELL_TEST_CASE(mqtt_windows_session_round_trips_on_native_socket, unit) {
     }
 
     static const uint8_t outbound[] = {'o', 'k'};
+    static const uint8_t expected[] = {0x00U, 0x03U, 'c', '/', 'd', 'o', 'k'};
     if (inkwell_mqtt_client_publish(&client, "c/d", outbound, sizeof outbound, false) != 0 ||
         !windows_broker_read(&broker, &loop, &client, &now_ms, &type, body, &body_len) ||
-        type != 0x30U || body_len != 7U || memcmp(body, "\x00\x03" "c/dok", 7U) != 0) {
+        type != 0x30U || body_len != sizeof expected ||
+        memcmp(body, expected, sizeof expected) != 0) {
         failure = "broker should receive the client's PUBLISH";
         goto done;
     }
@@ -256,9 +262,7 @@ INKWELL_TEST_CASE(mqtt_windows_backs_off_from_a_closed_port, unit) {
         goto done;
     }
     /* Windows retries a refused loopback SYN for about two seconds before it reports one. */
-    for (unsigned turn = 0U;
-         turn < 400U && inkwell_mqtt_client_state(&client) != INKWELL_MQTT_CLIENT_WAITING;
-         ++turn) {
+    for (unsigned turn = 0U; turn < 400U && !windows_mqtt_waiting(&client); ++turn) {
         (void)inkwell_loop_run(&loop, 10);
         inkwell_mqtt_client_tick(&client, now_ms);
     }
@@ -312,9 +316,7 @@ INKWELL_TEST_CASE(mqtt_windows_refuses_tls_without_a_backend, unit) {
         failure = "client should start";
         goto done;
     }
-    for (unsigned turn = 0U;
-         turn < 200U && inkwell_mqtt_client_state(&client) != INKWELL_MQTT_CLIENT_WAITING;
-         ++turn) {
+    for (unsigned turn = 0U; turn < 200U && !windows_mqtt_waiting(&client); ++turn) {
         if (broker.peer == INVALID_SOCKET) {
             broker.peer = accept((SOCKET)broker.listener, NULL, NULL);
         }
