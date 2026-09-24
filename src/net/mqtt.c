@@ -721,13 +721,9 @@ static void mqtt_finish_connect(struct inkwell_mqtt_client *proxy) {
      * certificate is issued for a name, and no broker on the internet has one for an IP - so
      * verifying against the resolved address would fail every TLS connection this client makes.
      */
-    /* The TLS session still runs over an int descriptor. Where a socket cannot become one the
-       bridge leaves -1, and a host like that has no TLS backend to refuse it either: the start
-       below answers -ENOTSUP, which is the refusal by name. */
-    int tls_fd = -1;
-    (void)inkwell_socket_to_fd(proxy->socket, &tls_fd);
+    /* A build without Mbed TLS answers -ENOTSUP, which is the refusal by name. */
     const int started =
-        inkwell_tls_client_start(&proxy->tls, tls_fd, proxy->host, proxy->ca_bundle);
+        inkwell_tls_client_start(&proxy->tls, proxy->socket, proxy->host, proxy->ca_bundle);
     if (started == -ENOTSUP) {
         mqtt_fail_own(proxy, INKWELL_MQTT_REFUSAL_NO_TLS, 0U);
         return;

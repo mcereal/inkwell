@@ -37,16 +37,16 @@ void inkwell_tls_set_roots(const struct inkwell_tls_ca_root *roots, size_t count
     (void)count;
 }
 
-int inkwell_tls_client_start(struct inkwell_tls_client *tls, int fd, const char *hostname,
-                             const char *ca_bundle) {
-    (void)fd;
+int inkwell_tls_client_start(struct inkwell_tls_client *tls, inkwell_socket socket,
+                             const char *hostname, const char *ca_bundle) {
+    (void)socket;
     (void)hostname;
     (void)ca_bundle;
     if (tls == NULL) {
         return -EINVAL;
     }
     memset(tls, 0, sizeof *tls);
-    tls->fd = -1;
+    tls->socket = INKWELL_SOCKET_INVALID;
     inkwell_str_copy(tls->error, sizeof tls->error, "this build has no TLS");
     return -ENOTSUP;
 }
@@ -73,7 +73,7 @@ int inkwell_tls_client_write(struct inkwell_tls_client *tls, const uint8_t *data
 void inkwell_tls_client_stop(struct inkwell_tls_client *tls) {
     if (tls != NULL) {
         tls->state = NULL;
-        tls->fd = -1;
+        tls->socket = INKWELL_SOCKET_INVALID;
     }
 }
 
@@ -95,10 +95,6 @@ int inkwell_tls_client_error_code(const struct inkwell_tls_client *tls) {
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
 #include <psa/crypto.h>
-
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 /*
  * How many session tickets one read() may consume before giving the loop back.
@@ -222,35 +218,38 @@ static void tls_record_error(struct inkwell_tls_client *tls, int code, const cha
 /* ------------------------------------------------------------------ the socket underneath */
 
 /*
- * The two BIO callbacks. These are the only place this file touches the descriptor, and they
- * are what make the whole thing non-blocking: `EAGAIN` becomes Mbed TLS's WANT_READ/WANT_WRITE,
+ * The two BIO callbacks. These are the only place this file touches the socket, and they are
+ * what make the whole thing non-blocking: `EAGAIN` becomes Mbed TLS's WANT_READ/WANT_WRITE,
  * which unwinds all the way back out to the event loop instead of waiting.
  *
- * `send()` with MSG_NOSIGNAL rather than `write()`, for the reason net/stream.h spells out at
- * length: writing to a socket whose peer has gone raises SIGPIPE, whose default disposition
- * kills the process - so a peer that drops off between two turns of the loop would take the
- * process down with it, before any errno this code handles could be returned.
+ * Through inkwell_socket_send() and _recv() rather than the calls themselves, so the session
+ * runs over a Winsock SOCKET as it does over a POSIX descriptor, and so a send suppresses
+ * SIGPIPE for the reason net/stream.h spells out at length: writing to a socket whose peer has
+ * gone raises it, whose default disposition kills the process - so a peer that drops off
+ * between two turns of the loop would take the process down with it, before any errno this code
+ * handles could be returned.
+ *
+ * The socket travels in `ctx` itself. inkwell_socket is pointer-sized on every host, and a
+ * Windows SOCKET would not survive the trip through an int.
  */
 static int tls_bio_send(void *ctx, const unsigned char *buf, size_t len) {
-    const int fd = (int)(intptr_t)ctx;
-    const ssize_t written = send(fd, buf, len, MSG_NOSIGNAL);
+    const int written = inkwell_socket_send((inkwell_socket)(uintptr_t)ctx, buf, len);
     if (written >= 0) {
-        return (int)written;
+        return written;
     }
-    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+    if (written == -EAGAIN || written == -EWOULDBLOCK || written == -EINTR) {
         return MBEDTLS_ERR_SSL_WANT_WRITE;
     }
-    if (errno == EPIPE || errno == ECONNRESET) {
+    if (written == -EPIPE || written == -ECONNRESET || written == -ECONNABORTED) {
         return MBEDTLS_ERR_NET_CONN_RESET;
     }
     return MBEDTLS_ERR_NET_SEND_FAILED;
 }
 
 static int tls_bio_recv(void *ctx, unsigned char *buf, size_t len) {
-    const int fd = (int)(intptr_t)ctx;
-    const ssize_t got = recv(fd, buf, len, 0);
+    const int got = inkwell_socket_recv((inkwell_socket)(uintptr_t)ctx, buf, len);
     if (got > 0) {
-        return (int)got;
+        return got;
     }
     if (got == 0) {
         /* A socket EOF underneath a session that expected more is a truncated connection, not a
@@ -259,10 +258,10 @@ static int tls_bio_recv(void *ctx, unsigned char *buf, size_t len) {
            from "the network went away". */
         return MBEDTLS_ERR_NET_CONN_RESET;
     }
-    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+    if (got == -EAGAIN || got == -EWOULDBLOCK || got == -EINTR) {
         return MBEDTLS_ERR_SSL_WANT_READ;
     }
-    if (errno == ECONNRESET) {
+    if (got == -ECONNRESET || got == -ECONNABORTED) {
         return MBEDTLS_ERR_NET_CONN_RESET;
     }
     return MBEDTLS_ERR_NET_RECV_FAILED;
@@ -315,14 +314,15 @@ static void tls_release(struct inkwell_tls_client *tls) {
     tls->state = NULL;
 }
 
-int inkwell_tls_client_start(struct inkwell_tls_client *tls, int fd, const char *hostname,
-                             const char *ca_bundle) {
-    if (tls == NULL || fd < 0 || hostname == NULL || hostname[0] == '\0') {
+int inkwell_tls_client_start(struct inkwell_tls_client *tls, inkwell_socket socket,
+                             const char *hostname, const char *ca_bundle) {
+    if (tls == NULL || socket == INKWELL_SOCKET_INVALID || hostname == NULL ||
+        hostname[0] == '\0') {
         return -EINVAL;
     }
 
     memset(tls, 0, sizeof *tls);
-    tls->fd = fd;
+    tls->socket = socket;
 
     struct inkwell_tls_state *state = calloc(1U, sizeof *state);
     if (state == NULL) {
@@ -408,9 +408,9 @@ int inkwell_tls_client_start(struct inkwell_tls_client *tls, int fd, const char 
         tls_release(tls);
         return -EIO;
     }
-    /* No timeout callback: the descriptor is watched by the event loop and the deadline belongs
-       to whoever is driving the handshake, not to the library. */
-    mbedtls_ssl_set_bio(&state->ssl, (void *)(intptr_t)fd, tls_bio_send, tls_bio_recv, NULL);
+    /* No timeout callback: the socket is watched by the event loop and the deadline belongs to
+       whoever is driving the handshake, not to the library. */
+    mbedtls_ssl_set_bio(&state->ssl, (void *)(uintptr_t)socket, tls_bio_send, tls_bio_recv, NULL);
     return 0;
 }
 
@@ -526,7 +526,7 @@ void inkwell_tls_client_stop(struct inkwell_tls_client *tls) {
         return;
     }
     tls_release(tls);
-    tls->fd = -1;
+    tls->socket = INKWELL_SOCKET_INVALID;
     tls->wants_write = false;
 }
 
