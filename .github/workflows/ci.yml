@@ -140,7 +140,7 @@ jobs:
       - name: Build
         shell: msys2 {0}
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DPython3_EXECUTABLE="$(command -v python)"
           cmake --build build --target inkwell_windows_net_tests
 
       - name: Test
