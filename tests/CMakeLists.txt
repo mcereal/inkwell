@@ -51,8 +51,8 @@ set(INKWELL_TEST_SUITES
     suites/runtime_wake.c
 )
 if(WIN32)
-    list(APPEND INKWELL_TEST_SUITES suites/net_resolve_windows.c suites/net_tcp_windows.c
-         suites/net_stream_windows.c suites/runtime_windows_socket.c)
+    list(APPEND INKWELL_TEST_SUITES suites/net_mqtt_windows.c suites/net_resolve_windows.c
+         suites/net_tcp_windows.c suites/net_stream_windows.c suites/runtime_windows_socket.c)
 endif()
 
 add_executable(inkwell_tests
@@ -76,7 +76,8 @@ set_tests_properties(inkwell_unit PROPERTIES LABELS unit)
 # runnable independently while those fixtures are ported.
 if(WIN32)
     add_executable(inkwell_windows_net_tests framework/inkwell_test.c
-                   suites/net_resolve_windows.c suites/net_unavailable_windows.c)
+                   suites/net_mqtt_windows.c suites/net_resolve_windows.c
+                   suites/net_unavailable_windows.c)
     target_include_directories(inkwell_windows_net_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(inkwell_windows_net_tests PRIVATE inkwell inkwell_options)
     add_test(NAME inkwell_windows_net COMMAND inkwell_windows_net_tests)

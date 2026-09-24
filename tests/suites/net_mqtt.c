@@ -1258,7 +1258,7 @@ INKWELL_TEST_CASE(mqtt_client_does_not_repeat_a_blocked_ping, unit) {
         goto cleanup;
     }
 
-    client.fd = fds[0];
+    client.socket = (inkwell_socket)fds[0];
     fds[0] = -1; /* the client owns it from here */
     client.state = INKWELL_MQTT_CLIENT_READY;
     client.now_ms = 100U;

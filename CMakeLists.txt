@@ -65,10 +65,10 @@ if(WIN32)
     set(INKWELL_WINDOWS_RUNTIME_SOURCE src/runtime/windows_handle.c)
     set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_windows.c)
     set(INKWELL_RESOLVE_SOURCE src/net/resolve_windows.c)
-    # HTTPS and MQTT still use POSIX socket descriptors. Keep their API callable and
-    # explicitly unavailable until they can adopt native Winsock handles.
+    # HTTPS still uses POSIX socket descriptors. Keep its API callable and explicitly
+    # unavailable until it can adopt native Winsock handles. MQTT is on inkwell_socket and
+    # builds everywhere; only its TLS option is refused here, by tls.c.
     set(INKWELL_FETCH_SOURCE src/net/fetch_unavailable.c)
-    set(INKWELL_MQTT_SOURCE src/net/mqtt_unavailable.c)
     # Device discovery and raw block writes need native Windows backends. Until then they
     # refuse explicitly, without pulling POSIX ioctl, termios, mount or fork into the build.
     set(INKWELL_SERIAL_SOURCE src/io/serial_unavailable.c)
