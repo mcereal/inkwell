@@ -41,10 +41,16 @@ static struct fd_device *fd_device_find(int fd) {
     return NULL;
 }
 
+#endif
+
 int inkwell_fd_attach_device(int fd, const struct inkwell_fd_device_ops *ops, void *context) {
     if (fd < 0 || ops == NULL || ops->read == NULL || ops->write == NULL || ops->close == NULL) {
         return -EINVAL;
     }
+#if !defined(_WIN32)
+    (void)context;
+    return -ENOTSUP;
+#else
     if (fd_device_find(fd) != NULL) {
         return -EEXIST;
     }
@@ -55,8 +61,8 @@ int inkwell_fd_attach_device(int fd, const struct inkwell_fd_device_ops *ops, vo
         }
     }
     return -ENOSPC;
-}
 #endif
+}
 
 int inkwell_fd_read(int fd, void *bytes, size_t len) {
     if (fd < 0 || (bytes == NULL && len != 0U)) {

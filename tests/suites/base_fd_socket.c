@@ -78,6 +78,41 @@ INKWELL_TEST_CASE(socket_bridges_to_a_descriptor_only_where_one_is_a_socket, uni
     record_success(test_name);
 }
 
+#if !defined(_WIN32)
+static int refused_read(void *context, void *bytes, size_t len) {
+    (void)context;
+    (void)bytes;
+    (void)len;
+    return -EIO;
+}
+
+static int refused_write(void *context, const void *bytes, size_t len) {
+    (void)context;
+    (void)bytes;
+    (void)len;
+    return -EIO;
+}
+
+static int refused_close(void *context) {
+    (void)context;
+    return -EIO;
+}
+
+/* A POSIX descriptor is already the device's own; nothing may shadow one with callbacks. */
+INKWELL_TEST_CASE(fd_device_attach_refuses_off_windows, unit) {
+    const struct inkwell_fd_device_ops ops = {
+        .read = refused_read,
+        .write = refused_write,
+        .close = refused_close,
+    };
+    INKWELL_TEST_FAIL_IF(inkwell_fd_attach_device(3, &ops, NULL) != -ENOTSUP,
+                         "attach should refuse where descriptors are native");
+    INKWELL_TEST_FAIL_IF(inkwell_fd_attach_device(3, NULL, NULL) != -EINVAL,
+                         "an incomplete attach is still invalid first");
+    record_success(test_name);
+}
+#endif
+
 INKWELL_TEST_CASE(socket_parse_numeric_address, unit) {
     struct sockaddr_storage address;
     socklen_t address_len = 0;

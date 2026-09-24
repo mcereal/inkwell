@@ -33,9 +33,10 @@
  * - the device ops that inkwell_fd_read/_write/_close route that token to.
  *
  * The event is reset by the read, which is the call a signalled event always gets - a caller
- * registered for IN is told IN on every signal. A read that stops with bytes still queued, or
- * finds a write already finished, sets it again, so nothing that arrives while the event is being
- * reset is lost to it.
+ * registered for IN is told IN on every signal. A read that stops with bytes still queued sets it
+ * again, and so does one that collects a finished write while a later write is waiting on it, so
+ * nothing that lands while the event is being reset is lost. A finished write nobody is waiting
+ * on is collected quietly: re-signalling it would leave an idle port ready forever.
  */
 
 #define SERIAL_WINDOWS_PORTS 8
@@ -52,6 +53,11 @@ struct serial_windows_port {
     OVERLAPPED write_overlapped;
     DWORD write_len;
     bool write_pending;
+    /* A write answered -EAGAIN and its caller is waiting for the event to try again. */
+    bool write_blocked;
+    /* A write that finished short or failed after its caller had been told it was accepted; the
+       next write reports it. */
+    bool write_failed;
     /* A write is in flight from here, not from the caller's buffer, which is gone as soon as the
        call returns. */
     uint8_t write_bytes[SERIAL_WINDOWS_WRITE_BYTES];
@@ -314,13 +320,31 @@ static void port_collect_wait(struct serial_windows_port *port) {
     port->wait_pending = false;
 }
 
+/* Takes a finished write off the books, remembering a failure for the next write to report.
+   Returns whether there is no write in flight any more. */
+static bool port_collect_write(struct serial_windows_port *port) {
+    if (!port->write_pending) {
+        return true;
+    }
+    if (!HasOverlappedIoCompleted(&port->write_overlapped)) {
+        return false;
+    }
+    DWORD written = 0;
+    const BOOL finished = GetOverlappedResult(port->com, &port->write_overlapped, &written, FALSE);
+    port->write_pending = false;
+    if (!finished || written < port->write_len) {
+        port->write_failed = true;
+    }
+    return true;
+}
+
 static int port_read(void *context, void *bytes, size_t len) {
     struct serial_windows_port *port = (struct serial_windows_port *)context;
     HANDLE event = inkwell_windows_handle_get(port->token);
     (void)ResetEvent(event);
     port_collect_wait(port);
-    if (port->write_pending && HasOverlappedIoCompleted(&port->write_overlapped)) {
-        /* The flush that write is waiting on has not run yet; keep its wake-up. */
+    if (port_collect_write(port) && port->write_blocked) {
+        /* The flush waiting on that write has not run yet; keep its wake-up. */
         (void)SetEvent(event);
     }
 
@@ -361,17 +385,14 @@ static int port_read(void *context, void *bytes, size_t len) {
 
 static int port_write(void *context, const void *bytes, size_t len) {
     struct serial_windows_port *port = (struct serial_windows_port *)context;
-    if (port->write_pending) {
-        if (!HasOverlappedIoCompleted(&port->write_overlapped)) {
-            return -EAGAIN;
-        }
-        DWORD written = 0;
-        const BOOL finished =
-            GetOverlappedResult(port->com, &port->write_overlapped, &written, FALSE);
-        port->write_pending = false;
-        if (!finished || written < port->write_len) {
-            return -EIO;
-        }
+    if (port->write_pending && !port_collect_write(port)) {
+        port->write_blocked = true;
+        return -EAGAIN;
+    }
+    port->write_blocked = false;
+    if (port->write_failed) {
+        port->write_failed = false;
+        return -EIO;
     }
     if (len == 0U) {
         return 0;

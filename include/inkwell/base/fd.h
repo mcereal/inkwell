@@ -51,7 +51,6 @@ int inkwell_fd_close(int fd);
 /* Duplicate a CRT/POSIX descriptor so a test fixture and its consumer own separate lifetimes. */
 int inkwell_fd_dup(int fd);
 
-#if defined(_WIN32)
 /*
  * A device Windows has no non-blocking descriptor for - a COM port is a HANDLE read with
  * overlapped I/O - answering to an int all the same, so a stream and a loop can hold it as they
@@ -62,6 +61,9 @@ int inkwell_fd_dup(int fd);
  * signalled again, 0 from read when the device has gone, or a negative errno. close is the last
  * call the device hears: inkwell_fd_close() detaches it first. dup is refused with -ENOTSUP.
  * Returns 0, -EINVAL, -EEXIST for a number already attached, or -ENOSPC.
+ *
+ * Declared everywhere and refused with -ENOTSUP off Windows, where a device already has a
+ * descriptor of its own and a number shadowed by callbacks would be a second meaning for it.
  */
 struct inkwell_fd_device_ops {
     int (*read)(void *context, void *bytes, size_t len);
@@ -70,7 +72,6 @@ struct inkwell_fd_device_ops {
 };
 
 int inkwell_fd_attach_device(int fd, const struct inkwell_fd_device_ops *ops, void *context);
-#endif
 
 /* A socket is pointer-sized on Windows, so it cannot safely travel through the int descriptor
  * API above. This value is a native socket on either host, never a loop registration token.
