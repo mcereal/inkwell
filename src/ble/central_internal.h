@@ -11,7 +11,8 @@
  * matches it against the central's tokens and calls one of the completion helpers below.
  *
  * Exactly one backend is linked: bluez.c where D-Bus was found on Linux, corebluetooth.m on
- * macOS, and none.c everywhere else. Each defines every function in the second half of this file.
+ * macOS, winrt.c on Windows, and none.c everywhere else. Each defines every function in the second
+ * half of this file.
  */
 
 #include "inkwell/ble/central.h"
