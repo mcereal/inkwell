@@ -93,8 +93,9 @@ static bool instance_hex(const char *instance, const char *key, uint16_t *out) {
 
 static bool devnode_service(DEVINST node, char *out, ULONG out_len) {
     ULONG len = out_len;
-    if (CM_Get_DevNode_Registry_PropertyA(node, CM_DRP_SERVICE, NULL, out, &len, 0) !=
-        CR_SUCCESS) {
+    const CONFIGRET result =
+        CM_Get_DevNode_Registry_PropertyA(node, CM_DRP_SERVICE, NULL, out, &len, 0);
+    if (result != CR_SUCCESS) {
         out[0] = '\0';
         return false;
     }
@@ -169,11 +170,11 @@ static bool describe_port(HDEVINFO set, SP_DEVINFO_DATA *info,
                        port->product_id);
     }
     char service[64];
-    const bool cdc = devnode_service(info->DevInst, service, sizeof service) &&
-                     _stricmp(service, "usbser") == 0;
+    const bool cdc =
+        devnode_service(info->DevInst, service, sizeof service) && _stricmp(service, "usbser") == 0;
     port->kind = cdc ? INKWELL_SERIAL_NATIVE : INKWELL_SERIAL_BRIDGE;
-    port->mass_storage = cdc && strstr(instance, "&MI_") != NULL &&
-                         beside_mass_storage(info->DevInst);
+    port->mass_storage =
+        cdc && strstr(instance, "&MI_") != NULL && beside_mass_storage(info->DevInst);
     port->control_interface = -1;
     port->bound = true;
     return true;
@@ -195,8 +196,8 @@ size_t inkwell_serial_scan(struct inkwell_serial_port_info *out, size_t capacity
     if (g_mock.enabled) {
         return mock_scan(out, capacity);
     }
-    HDEVINFO set = SetupDiGetClassDevsW(&kComPortInterface, NULL, NULL,
-                                        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    HDEVINFO set =
+        SetupDiGetClassDevsW(&kComPortInterface, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
     if (set == INVALID_HANDLE_VALUE) {
         return 0U;
     }

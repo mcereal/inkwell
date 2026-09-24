@@ -89,4 +89,3 @@ INKWELL_TEST_CASE(io_windows_serial_mock_duplicates_its_descriptor, unit) {
                          "mocked open should own an independent descriptor");
     record_success(test_name);
 }
-
