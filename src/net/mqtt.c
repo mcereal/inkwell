@@ -11,12 +11,8 @@
 #include "inkwell/net/reason.h"
 #include "mqtt_address.h"
 #include <errno.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <stdarg.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 /*
  * How many reads one readiness event may take before giving the loop back.
@@ -174,7 +170,8 @@ static void mqtt_fail_tls(struct inkwell_mqtt_client *proxy) {
  * three had to know what the other two wanted before clearing anything.
  */
 static void mqtt_arm(struct inkwell_mqtt_client *proxy) {
-    if (proxy->fd < 0 || !proxy->fd_registered || proxy->loop == NULL) {
+    if (proxy->socket == INKWELL_SOCKET_INVALID || proxy->registration_token < 0 ||
+        proxy->loop == NULL) {
         return;
     }
     bool want_write = proxy->state == INKWELL_MQTT_CLIENT_CONNECTING;
@@ -190,7 +187,7 @@ static void mqtt_arm(struct inkwell_mqtt_client *proxy) {
     proxy->want_write = want_write;
     const uint32_t events =
         (uint32_t)INKWELL_LOOP_IN | (want_write ? (uint32_t)INKWELL_LOOP_OUT : 0U);
-    (void)inkwell_loop_update_fd(proxy->loop, proxy->fd, events);
+    (void)inkwell_loop_update_fd(proxy->loop, proxy->registration_token, events);
 }
 
 /*
@@ -202,37 +199,27 @@ static void mqtt_arm(struct inkwell_mqtt_client *proxy) {
  * substitute a third, which nothing wants: the tests drive a real socket against a real broker
  * on loopback, which exercises far more of this than a scripted fake would.
  */
+/* An interrupted call and a would-block are one answer here: try again when the loop says so. */
+static int mqtt_socket_result(int result) {
+    return result == -EINTR || result == -EWOULDBLOCK ? -EAGAIN : result;
+}
+
 static int mqtt_raw_read(struct inkwell_mqtt_client *proxy, uint8_t *out, size_t cap) {
     if (proxy->tls.state != NULL) {
         return inkwell_tls_client_read(&proxy->tls, out, cap);
     }
-    const ssize_t got = recv(proxy->fd, out, cap, 0);
-    if (got > 0) {
-        return (int)got;
-    }
-    if (got == 0) {
-        return -ENOTCONN;
-    }
-    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-        return -EAGAIN;
-    }
-    return -errno;
+    const int got = inkwell_socket_recv(proxy->socket, out, cap);
+    return got == 0 ? -ENOTCONN : mqtt_socket_result(got);
 }
 
 static int mqtt_raw_write(struct inkwell_mqtt_client *proxy, const uint8_t *data, size_t len) {
     if (proxy->tls.state != NULL) {
         return inkwell_tls_client_write(&proxy->tls, data, len);
     }
-    /* MSG_NOSIGNAL for the reason stream_link.h gives: a write to a socket whose peer has gone
-       raises SIGPIPE, and its default disposition would kill the client outright. */
-    const ssize_t written = send(proxy->fd, data, len, MSG_NOSIGNAL);
-    if (written >= 0) {
-        return (int)written;
-    }
-    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-        return -EAGAIN;
-    }
-    return -errno;
+    /* inkwell_socket_send() is MSG_NOSIGNAL for the reason net/stream.h gives: a write to a
+       socket whose peer has gone raises SIGPIPE, whose default disposition would kill the
+       client outright. */
+    return mqtt_socket_result(inkwell_socket_send(proxy->socket, data, len));
 }
 
 /* ------------------------------------------------------------------ the write queue */
@@ -585,7 +572,7 @@ static bool mqtt_consume(struct inkwell_mqtt_client *proxy) {
          * zeroed `in_len` by then, so carrying on would subtract `at` from zero and walk this
          * loop off the buffer with a size_t the wrong side of nothing.
          */
-        if (proxy->fd < 0) {
+        if (proxy->socket == INKWELL_SOCKET_INVALID) {
             return false;
         }
         at += header.header_len + header.remaining;
@@ -718,13 +705,9 @@ static void mqtt_secure(struct inkwell_mqtt_client *proxy) {
 
 /* The TCP connect finished, one way or the other. */
 static void mqtt_finish_connect(struct inkwell_mqtt_client *proxy) {
-    int error = 0;
-    socklen_t error_len = (socklen_t)sizeof error;
-    if (getsockopt(proxy->fd, SOL_SOCKET, SO_ERROR, &error, &error_len) < 0) {
-        error = errno;
-    }
-    if (error != 0) {
-        mqtt_fail_net(proxy, inkwell_net_reason_from_errno(error), -error);
+    const int error = inkwell_socket_pending_error(proxy->socket);
+    if (error < 0) {
+        mqtt_fail_net(proxy, inkwell_net_reason_from_errno(-error), error);
         return;
     }
 
@@ -738,8 +721,15 @@ static void mqtt_finish_connect(struct inkwell_mqtt_client *proxy) {
      * certificate is issued for a name, and no broker on the internet has one for an IP - so
      * verifying against the resolved address would fail every TLS connection this client makes.
      */
+#if defined(_WIN32)
+    /* The TLS session still runs over an int descriptor, which a SOCKET cannot become. tls.c is
+       compiled without a backend on Windows and refuses any descriptor, this one included. */
+    const int tls_fd = -1;
+#else
+    const int tls_fd = (int)proxy->socket;
+#endif
     const int started =
-        inkwell_tls_client_start(&proxy->tls, proxy->fd, proxy->host, proxy->ca_bundle);
+        inkwell_tls_client_start(&proxy->tls, tls_fd, proxy->host, proxy->ca_bundle);
     if (started == -ENOTSUP) {
         mqtt_fail_own(proxy, INKWELL_MQTT_REFUSAL_NO_TLS, 0U);
         return;
@@ -758,7 +748,7 @@ static void mqtt_finish_connect(struct inkwell_mqtt_client *proxy) {
 static int mqtt_fd_callback(int fd, uint32_t events, void *userdata) {
     (void)fd;
     struct inkwell_mqtt_client *proxy = (struct inkwell_mqtt_client *)userdata;
-    if (proxy == NULL || proxy->fd < 0) {
+    if (proxy == NULL || proxy->socket == INKWELL_SOCKET_INVALID) {
         return 0;
     }
 
@@ -802,7 +792,7 @@ static int mqtt_fd_callback(int fd, uint32_t events, void *userdata) {
             return 0;
         }
     }
-    if (read_now && proxy->fd >= 0) {
+    if (read_now && proxy->socket != INKWELL_SOCKET_INVALID) {
         mqtt_read_ready(proxy);
     }
     return 0;
@@ -811,33 +801,35 @@ static int mqtt_fd_callback(int fd, uint32_t events, void *userdata) {
 /* Opens the socket and starts the connect. `address` already carries the port. */
 static void mqtt_open(struct inkwell_mqtt_client *proxy, const struct sockaddr_storage *address,
                       socklen_t address_len) {
-    const int fd = inkwell_fd_socket(address->ss_family, SOCK_STREAM, 0);
-    if (fd < 0) {
-        mqtt_fail_net(proxy, inkwell_net_reason_from_errno(-fd), fd);
+    inkwell_socket socket = INKWELL_SOCKET_INVALID;
+    const int opened = inkwell_socket_open(address->ss_family, SOCK_STREAM, 0, &socket);
+    if (opened < 0) {
+        mqtt_fail_net(proxy, inkwell_net_reason_from_errno(-opened), opened);
         return;
     }
     /* MQTT packets are small and a reply often follows a request immediately, which is exactly
        the traffic Nagle delays. */
-    const int one = 1;
-    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    (void)inkwell_socket_set_option(socket, INKWELL_SOCKET_NO_DELAY, 1U);
 
-    if (connect(fd, (const struct sockaddr *)address, address_len) < 0 && errno != EINPROGRESS) {
-        const int error = errno;
-        close(fd);
-        mqtt_fail_net(proxy, inkwell_net_reason_from_errno(error), -error);
+    /* Watched before connect(), as net/tcp.c does: a backend may report completion only once,
+       so a fast refusal could otherwise finish before the loop is looking. */
+    const int token = inkwell_loop_watch_socket(proxy->loop, socket,
+                                                (uint32_t)(INKWELL_LOOP_IN | INKWELL_LOOP_OUT),
+                                                mqtt_fd_callback, proxy);
+    if (token < 0) {
+        (void)inkwell_socket_close(socket);
+        mqtt_fail_net(proxy, inkwell_net_reason_from_errno(-token), token);
         return;
     }
-
-    proxy->fd = fd;
+    proxy->socket = socket;
+    proxy->registration_token = token;
     proxy->want_write = true;
-    if (inkwell_loop_add_fd(proxy->loop, fd, (uint32_t)(INKWELL_LOOP_IN | INKWELL_LOOP_OUT),
-                            mqtt_fd_callback, proxy) < 0) {
-        proxy->fd = -1;
-        close(fd);
-        mqtt_fail_net(proxy, inkwell_net_reason_from_errno(ENOMEM), -ENOMEM);
+
+    const int connected = inkwell_socket_connect(socket, address, (size_t)address_len);
+    if (connected < 0 && connected != -EINPROGRESS) {
+        mqtt_fail_net(proxy, inkwell_net_reason_from_errno(-connected), connected);
         return;
     }
-    proxy->fd_registered = true;
     proxy->deadline_ms = proxy->now_ms + INKWELL_MQTT_CLIENT_CONNECT_TIMEOUT_MS;
     mqtt_set_state(proxy, INKWELL_MQTT_CLIENT_CONNECTING);
 }
@@ -898,14 +890,14 @@ static void mqtt_attempt(struct inkwell_mqtt_client *proxy) {
 static void mqtt_close(struct inkwell_mqtt_client *proxy) {
     inkwell_resolve_cancel(&proxy->resolve);
     inkwell_tls_client_stop(&proxy->tls);
-    if (proxy->fd >= 0) {
-        if (proxy->fd_registered && proxy->loop != NULL) {
-            (void)inkwell_loop_remove_fd(proxy->loop, proxy->fd);
+    if (proxy->socket != INKWELL_SOCKET_INVALID) {
+        if (proxy->registration_token >= 0 && proxy->loop != NULL) {
+            (void)inkwell_loop_remove_fd(proxy->loop, proxy->registration_token);
         }
-        close(proxy->fd);
+        (void)inkwell_socket_close(proxy->socket);
     }
-    proxy->fd = -1;
-    proxy->fd_registered = false;
+    proxy->socket = INKWELL_SOCKET_INVALID;
+    proxy->registration_token = -1;
     proxy->want_write = false;
     proxy->in_len = 0U;
     proxy->skip_remaining = 0U;
@@ -929,7 +921,8 @@ int inkwell_mqtt_client_init(struct inkwell_mqtt_client *proxy, struct inkwell_l
     }
     memset(proxy, 0, sizeof *proxy);
     proxy->loop = loop;
-    proxy->fd = -1;
+    proxy->socket = INKWELL_SOCKET_INVALID;
+    proxy->registration_token = -1;
     proxy->state = INKWELL_MQTT_CLIENT_OFF;
     (void)inkwell_resolve_init(&proxy->resolve, loop);
     return 0;

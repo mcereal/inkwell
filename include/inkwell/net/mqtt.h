@@ -1,5 +1,6 @@
 #pragma once
 
+#include "inkwell/base/fd.h"
 #include "inkwell/net/reason.h"
 #include "inkwell/net/resolve.h"
 #include "inkwell/net/tls.h"
@@ -199,8 +200,10 @@ struct inkwell_mqtt_client {
     uint16_t port;
 
     struct inkwell_resolve resolve;
-    int fd;
-    bool fd_registered;
+    /* A native socket on either host, never narrowed to an int: a Winsock SOCKET is
+       pointer-sized. `registration_token` is the loop's name for the watch on it, or -1. */
+    inkwell_socket socket;
+    int registration_token;
     bool want_write; /* INKWELL_LOOP_OUT is armed because something is waiting to go out */
 
     /* Changes whenever start(), stop(), or shutdown() replaces the active session. Packet
