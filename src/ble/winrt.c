@@ -51,8 +51,8 @@
  * **Addresses are the hardware address**, "F8:5B:1B:A5:99:C9": Windows reports it, unlike macOS.
  * A handle is "<address>/<characteristic UUID>", as on CoreBluetooth.
  *
- * **Bonding is not a step here.** Windows 11 fails to bond a Meshtastic ESP32 in either of its
- * pairing modes - its own Settings dialog included: the peripheral reports the passkey
+ * **Bonding is not a step here.** Windows 11 has been seen to fail to bond an ESP32 peripheral in
+ * every pairing mode - its own Settings dialog included: the peripheral reports the passkey
  * authenticated and Windows gives up a moment later. So a peripheral lists as `paired`, as on
  * CoreBluetooth, pair_begin() finishes at once, and a characteristic that insists on a bond fails
  * with -EACCES, which a caller already reports as "pair it first".
@@ -450,12 +450,24 @@ static void listener_advertisement(struct winrt_hub *hub,
     for (size_t i = 0; i < hub->heard_count && entry == NULL; ++i) {
         entry = hub->heard[i].address == address ? &hub->heard[i] : NULL;
     }
-    if (entry == NULL && hub->heard_count < WINRT_HEARD_MAX) {
-        entry = &hub->heard[hub->heard_count++];
+    if (entry == NULL) {
+        /* Full: the peripheral heard longest ago makes room. A table that only ever filled would
+           stop admitting anything new once 64 addresses had passed - and a peripheral with a
+           rotating private address is a new address every few minutes. */
+        size_t slot = hub->heard_count;
+        if (slot == WINRT_HEARD_MAX) {
+            slot = 0U;
+            for (size_t i = 1; i < WINRT_HEARD_MAX; ++i) {
+                slot = hub->heard[i].heard_ms < hub->heard[slot].heard_ms ? i : slot;
+            }
+        } else {
+            hub->heard_count += 1U;
+        }
+        entry = &hub->heard[slot];
         memset(entry, 0, sizeof *entry);
         entry->address = address;
     }
-    if (entry != NULL) {
+    {
         entry->rssi = rssi;
         entry->heard_ms = inkwell_time_monotonic_ms();
         if (name[0] != '\0') {
@@ -543,10 +555,13 @@ struct winrt_link {
     bool resolved;
     struct winrt_characteristic characteristics[WINRT_CHARACTERISTICS_MAX];
     size_t characteristic_count;
-    /* The characteristic notifications come from, and its registration. */
+    /* The characteristic notifications come from, and its registration. `listener_token` is the
+       subscribe that installed the listener; `notify_token` is set once that subscribe is
+       confirmed, and is what a notification must carry to be delivered. */
     GATT(CIGattCharacteristic) * notifying;
     EventRegistrationToken value_registration;
     bool value_registered;
+    uint32_t listener_token;
     uint32_t notify_token;
 };
 
@@ -799,6 +814,7 @@ static void link_unsubscribe(struct winrt_link *link) {
     }
     (void)GATT(CIGattCharacteristic_Release)(link->notifying);
     link->notifying = NULL;
+    link->listener_token = 0U;
     link->notify_token = 0U;
 }
 
@@ -1028,7 +1044,7 @@ int inkwell_ble_backend_discovery(struct inkwell_ble_central *central, bool on) 
     return SUCCEEDED(hr) ? 0 : -EIO;
 }
 
-/* The watcher's own status. A start that Windows refuses (the radio is off) settles into
+/* The watcher's own status. A start that Windows refuses (Bluetooth is off) settles into
    Aborted rather than failing the call, and reads here as not scanning. */
 int inkwell_ble_backend_discovering(struct inkwell_ble_central *central) {
     struct winrt_backend *backend = backend_of(central);
@@ -1333,7 +1349,7 @@ int inkwell_ble_backend_read(struct inkwell_ble_central *central, const char *ha
     }
     winrt_read_op *op = NULL;
     /* Uncached: a value read from Windows' cache is not a read of the peripheral, and a
-       characteristic drained by reading (Meshtastic's FromRadio) must be read from the source. */
+       characteristic that a peer drains by being read must be read from the source. */
     if (FAILED(GATT(CIGattCharacteristic_ReadValueWithCacheModeAsync)(
             found->characteristic, BluetoothCacheMode_Uncached, &op))) {
         return -EIO;
@@ -1387,6 +1403,7 @@ int inkwell_ble_backend_subscribe(struct inkwell_ble_central *central, const cha
         return -EIO;
     }
     link->notifying = found->characteristic;
+    link->listener_token = ours;
     (void)GATT(CIGattCharacteristic_AddRef)(link->notifying);
 
     winrt_write_op *op = NULL;
@@ -1692,9 +1709,13 @@ static void apply_subscribe(struct inkwell_ble_central *central, struct winrt_co
     }
     const bool current =
         central->requests[3].state == 1 && central->requests[3].token == done->token;
-    if (current && mapped == 0) {
+    /* Only the listener this subscribe installed is its to keep or remove. One that has since
+       been replaced - the caller gave up on this subscribe and started another - belongs to the
+       newer subscribe, and a late answer to the old one must not take it away. */
+    const bool ours = link->notifying != NULL && link->listener_token == done->token;
+    if (current && mapped == 0 && ours) {
         link->notify_token = done->token;
-    } else if (link->notifying != NULL && link->notify_token == 0U) {
+    } else if (ours) {
         /* Refused, or confirmed after the central gave up on it: the caller was told it failed,
            so nothing may go on notifying behind its back. */
         link_unsubscribe(link);
