@@ -91,3 +91,30 @@ INKWELL_TEST_CASE(ble_connection_interval_is_a_central_operation, unit) {
                          "invalid parameters reached the selected stack");
     record_success(test_name);
 }
+
+INKWELL_TEST_CASE(ble_link_held_and_reset_are_central_operations, unit) {
+    unsigned resets = 0U;
+    const struct inkwell_ble_mock_config config = {
+        .link_held_queries = 2U,
+        .reset_adapter_calls = &resets,
+    };
+    inkwell_ble_mock_enable(&config);
+    struct inkwell_ble_central central;
+    (void)inkwell_ble_open(&central);
+    (void)inkwell_ble_start_discovery(&central);
+    const int first = inkwell_ble_link_held(&central, "9C:13:9E:9D:0A:D9");
+    const int second = inkwell_ble_link_held(&central, "9C:13:9E:9D:0A:D9");
+    const int third = inkwell_ble_link_held(&central, "9C:13:9E:9D:0A:D9");
+    const int empty = inkwell_ble_link_held(&central, "");
+    const int reset = inkwell_ble_reset_adapter(&central);
+    const int scanning = inkwell_ble_discovering(&central);
+    inkwell_ble_close(&central);
+    inkwell_ble_mock_disable();
+
+    INKWELL_TEST_FAIL_IF(first != 1 || second != 1 || third != 0,
+                         "a held link should read held for the scripted queries, then gone");
+    INKWELL_TEST_FAIL_IF(empty != -EINVAL, "an empty address reached the stack");
+    INKWELL_TEST_FAIL_IF(reset != 0 || resets != 1U, "the reset did not reach the stack once");
+    INKWELL_TEST_FAIL_IF(scanning != 0, "a reset should take discovery down with it");
+    record_success(test_name);
+}

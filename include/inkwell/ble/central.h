@@ -314,6 +314,24 @@ int inkwell_ble_characteristic_mtu(struct inkwell_ble_central *central, const ch
  * awaited. -ENOENT means there is no open LE link to the address; -ENOTSUP means this stack does
  * not expose interval control. On Linux the raw HCI socket also requires CAP_NET_RAW.
  */
+/*
+ * Whether the kernel still holds an LE link to `address`, in any state: 1 or 0.
+ *
+ * Not the same question as Device1.Connected. A disconnect the controller never confirms leaves
+ * the kernel's connection in BT_DISCONN after bluetoothd has already said the device is gone, and
+ * every Connect to it then fails at once with "Operation already in progress" (Linux 4.9 on the
+ * TrimUI Brick, switching radios within a second or two). A caller moving from one peripheral to
+ * another can ask this before connecting, and tell that failure from a peripheral that is merely
+ * busy. -ENOTSUP where the stack does not expose it; on Linux the HCI socket needs CAP_NET_RAW.
+ */
+int inkwell_ble_link_held(struct inkwell_ble_central *central, const char *address);
+/*
+ * Resets the adapter's controller (HCIDEVRESET, what `hciconfig hci0 reset` does), which drops
+ * every link and every connection the kernel was holding - the one way out of the state above.
+ * Everything on the adapter goes down with it, discovery included, so it is a last resort.
+ * -ENOTSUP where the stack does not expose it; on Linux it needs CAP_NET_ADMIN.
+ */
+int inkwell_ble_reset_adapter(struct inkwell_ble_central *central);
 int inkwell_ble_request_connection_interval(
     struct inkwell_ble_central *central, const char *address,
     const struct inkwell_ble_connection_parameters *parameters);
@@ -374,8 +392,17 @@ struct inkwell_ble_mock_config {
     const char *adapter_name;
     int request_connection_interval_result;
     unsigned *request_connection_interval_calls;
+    /* inkwell_ble_link_held(): the first `link_held_queries` answers are 1, then 0 - a kernel
+       that takes that many polls to let go of a link. */
+    unsigned link_held_queries;
+    unsigned *link_held_calls;
+    int reset_adapter_result;
+    unsigned *reset_adapter_calls;
     int start_discovery_result;
     int stop_discovery_result;
+    /* A start that answers 0 and does not scan: BlueZ's InProgress refusal, which arrives after
+       the call has returned. inkwell_ble_discovering() is the only thing that tells. */
+    bool start_discovery_lost;
     /* Bumped on every start/stop, so a test can assert that a scan is down for the whole of a
        link rather than only that it was stopped once. */
     unsigned *start_discovery_calls;

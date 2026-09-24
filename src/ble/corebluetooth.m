@@ -953,6 +953,17 @@ int inkwell_ble_backend_mtu(struct inkwell_ble_central *central, const char *han
     return 0;
 }
 
+int inkwell_ble_backend_link_held(struct inkwell_ble_central *central, const char *address) {
+    (void)central;
+    (void)address;
+    return -ENOTSUP;
+}
+
+int inkwell_ble_backend_reset_adapter(struct inkwell_ble_central *central) {
+    (void)central;
+    return -ENOTSUP;
+}
+
 int inkwell_ble_backend_request_connection_interval(
     struct inkwell_ble_central *central, const char *address,
     const struct inkwell_ble_connection_parameters *parameters) {
