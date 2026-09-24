@@ -199,7 +199,8 @@ static void fetch_complete(struct inkwell_fetch *fetch, enum inkwell_fetch_outco
 }
 
 static void fetch_fail(struct inkwell_fetch *fetch, enum inkwell_fetch_outcome outcome,
-                       const char *format, ...) __attribute__((format(printf, 3, 4)));
+                       const char *format, ...)
+    __attribute__((format(INKWELL_PRINTF_ARCHETYPE, 3, 4)));
 
 static void fetch_fail(struct inkwell_fetch *fetch, enum inkwell_fetch_outcome outcome,
                        const char *format, ...) {

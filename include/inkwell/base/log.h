@@ -3,6 +3,20 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
+
+/*
+ * The format archetype every printf-like declaration here is checked against.
+ *
+ * On MinGW GCC plain `printf` means MSVCRT's dialect, which has no `%zu` - so every size_t in a
+ * log line was a -Wformat warning on a Windows build that prints it correctly. <stdio.h> names
+ * the dialect the linked CRT actually speaks: `gnu_printf` under UCRT, `ms_printf` under MSVCRT.
+ */
+#if defined(__MINGW_PRINTF_FORMAT)
+#define INKWELL_PRINTF_ARCHETYPE __MINGW_PRINTF_FORMAT
+#else
+#define INKWELL_PRINTF_ARCHETYPE printf
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,24 +50,24 @@ enum inkwell_log_level inkwell_log_get_level(void);
 const char *inkwell_log_level_to_string(enum inkwell_log_level level);
 
 /*
- * The archetype is `printf` and the argument index is 0, which is how the attribute spells a
+ * The archetype is printf's and the argument index is 0, which is how the attribute spells a
  * va_list variant: there are no further arguments here to check `fmt` against, and saying so is
  * what tells the compiler this format *is* a parameter rather than a string assembled somewhere
  * it cannot see. Without it the vfprintf() inside is a -Wformat-nonliteral on every clang build.
  */
 void inkwell_log_message_v(enum inkwell_log_level level, const char *component, const char *fmt,
-                           va_list args) __attribute__((format(printf, 3, 0)));
+                           va_list args) __attribute__((format(INKWELL_PRINTF_ARCHETYPE, 3, 0)));
 
 static inline void inkwell_log_trace(const char *component, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3)));
+    __attribute__((format(INKWELL_PRINTF_ARCHETYPE, 2, 3)));
 static inline void inkwell_log_debug(const char *component, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3)));
+    __attribute__((format(INKWELL_PRINTF_ARCHETYPE, 2, 3)));
 static inline void inkwell_log_info(const char *component, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3)));
+    __attribute__((format(INKWELL_PRINTF_ARCHETYPE, 2, 3)));
 static inline void inkwell_log_warn(const char *component, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3)));
+    __attribute__((format(INKWELL_PRINTF_ARCHETYPE, 2, 3)));
 static inline void inkwell_log_error(const char *component, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3)));
+    __attribute__((format(INKWELL_PRINTF_ARCHETYPE, 2, 3)));
 
 static inline void inkwell_log_trace(const char *component, const char *fmt, ...) {
     va_list args;

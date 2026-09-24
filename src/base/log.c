@@ -92,7 +92,8 @@ void inkwell_log_set_sink(void (*sink)(const char *line)) {
 }
 
 static void log_capture(const char *timestamp, enum inkwell_log_level level, const char *component,
-                        const char *fmt, va_list args) __attribute__((format(printf, 4, 0)));
+                        const char *fmt, va_list args)
+    __attribute__((format(INKWELL_PRINTF_ARCHETYPE, 4, 0)));
 
 static void log_capture(const char *timestamp, enum inkwell_log_level level, const char *component,
                         const char *fmt, va_list args) {
