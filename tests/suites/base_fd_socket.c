@@ -69,8 +69,8 @@ INKWELL_TEST_CASE(socket_bridges_to_a_descriptor_only_where_one_is_a_socket, uni
 #if defined(_WIN32)
     const bool held = bridged == -ENOTSUP && fd == -1;
 #else
-    const bool held = bridged == 0 && fd >= 0 && inkwell_fd_to_socket(fd, &back) == 0 &&
-                      back == socket;
+    const bool held =
+        bridged == 0 && fd >= 0 && inkwell_fd_to_socket(fd, &back) == 0 && back == socket;
 #endif
     (void)back;
     (void)inkwell_socket_close(socket);
