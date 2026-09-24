@@ -17,7 +17,7 @@ off a device into something a program can hold. None of it knows what a program 
         |
    the kernel          Linux:   epoll, timerfd, signalfd, BlueZ, sysfs
                        macOS:   kqueue, CoreBluetooth, IOKit
-                       Windows: waitable handles, Winsock events
+                       Windows: waitable handles, Winsock events, WinRT Bluetooth, SetupAPI
 ```
 
 [inkcell](https://github.com/mcereal/inkcell) is the UI toolkit that stands on it, but inkwell
@@ -64,7 +64,7 @@ backend rather than a fork, and why Windows is arriving as a third.
 | `runtime/` | One loop with a bounded number of sources - epoll on Linux, kqueue on macOS, `WaitForMultipleObjects()` over waitable handles and Winsock events on Windows - no threads anywhere, a timer and a wake that are sources like any other, and `SIGINT`/`SIGTERM`/`SIGHUP` (a console control event, on Windows) delivered through the loop so a shutdown runs the ordinary path instead of the default kill action. |
 | `codec/` | Bytes in, bytes out: base64 in both alphabets, SHA-256, a non-allocating JSON reader, an HTTP/1.1 request formatter and response parser that takes its input in whatever sized pieces the network hands it, a zip central-directory walker that works on a window of a file rather than the whole thing, inflate and PNG, and the UF2 and ESP firmware image formats. A codec parses; it does not know what the bytes are for. |
 | `net/` | One hostname turned into an address by a child that may block; a non-blocking TCP connector with a deadline; a byte stream over a descriptor; TLS that reports `-EAGAIN` rather than waiting; one HTTPS request; and one bounded MQTT 3.1.1 client with subscriptions, keepalive, and reconnect backoff. All run on the same loop and hold no application policy. |
-| `ble/` | One Bluetooth LE central: discover, connect, pair, read, write, subscribe - BlueZ over D-Bus on Linux, CoreBluetooth on macOS - as events on the loop. The only thread in the tree is CoreBluetooth's own dispatch queue, and it is kept to copies and a wake. |
+| `ble/` | One Bluetooth LE central: discover, connect, pair, read, write, subscribe - BlueZ over D-Bus on Linux, CoreBluetooth on macOS, the Windows Runtime's LE API on Windows - as events on the loop. The only other threads in the tree are the stack's own - CoreBluetooth's dispatch queue, WinRT's thread pool - and both are kept to copies and a wake. |
 | `io/` | The USB serial ports the system has - sysfs on Linux, the I/O Registry on macOS, SetupAPI on Windows - with what the USB tree says about each (a bridge chip or the device's own USB, a mass-storage interface beside it or not), and a tty opened raw and non-blocking for the loop. For a kernel without CDC-ACM, the generic-driver bind and the usbfs line-state request that make a native-USB device talk anyway. |
 
 Everything here is C17, freestanding of any framework, and allocates as little as it can get
@@ -108,7 +108,7 @@ per system, so nothing above this layer names any of them.
 | Resolver | forked child | forked child | overlapped `GetAddrInfoExW` |
 | TLS, HTTPS | Mbed TLS | Mbed TLS | refuses |
 | MQTT client | yes, TLS through Mbed TLS | yes, TLS through Mbed TLS | yes, over Winsock; refuses TLS |
-| Bluetooth LE central | BlueZ over libdbus-1 | CoreBluetooth | refuses |
+| Bluetooth LE central | BlueZ over libdbus-1 | CoreBluetooth | Windows Runtime; no bonding |
 | Serial ports | sysfs, plus the usbfs line-state request for a native-USB device | I/O Registry | SetupAPI, overlapped COM I/O |
 | USB mass-storage writes | sysfs, `/proc/mounts` | finds no drive | refuses |
 | In CI | gcc, clang, ASan+UBSan, no optional deps | clang | not yet |

@@ -6,22 +6,23 @@
  * bounded lookup.
  *
  * One interface over whichever stack the operating system has. On Linux that is BlueZ, over
- * D-Bus; on macOS it is CoreBluetooth; anywhere else, or on a Linux built without the D-Bus
- * headers, every call refuses with -ENOSYS and the caller reports Bluetooth as unavailable. The
- * backend is chosen when inkwell is built, not at run time: a process has exactly one
- * Bluetooth stack under it.
+ * D-Bus; on macOS it is CoreBluetooth; on Windows it is the Windows Runtime's LE API; anywhere
+ * else, or on a Linux built without the D-Bus headers, every call refuses with -ENOSYS and the
+ * caller reports Bluetooth as unavailable. The backend is chosen when inkwell is built, not at
+ * run time: a process has exactly one Bluetooth stack under it.
  *
  * **A peripheral is named by its address** - the string the stack itself uses for it, and the
  * one a caller shows, stores and hands back. On BlueZ that is the controller address
- * ("FB:17:7C:37:6D:DA"). On macOS it is not, and cannot be: CoreBluetooth never reveals a
- * peripheral's hardware address and names it by a UUID of its own instead, stable on that Mac
- * and meaningless on any other. A caller should treat the address as opaque, size its buffers
- * by INKWELL_BLE_ADDRESS_MAX, and not assume it has colons in it.
+ * ("FB:17:7C:37:6D:DA"), and on Windows it is the same hardware address. On macOS it is not, and
+ * cannot be: CoreBluetooth never reveals a peripheral's hardware address and names it by a UUID
+ * of its own instead, stable on that Mac and meaningless on any other. A caller should treat the
+ * address as opaque, size its buffers by INKWELL_BLE_ADDRESS_MAX, and not assume it has colons in
+ * it.
  *
  * **A characteristic is named by a handle** that inkwell_ble_find_characteristic() hands out.
- * It is an opaque string: on BlueZ it is the D-Bus object path, on CoreBluetooth something that
- * locates the characteristic under its peripheral. It stays good until that peripheral
- * disconnects.
+ * It is an opaque string: on BlueZ it is the D-Bus object path, on CoreBluetooth and Windows
+ * something that locates the characteristic under its peripheral. It stays good until that
+ * peripheral disconnects.
  *
  * **Asynchrony is by polling, not by callback.** Connect, pair, read, write and the two
  * property queries each start a request and return; the reply is picked up by

@@ -77,7 +77,7 @@ set_tests_properties(inkwell_unit PROPERTIES LABELS unit)
 # runnable independently while those fixtures are ported.
 if(WIN32)
     add_executable(inkwell_windows_net_tests framework/inkwell_test.c
-                   suites/base_fd_device_windows.c suites/io_serial_windows.c
+                   suites/base_fd_device_windows.c suites/ble_central.c suites/io_serial_windows.c
                    suites/io_windows_unavailable.c suites/net_mqtt_windows.c
                    suites/net_resolve_windows.c suites/net_unavailable_windows.c)
     target_include_directories(inkwell_windows_net_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

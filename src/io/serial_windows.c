@@ -419,7 +419,7 @@ static int port_close(void *context) {
     struct serial_windows_port *port = (struct serial_windows_port *)context;
     /* RTS down before DTR, for the reason port_configure() raises them the other way round.
        Left to CloseHandle(), usbser drops them in its own order, and an ESP32-S3 on its own USB
-       takes the moment between as a reset - measured on a Heltec V4, which rebooted on every
+       takes the moment between as a reset - measured on an ESP32-S3 board, which rebooted on every
        close until this was here. */
     (void)EscapeCommFunction(port->com, CLRRTS);
     (void)EscapeCommFunction(port->com, CLRDTR);

@@ -271,6 +271,12 @@ if(APPLE)
     set(INKWELL_BLE_BACKEND_SOURCE src/ble/corebluetooth.m)
     set_source_files_properties(src/ble/corebluetooth.m PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(inkwell PRIVATE "-framework CoreBluetooth" "-framework Foundation")
+elseif(WIN32)
+    # The Windows Runtime's Bluetooth LE API, from C over MinGW's WinRT headers. runtimeobject is
+    # RoInitialize and the activation factories; nothing else is linked for it.
+    set(INKWELL_BLE_BACKEND winrt)
+    set(INKWELL_BLE_BACKEND_SOURCE src/ble/winrt.c)
+    target_link_libraries(inkwell PRIVATE runtimeobject)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
