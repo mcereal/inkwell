@@ -107,6 +107,46 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  # The whole test binary still has POSIX fixtures - a forked HTTPS server, mkfifo, setenv - so
+  # Windows runs its own: the loop and sockets, serial, the platform-free half of BLE, and TLS
+  # and HTTPS over Winsock against a peer on the test's own thread.
+  windows:
+    name: debug (Windows UCRT64)
+    runs-on: windows-2025
+    steps:
+      # LF so the vendored-file digests hold, and long paths for Mbed TLS's nested sources.
+      - name: Preserve Unix line endings and enable long Git paths
+        run: |
+          git config --global core.autocrlf input
+          git config --global core.longpaths true
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          release: false
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-jinja
+            mingw-w64-ucrt-x86_64-python-jsonschema
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DPython3_EXECUTABLE="$(command -v python)"
+          cmake --build build --target inkwell_windows_net_tests
+
+      - name: Test
+        shell: msys2 {0}
+        run: ./build/tests/inkwell_windows_net_tests.exe
+
   format:
     name: clang-format
     runs-on: ubuntu-latest

@@ -11,6 +11,8 @@ set(INKWELL_TEST_SUPPORT
     # A real TLS server on a loopback socket, for net_fetch.c. Compiles to nothing without
     # INKWELL_HAVE_TLS, so it is listed unconditionally.
     support/https_fixture.c
+    # The certificate and key both TLS fixtures present: https_fixture.c and net_tls_windows.c.
+    support/tls_identity.c
 )
 
 set(INKWELL_TEST_IO_SUITES suites/io_serial.c suites/io_usb_storage.c)
@@ -53,7 +55,7 @@ set(INKWELL_TEST_SUITES
 if(WIN32)
     list(APPEND INKWELL_TEST_SUITES suites/base_fd_device_windows.c suites/net_mqtt_windows.c
          suites/net_resolve_windows.c suites/net_tcp_windows.c suites/net_stream_windows.c
-         suites/runtime_windows_socket.c)
+         suites/net_tls_windows.c suites/runtime_windows_socket.c)
 endif()
 
 add_executable(inkwell_tests
@@ -76,10 +78,10 @@ set_tests_properties(inkwell_unit PROPERTIES LABELS unit)
 # The full suite still has POSIX-only fixtures. Keep the native Windows networking contracts
 # runnable independently while those fixtures are ported.
 if(WIN32)
-    add_executable(inkwell_windows_net_tests framework/inkwell_test.c
+    add_executable(inkwell_windows_net_tests framework/inkwell_test.c support/tls_identity.c
                    suites/base_fd_device_windows.c suites/ble_central.c suites/io_serial_windows.c
                    suites/io_windows_unavailable.c suites/net_mqtt_windows.c
-                   suites/net_resolve_windows.c suites/net_unavailable_windows.c)
+                   suites/net_resolve_windows.c suites/net_tls_windows.c)
     target_include_directories(inkwell_windows_net_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(inkwell_windows_net_tests PRIVATE inkwell inkwell_options)
     add_test(NAME inkwell_windows_net COMMAND inkwell_windows_net_tests)

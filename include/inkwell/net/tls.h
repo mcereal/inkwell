@@ -1,5 +1,7 @@
 #pragma once
 
+#include "inkwell/base/fd.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -9,10 +11,10 @@ extern "C" {
 #endif
 
 /*
- * A TLS client session over a descriptor somebody else owns.
+ * A TLS client session over a socket somebody else owns.
  *
  * The two shapes it is built for are a long-lived bidirectional session and a single large
- * transfer - net/fetch.c is the second. Both have to sit on the same epoll loop as everything
+ * transfer - net/fetch.c is the second. Both have to sit on the same event loop as everything
  * else and stay readable and writable between whatever else that loop is doing, which on a
  * device with a screen is drawing it. There is nowhere to block.
  *
@@ -40,24 +42,24 @@ extern "C" {
  * that uses it needs an #ifdef.
  */
 
-/* The descriptor is borrowed, never closed here: the caller opened it, the caller connected it,
+/* The socket is borrowed, never closed here: the caller opened it, the caller connected it,
    and on any error the caller is the one that has to decide whether to retry. */
 struct inkwell_tls_state; /* defined in tls.c; heap-held, one per session */
 
 struct inkwell_tls_client {
-    int fd;
+    inkwell_socket socket;
     struct inkwell_tls_state *state; /* NULL until start(), and again after stop() */
     /*
      * Which direction the session is blocked on, which is *not* a property of what the caller
      * asked for. A handshake flight, and a write that triggers one, can block waiting to read;
-     * a read can block waiting to write. Arming the wrong epoll event parks the connection
+     * a read can block waiting to write. Arming the wrong loop event parks the connection
      * forever on a socket that will never become ready in the direction being watched.
      */
     bool wants_write;
     /*
      * Set when read() gave the loop back with work still inside the session rather than because
      * the socket was empty - today, a run of session tickets long enough to hit its budget. The
-     * descriptor may well have nothing to report, so a caller that waits for epoll after this
+     * socket may well have nothing to report, so a caller that waits for the loop after this
      * waits forever; it has to come back of its own accord on its next turn. A caller that
      * keeps a per-turn read budget of its own wants the same flag for the same reason, and
      * net/fetch.c carries one. Cleared at the top of every read.
@@ -105,7 +107,7 @@ void inkwell_tls_set_roots(const struct inkwell_tls_ca_root *roots, size_t count
 const char *inkwell_tls_ca_override(void);
 
 /*
- * Begins a session on `fd`, which must already be open, non-blocking and connected (or
+ * Begins a session on `socket`, which must already be open, non-blocking and connected (or
  * connecting - the first handshake flight will simply block until it is).
  *
  * `hostname` is both the SNI to send and the name the certificate is checked against, so it is
@@ -118,8 +120,8 @@ const char *inkwell_tls_ca_override(void);
  * arguments, -EIO when the library or the bundle would not initialise, or -EIO with no roots
  * registered and no bundle named, with error() set.
  */
-int inkwell_tls_client_start(struct inkwell_tls_client *tls, int fd, const char *hostname,
-                             const char *ca_bundle);
+int inkwell_tls_client_start(struct inkwell_tls_client *tls, inkwell_socket socket,
+                             const char *hostname, const char *ca_bundle);
 
 /*
  * Drives the handshake. Returns 0 when it is complete, -EAGAIN when it needs the socket to
@@ -137,7 +139,7 @@ int inkwell_tls_client_handshake(struct inkwell_tls_client *tls);
  *
  * **A reader must loop until -EAGAIN.** One TLS record can hold more than one call's worth of
  * plaintext, and the leftovers live inside the session rather than in the socket - so the
- * descriptor is empty, epoll has nothing to report, and a reader that stops after one call waits
+ * socket is empty, the loop has nothing to report, and a reader that stops after one call waits
  * forever on data it has already received. This is the classic way TLS on an event loop hangs.
  *
  * **A -EAGAIN with `more_to_read` set is not an empty socket** and must not be answered by
@@ -156,7 +158,7 @@ int inkwell_tls_client_read(struct inkwell_tls_client *tls, uint8_t *out, size_t
 int inkwell_tls_client_write(struct inkwell_tls_client *tls, const uint8_t *data, size_t len);
 
 /*
- * Ends the session and releases everything it held. Does **not** close the descriptor.
+ * Ends the session and releases everything it held. Does **not** close the socket.
  *
  * No close_notify is sent. It would be one more write that can block on a socket the caller is
  * about to close anyway, and the thing it protects against - a truncation attack on a stream

@@ -106,12 +106,12 @@ per system, so nothing above this layer names any of them.
 | Codecs | yes | yes | yes |
 | TCP connector, byte stream | yes | yes | yes, over Winsock |
 | Resolver | forked child | forked child | overlapped `GetAddrInfoExW` |
-| TLS, HTTPS | Mbed TLS | Mbed TLS | refuses |
-| MQTT client | yes, TLS through Mbed TLS | yes, TLS through Mbed TLS | yes, over Winsock; refuses TLS |
+| TLS, HTTPS | Mbed TLS | Mbed TLS | Mbed TLS, over Winsock |
+| MQTT client | yes, TLS through Mbed TLS | yes, TLS through Mbed TLS | yes, over Winsock; TLS through Mbed TLS |
 | Bluetooth LE central | BlueZ over libdbus-1 | CoreBluetooth | Windows Runtime; no bonding |
 | Serial ports | sysfs, plus the usbfs line-state request for a native-USB device | I/O Registry | SetupAPI, overlapped COM I/O |
 | USB mass-storage writes | sysfs, `/proc/mounts` | finds no drive | refuses |
-| In CI | gcc, clang, ASan+UBSan, no optional deps | clang | not yet |
+| In CI | gcc, clang, ASan+UBSan, no optional deps | clang | gcc (UCRT64), the Windows suites |
 
 "Refuses" is the same contract as a missing optional dependency: the header exists, every symbol
 links, and a call reports itself unavailable, so a program builds unchanged on every system and

@@ -11,13 +11,10 @@
 #include "inkwell/runtime/loop.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 /*
  * How much one turn of the loop reads before giving it back.
@@ -94,8 +91,9 @@ struct inkwell_fetch_conn {
     size_t address_count;
     size_t address_next;
     uint64_t attempt_deadline_ms;
-    int fd;
-    bool fd_registered;
+    inkwell_socket socket;
+    /* The loop's token for `socket`, or -1 while it is not watched. */
+    int token;
     struct inkwell_tls_client tls;
     char request[FETCH_REQUEST_MAX];
     size_t request_len;
@@ -128,21 +126,21 @@ struct inkwell_fetch_conn {
  */
 static void fetch_drop_socket(struct inkwell_fetch *fetch, struct inkwell_fetch_conn *conn) {
     inkwell_tls_client_stop(&conn->tls);
-    if (conn->fd >= 0) {
-        if (conn->fd_registered && fetch->loop != NULL) {
-            (void)inkwell_loop_remove_fd(fetch->loop, conn->fd);
-        }
-        close(conn->fd);
+    if (conn->token >= 0 && fetch->loop != NULL) {
+        (void)inkwell_loop_remove_fd(fetch->loop, conn->token);
     }
-    conn->fd = -1;
-    conn->fd_registered = false;
+    if (conn->socket != INKWELL_SOCKET_INVALID) {
+        (void)inkwell_socket_close(conn->socket);
+    }
+    conn->socket = INKWELL_SOCKET_INVALID;
+    conn->token = -1;
     conn->more_to_read = false;
 }
 
 static void fetch_free(struct inkwell_fetch *fetch, struct inkwell_fetch_conn *conn) {
     fetch_drop_socket(fetch, conn);
     if (conn->out_fd >= 0) {
-        close(conn->out_fd);
+        (void)inkwell_fd_close(conn->out_fd);
     }
     free(conn->body);
     free(conn);
@@ -166,12 +164,12 @@ static void fetch_complete(struct inkwell_fetch *fetch, enum inkwell_fetch_outco
     inkwell_resolve_cancel(&fetch->resolve);
     fetch_drop_socket(fetch, conn);
     if (conn->out_fd >= 0) {
-        const int closed = close(conn->out_fd);
+        const int closed = inkwell_fd_close(conn->out_fd);
         conn->out_fd = -1;
         if (closed != 0 && outcome == INKWELL_FETCH_OK) {
             outcome = INKWELL_FETCH_FILE;
             snprintf(conn->detail, sizeof conn->detail, "closing %s: %s", conn->output_path,
-                     strerror(errno));
+                     strerror(-closed));
         }
     }
     if (outcome != INKWELL_FETCH_OK) {
@@ -281,13 +279,13 @@ static bool fetch_sink(struct inkwell_fetch *fetch, const uint8_t *bytes, size_t
     }
     conn->out_written += (uint64_t)len;
     while (len > 0U) {
-        const ssize_t wrote = write(conn->out_fd, bytes, len);
-        if (wrote < 0 && errno == EINTR) {
+        const int wrote = inkwell_fd_write(conn->out_fd, bytes, len);
+        if (wrote == -EINTR) {
             continue;
         }
         if (wrote <= 0) {
             fetch_fail(fetch, INKWELL_FETCH_FILE, "writing %s: %s", conn->output_path,
-                       wrote < 0 ? strerror(errno) : "short write");
+                       wrote < 0 ? strerror(-wrote) : "short write");
             return false;
         }
         bytes += wrote;
@@ -313,8 +311,8 @@ static void fetch_hop(struct inkwell_fetch *fetch);
 static void fetch_try_next(struct inkwell_fetch *fetch);
 
 static void fetch_arm(struct inkwell_fetch *fetch, struct inkwell_fetch_conn *conn, bool write) {
-    if (fetch->loop != NULL && conn->fd_registered) {
-        (void)inkwell_loop_update_fd(fetch->loop, conn->fd,
+    if (fetch->loop != NULL && conn->token >= 0) {
+        (void)inkwell_loop_update_fd(fetch->loop, conn->token,
                                      write ? INKWELL_LOOP_OUT : INKWELL_LOOP_IN);
     }
 }
@@ -373,13 +371,14 @@ static bool fetch_on_head(struct inkwell_fetch *fetch) {
         return false;
     }
     if (conn->output_path[0] != '\0' && conn->method == INKWELL_FETCH_GET) {
-        conn->out_fd = open(conn->output_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        const int out_fd = inkwell_fd_create(conn->output_path);
         conn->out_written = 0U;
-        if (conn->out_fd < 0) {
+        if (out_fd < 0) {
             fetch_fail(fetch, INKWELL_FETCH_FILE, "opening %s: %s", conn->output_path,
-                       strerror(errno));
+                       strerror(-out_fd));
             return false;
         }
+        conn->out_fd = out_fd;
     }
     return true;
 }
@@ -530,11 +529,7 @@ static void fetch_handshake(struct inkwell_fetch *fetch) {
 /* The TCP connect finished, one way or the other. */
 static void fetch_connected(struct inkwell_fetch *fetch) {
     struct inkwell_fetch_conn *const conn = fetch->conn;
-    int error = 0;
-    socklen_t error_len = (socklen_t)sizeof error;
-    if (getsockopt(conn->fd, SOL_SOCKET, SO_ERROR, &error, &error_len) < 0) {
-        error = errno;
-    }
+    const int error = -inkwell_socket_pending_error(conn->socket);
     if (error != 0) {
         fetch_note(conn, inkwell_net_reason_from_errno(error), -error);
         snprintf(conn->detail, sizeof conn->detail, "connecting to %s: %s", conn->url.host,
@@ -548,8 +543,8 @@ static void fetch_connected(struct inkwell_fetch *fetch) {
     fetch_note(conn, INKWELL_NET_OK, 0);
     /* Checked against the URL's host, not the address it resolved to: a certificate is issued
        for a name. The override is read per request, so a test can set it around one. */
-    const int started =
-        inkwell_tls_client_start(&conn->tls, conn->fd, conn->url.host, inkwell_tls_ca_override());
+    const int started = inkwell_tls_client_start(&conn->tls, conn->socket, conn->url.host,
+                                                 inkwell_tls_ca_override());
     if (started < 0) {
         fetch_note(conn, INKWELL_NET_TLS, inkwell_tls_client_error_code(&conn->tls));
         fetch_fail(fetch, INKWELL_FETCH_TLS, "%s: %s", conn->url.host,
@@ -563,7 +558,7 @@ static void fetch_connected(struct inkwell_fetch *fetch) {
 static int fetch_on_fd(int fd, uint32_t events, void *userdata) {
     (void)fd;
     struct inkwell_fetch *const fetch = (struct inkwell_fetch *)userdata;
-    if (fetch == NULL || fetch->conn == NULL || fetch->conn->fd < 0) {
+    if (fetch == NULL || fetch->conn == NULL || fetch->conn->socket == INKWELL_SOCKET_INVALID) {
         return 0;
     }
     switch (fetch->conn->phase) {
@@ -593,30 +588,36 @@ static int fetch_on_fd(int fd, uint32_t events, void *userdata) {
    not even begin. */
 static bool fetch_open(struct inkwell_fetch *fetch, const struct inkwell_resolve_address *address) {
     struct inkwell_fetch_conn *const conn = fetch->conn;
-    const int fd = inkwell_fd_socket(address->address.ss_family, SOCK_STREAM, 0);
-    if (fd < 0) {
-        fetch_note(conn, inkwell_net_reason_from_errno(fd), fd);
-        snprintf(conn->detail, sizeof conn->detail, "socket: %s", strerror(-fd));
+    inkwell_socket socket = INKWELL_SOCKET_INVALID;
+    const int opened = inkwell_socket_open(address->address.ss_family, SOCK_STREAM, 0, &socket);
+    if (opened < 0) {
+        fetch_note(conn, inkwell_net_reason_from_errno(-opened), opened);
+        snprintf(conn->detail, sizeof conn->detail, "socket: %s", strerror(-opened));
         return false;
     }
-    if (connect(fd, (const struct sockaddr *)&address->address, address->len) < 0 &&
-        errno != EINPROGRESS) {
-        fetch_note(conn, inkwell_net_reason_from_errno(errno), -errno);
-        snprintf(conn->detail, sizeof conn->detail, "connecting to %s: %s", conn->url.host,
-                 strerror(errno));
-        close(fd);
-        return false;
-    }
-    conn->fd = fd;
-    const int added = inkwell_loop_add_fd(
-        fetch->loop, fd, (uint32_t)(INKWELL_LOOP_IN | INKWELL_LOOP_OUT), fetch_on_fd, fetch);
-    if (added < 0) {
-        fetch_note(conn, INKWELL_NET_UNREACHABLE, added);
+    conn->socket = socket;
+    /* Watched before connect(), as net/tcp.c and net/mqtt.c do: Windows reports a connect's
+       completion once, from the moment WSAEventSelect() is installed, so a loopback connect or a
+       fast refusal that finished first would never be heard and the attempt would sit until its
+       deadline. A connect that completes at once is heard the same way, as writability on the
+       next turn. */
+    const int token = inkwell_loop_watch_socket(
+        fetch->loop, socket, (uint32_t)(INKWELL_LOOP_IN | INKWELL_LOOP_OUT), fetch_on_fd, fetch);
+    if (token < 0) {
+        fetch_note(conn, INKWELL_NET_UNREACHABLE, token);
         snprintf(conn->detail, sizeof conn->detail, "no room on the loop for %s", conn->url.host);
         fetch_drop_socket(fetch, conn);
         return false;
     }
-    conn->fd_registered = true;
+    conn->token = token;
+    const int connected = inkwell_socket_connect(socket, &address->address, (size_t)address->len);
+    if (connected < 0 && connected != -EINPROGRESS) {
+        fetch_note(conn, inkwell_net_reason_from_errno(-connected), connected);
+        snprintf(conn->detail, sizeof conn->detail, "connecting to %s: %s", conn->url.host,
+                 strerror(-connected));
+        fetch_drop_socket(fetch, conn);
+        return false;
+    }
     conn->phase = FETCH_CONNECTING;
     conn->attempt_deadline_ms = fetch->now_ms + FETCH_CONNECT_ATTEMPT_MS;
     return true;
@@ -807,7 +808,8 @@ int inkwell_fetch_start(struct inkwell_fetch *fetch, const struct inkwell_fetch_
     if (conn == NULL) {
         return -ENOMEM;
     }
-    conn->fd = -1;
+    conn->socket = INKWELL_SOCKET_INVALID;
+    conn->token = -1;
     conn->out_fd = -1;
     if (!inkwell_http_url_parse(request->url, &conn->url) || !conn->url.tls) {
         free(conn);

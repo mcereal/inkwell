@@ -48,6 +48,10 @@ int inkwell_fd_set_nonblocking_cloexec(int fd);
 int inkwell_fd_read(int fd, void *bytes, size_t len);
 int inkwell_fd_write(int fd, const void *bytes, size_t len);
 int inkwell_fd_close(int fd);
+/* Creates `path`, or empties it, for writing: binary on Windows, where the CRT would otherwise
+ * translate line endings, and not inherited by a child on either host. A descriptor for the
+ * calls above, or a negative errno. */
+int inkwell_fd_create(const char *path);
 /* Duplicate a CRT/POSIX descriptor so a test fixture and its consumer own separate lifetimes. */
 int inkwell_fd_dup(int fd);
 

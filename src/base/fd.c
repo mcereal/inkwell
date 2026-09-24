@@ -8,7 +8,9 @@
 #include <stddef.h>
 #include <string.h>
 #if defined(_WIN32)
+#include <fcntl.h>
 #include <io.h>
+#include <sys/stat.h>
 #include <windows.h>
 #else
 #include <arpa/inet.h>
@@ -113,6 +115,19 @@ int inkwell_fd_close(int fd) {
 #else
     return close(fd) == 0 ? 0 : -errno;
 #endif
+}
+
+int inkwell_fd_create(const char *path) {
+    if (path == NULL || path[0] == '\0') {
+        return -EINVAL;
+    }
+#if defined(_WIN32)
+    const int fd = _open(path, _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY | _O_NOINHERIT,
+                         _S_IREAD | _S_IWRITE);
+#else
+    const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+#endif
+    return fd >= 0 ? fd : -errno;
 }
 
 int inkwell_fd_dup(int fd) {

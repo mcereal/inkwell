@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "support/https_fixture.h"
+#include "support/tls_identity.h"
 
 #ifdef INKWELL_HAVE_TLS
 
@@ -30,55 +31,6 @@
 #if defined(__linux__)
 #include <sys/prctl.h>
 #endif
-
-/*
- * The server's certificate and key, generated for this file and used nowhere else - published
- * here so the server can be stood up without a secret. Self-signed with CA:TRUE, so the one PEM
- * is both what the server presents and the whole bundle a client trusts; valid to 2126.
- *
- * The names on it are real ones on purpose. A case points a real URL at this server with
- * `inkwell_fetch_connect_to()`, and what the certificate is then checked against is the name in
- * the URL - so a certificate issued to "localhost" would make every case test the wrong thing.
- */
-static const char k_cert_pem[] =
-    "-----BEGIN CERTIFICATE-----\n"
-    "MIIB9zCCAZ2gAwIBAgIUJ/M9e1NCKBJ7l1z5T0WZlBV9oGAwCgYIKoZIzj0EAwIw\n"
-    "HjEcMBoGA1UEAwwTaW5rd2VsbC10ZXN0LXNlcnZlcjAgFw0yNjA5MjExNjQwMjRa\n"
-    "GA8yMTI2MDgyODE2NDAyNFowHjEcMBoGA1UEAwwTaW5rd2VsbC10ZXN0LXNlcnZl\n"
-    "cjBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABLxIp7jVCe9WR4YQAYlBpKRDjeJg\n"
-    "ZH3phsa5Hh5lyB5ai5v/XtunU/VuIs4VuN6mY+BrSDIOK+twExQ51zDBJbmjgbYw\n"
-    "gbMwHQYDVR0OBBYEFHeIAhfXZwCNZrHdgtfI2cVekaM/MB8GA1UdIwQYMBaAFHeI\n"
-    "AhfXZwCNZrHdgtfI2cVekaM/MA8GA1UdEwEB/wQFMAMBAf8wYAYDVR0RBFkwV4IJ\n"
-    "bG9jYWxob3N0ggpnaXRodWIuY29tgg5hcGkuZ2l0aHViLmNvbYIXKi5naXRodWJ1\n"
-    "c2VyY29udGVudC5jb22CD2V4YW1wbGUuaW52YWxpZIcEfwAAATAKBggqhkjOPQQD\n"
-    "AgNIADBFAiEAzFXMyEwNJWwpbsuWwpDws1RVn3OHEsyo5yJdiRl5kc4CIETW21Z4\n"
-    "PvQ3C3EKzGlifPIrMU5fJxoK95BaZqgEWK0B\n"
-    "-----END CERTIFICATE-----\n";
-
-static const char k_key_pem[] = "-----BEGIN PRIVATE KEY-----\n"
-                                "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgW0Ugzcy/4MdU0lnW\n"
-                                "AE8jfaFMVtYU+kD4KpGlzHhSBuKhRANCAAS8SKe41QnvVkeGEAGJQaSkQ43iYGR9\n"
-                                "6YbGuR4eZcgeWoub/17bp1P1biLOFbjepmPga0gyDivrcBMUOdcwwSW5\n"
-                                "-----END PRIVATE KEY-----\n";
-
-/*
- * A second self-signed certificate, which this server never presents and nothing here is signed
- * by. It exists to be a trust anchor that does not match: "the registered roots do not include
- * this server" is a different refusal from "there are no registered roots", and a case that
- * cannot tell them apart passes without testing either.
- */
-static const char k_decoy_pem[] =
-    "-----BEGIN CERTIFICATE-----\n"
-    "MIIBnDCCAUGgAwIBAgIUZKmF961ZkgNKOjD4Wfr2aNGHHi4wCgYIKoZIzj0EAwIw\n"
-    "IjEgMB4GA1UEAwwXaW5rd2VsbCB0ZXN0IGRlY295IHJvb3QwIBcNMjYwOTIxMTYz\n"
-    "OTM2WhgPMjEyNjA4MjgxNjM5MzZaMCIxIDAeBgNVBAMMF2lua3dlbGwgdGVzdCBk\n"
-    "ZWNveSByb290MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAESkmU4lMKDbwxt97b\n"
-    "SGOVa0Aot1IotrG1vZJno0YmhceJ+Rdmi96T9kZCeH8npioCu/hOqOyzsfZtFK1P\n"
-    "P2VQSaNTMFEwHQYDVR0OBBYEFPjF6R+p6irZIpom/AOdJCDKxrQFMB8GA1UdIwQY\n"
-    "MBaAFPjF6R+p6irZIpom/AOdJCDKxrQFMA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZI\n"
-    "zj0EAwIDSQAwRgIhAOLzy8k0BSu9f9N3Dvrhv2okKXqKDpPEAxI5w3QfvdsPAiEA\n"
-    "pyMGPrJx7ztCH9CpBhXTSPQXImStbEzlEMOBg8/P0y4=\n"
-    "-----END CERTIFICATE-----\n";
 
 struct https_fixture_conn {
     mbedtls_ssl_context *ssl;
@@ -294,10 +246,14 @@ static void fixture_child(int listen_fd, const char *log_path, https_fixture_han
     mbedtls_x509_crt_init(&cert);
     mbedtls_pk_init(&key);
     mbedtls_ssl_ticket_init(&ticket);
+    /* A PEM parse is handed the terminator too: that is how Mbed TLS knows it is PEM. */
+    const char *const cert_pem = tls_identity_cert_pem();
+    const char *const key_pem = tls_identity_key_pem();
     if (psa_crypto_init() != PSA_SUCCESS ||
-        mbedtls_x509_crt_parse(&cert, (const unsigned char *)k_cert_pem, sizeof k_cert_pem) != 0 ||
-        mbedtls_pk_parse_key(&key, (const unsigned char *)k_key_pem, sizeof k_key_pem, NULL, 0U) !=
+        mbedtls_x509_crt_parse(&cert, (const unsigned char *)cert_pem, strlen(cert_pem) + 1U) !=
             0 ||
+        mbedtls_pk_parse_key(&key, (const unsigned char *)key_pem, strlen(key_pem) + 1U, NULL,
+                             0U) != 0 ||
         mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_SERVER, MBEDTLS_SSL_TRANSPORT_STREAM,
                                     MBEDTLS_SSL_PRESET_DEFAULT) != 0 ||
         mbedtls_ssl_conf_own_cert(&conf, &cert, &key) != 0) {
@@ -345,7 +301,7 @@ bool https_fixture_start(struct https_fixture *fixture, https_fixture_handler ha
     if (pem == NULL) {
         return false;
     }
-    const bool written = fputs(k_cert_pem, pem) >= 0;
+    const bool written = fputs(tls_identity_cert_pem(), pem) >= 0;
     if (fclose(pem) != 0 || !written) {
         return false;
     }
@@ -406,11 +362,11 @@ void https_fixture_stop(struct https_fixture *fixture) {
 }
 
 const char *https_fixture_cert_pem(void) {
-    return k_cert_pem;
+    return tls_identity_cert_pem();
 }
 
 const char *https_fixture_decoy_pem(void) {
-    return k_decoy_pem;
+    return tls_identity_decoy_pem();
 }
 
 void https_fixture_attach(const struct https_fixture *fixture, struct inkwell_fetch *fetch) {
