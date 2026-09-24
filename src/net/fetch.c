@@ -595,16 +595,12 @@ static bool fetch_open(struct inkwell_fetch *fetch, const struct inkwell_resolve
         snprintf(conn->detail, sizeof conn->detail, "socket: %s", strerror(-opened));
         return false;
     }
-    const int connected = inkwell_socket_connect(socket, &address->address, (size_t)address->len);
-    if (connected < 0 && connected != -EINPROGRESS) {
-        fetch_note(conn, inkwell_net_reason_from_errno(-connected), connected);
-        snprintf(conn->detail, sizeof conn->detail, "connecting to %s: %s", conn->url.host,
-                 strerror(-connected));
-        (void)inkwell_socket_close(socket);
-        return false;
-    }
     conn->socket = socket;
-    /* The watch is made before the connect can finish, so its completion is never missed. */
+    /* Watched before connect(), as net/tcp.c and net/mqtt.c do: Windows reports a connect's
+       completion once, from the moment WSAEventSelect() is installed, so a loopback connect or a
+       fast refusal that finished first would never be heard and the attempt would sit until its
+       deadline. A connect that completes at once is heard the same way, as writability on the
+       next turn. */
     const int token = inkwell_loop_watch_socket(
         fetch->loop, socket, (uint32_t)(INKWELL_LOOP_IN | INKWELL_LOOP_OUT), fetch_on_fd, fetch);
     if (token < 0) {
@@ -614,6 +610,14 @@ static bool fetch_open(struct inkwell_fetch *fetch, const struct inkwell_resolve
         return false;
     }
     conn->token = token;
+    const int connected = inkwell_socket_connect(socket, &address->address, (size_t)address->len);
+    if (connected < 0 && connected != -EINPROGRESS) {
+        fetch_note(conn, inkwell_net_reason_from_errno(-connected), connected);
+        snprintf(conn->detail, sizeof conn->detail, "connecting to %s: %s", conn->url.host,
+                 strerror(-connected));
+        fetch_drop_socket(fetch, conn);
+        return false;
+    }
     conn->phase = FETCH_CONNECTING;
     conn->attempt_deadline_ms = fetch->now_ms + FETCH_CONNECT_ATTEMPT_MS;
     return true;
