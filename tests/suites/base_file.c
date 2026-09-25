@@ -89,3 +89,105 @@ INKWELL_TEST_CASE(file_replace_moves_over_an_existing_file, unit) {
                          "an empty path was not refused");
     record_success(test_name);
 }
+
+INKWELL_TEST_CASE(file_is_dir_tells_a_directory_from_a_file, unit) {
+    char parent[] = "/tmp/inkwell_isdir_XXXXXX";
+    INKWELL_TEST_FAIL_IF(mkdtemp(parent) == NULL, "could not create a temporary directory");
+    char file[sizeof parent + 16U];
+    snprintf(file, sizeof file, "%s/file", parent);
+    const bool staged = file_write(file, "x");
+
+    const bool dir_is = inkwell_file_is_dir(parent);
+    const bool file_is = inkwell_file_is_dir(file);
+    /* The case the helper is for: mkdir over a file reports -EEXIST, and this is what says the
+       thing that exists is not a directory. */
+    const int made = inkwell_file_mkdir(file);
+
+    remove(file);
+    rmdir(parent);
+    INKWELL_TEST_FAIL_IF(!staged, "could not stage the file");
+    INKWELL_TEST_FAIL_IF(!dir_is, "a directory was not reported as one");
+    INKWELL_TEST_FAIL_IF(file_is || made != -EEXIST, "a file was reported as a directory");
+    INKWELL_TEST_FAIL_IF(inkwell_file_is_dir(NULL) || inkwell_file_is_dir("") ||
+                             inkwell_file_is_dir("/nonexistent/inkwell/path"),
+                         "nothing at all was reported as a directory");
+    record_success(test_name);
+}
+
+struct list_probe {
+    const char *dir;
+    unsigned seen;
+    bool saw_dots;
+    unsigned removed;
+};
+
+static void list_visit(void *context, const char *name) {
+    struct list_probe *probe = context;
+    probe->seen++;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+        probe->saw_dots = true;
+    }
+    char path[256];
+    snprintf(path, sizeof path, "%s/%s", probe->dir, name);
+    if (remove(path) == 0) {
+        probe->removed++;
+    }
+}
+
+INKWELL_TEST_CASE(file_list_visits_every_entry_and_lets_the_visitor_remove_it, unit) {
+    char parent[] = "/tmp/inkwell_list_XXXXXX";
+    INKWELL_TEST_FAIL_IF(mkdtemp(parent) == NULL, "could not create a temporary directory");
+    char path[sizeof parent + 16U];
+    bool staged = true;
+    for (int i = 0; i < 5; ++i) {
+        snprintf(path, sizeof path, "%s/f%d", parent, i);
+        staged = staged && file_write(path, "x");
+    }
+
+    struct list_probe probe = {parent, 0U, false, 0U};
+    const int listed = inkwell_file_list(parent, list_visit, &probe);
+    snprintf(path, sizeof path, "%s/f0", parent);
+    const bool is_file = file_write(path, "x");
+    struct list_probe unused = {parent, 0U, false, 0U};
+    const int not_dir = inkwell_file_list(path, list_visit, &unused);
+    remove(path);
+    const int empty = rmdir(parent);
+
+    INKWELL_TEST_FAIL_IF(!staged || !is_file, "could not stage the files");
+    INKWELL_TEST_FAIL_IF(listed != 0 || probe.seen != 5U || probe.removed != 5U,
+                         "an entry was missed, or removing one stopped the walk");
+    INKWELL_TEST_FAIL_IF(probe.saw_dots, ". or .. was handed to the visitor");
+    INKWELL_TEST_FAIL_IF(empty != 0, "the directory was not left empty");
+    INKWELL_TEST_FAIL_IF(not_dir != -ENOTDIR || unused.seen != 0U,
+                         "a file was listed as a directory");
+    INKWELL_TEST_FAIL_IF(inkwell_file_list("", list_visit, &unused) != -EINVAL ||
+                             inkwell_file_list(parent, NULL, NULL) != -EINVAL,
+                         "an empty path or no visitor was not refused");
+    record_success(test_name);
+}
+
+static void list_visit_failing(void *context, const char *name) {
+    unsigned *seen = context;
+    (*seen)++;
+    (void)name;
+    /* A visitor whose own work failed leaves errno behind; the walk must not read it as its own. */
+    errno = EACCES;
+}
+
+INKWELL_TEST_CASE(file_list_is_not_failed_by_a_visitor_that_set_errno, unit) {
+    char parent[] = "/tmp/inkwell_list_errno_XXXXXX";
+    INKWELL_TEST_FAIL_IF(mkdtemp(parent) == NULL, "could not create a temporary directory");
+    char path[sizeof parent + 16U];
+    snprintf(path, sizeof path, "%s/only", parent);
+    const bool staged = file_write(path, "x");
+
+    unsigned seen = 0U;
+    const int listed = inkwell_file_list(parent, list_visit_failing, &seen);
+
+    remove(path);
+    rmdir(parent);
+    INKWELL_TEST_FAIL_IF(!staged, "could not stage the file");
+    INKWELL_TEST_FAIL_IF(listed != 0 || seen != 1U,
+                         "a finished walk was reported failed because the visitor set errno");
+    record_success(test_name);
+}

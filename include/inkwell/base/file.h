@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -39,6 +40,27 @@ int inkwell_file_mkdir(const char *path);
  * the write; this is for a writer that decides only after writing whether to publish at all.
  */
 int inkwell_file_replace(const char *from, const char *to);
+
+/*
+ * Whether `path` names a directory - not merely something. inkwell_file_mkdir()'s -EEXIST is the
+ * case this is for: a file sitting where a program meant to keep a directory would otherwise be
+ * taken for one, and every open inside it would fail later, far from the reason.
+ */
+bool inkwell_file_is_dir(const char *path);
+
+/*
+ * Calls `visit` once for every entry in `dir` by name, "." and ".." aside, in whatever order the
+ * system keeps them. 0, or a negative errno when the directory cannot be listed (-ENOTDIR for a
+ * file) or the listing stopped short of its end - a caller removing what it is shown must not
+ * take a walk that failed halfway for one that finished. The name is the entry's alone; the
+ * caller joins it to `dir`.
+ *
+ * A visitor may remove the entry it was handed - a wipe of a program's own files is the reason
+ * this exists - and the walk carries on; it may not rely on seeing an entry created meanwhile.
+ */
+typedef void (*inkwell_file_entry_fn)(void *context, const char *name);
+
+int inkwell_file_list(const char *dir, inkwell_file_entry_fn visit, void *context);
 
 #ifdef __cplusplus
 }
