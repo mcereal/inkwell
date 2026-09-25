@@ -84,7 +84,7 @@ INKWELL_TEST_CASE(usb_storage_finds_sibling_drive_and_mounts, unit) {
     snprintf(port.id, sizeof port.id, "%s", "2-1:1.1");
     struct inkwell_usb_storage_target target;
     const int found = inkwell_usb_storage_find(&port, &target);
-    char expected[128];
+    char expected[PATH_MAX];
     snprintf(expected, sizeof expected, "%s/sda", fixture.dev);
     const bool right = found == 0 && strcmp(target.device, expected) == 0 &&
                        target.mount_count == 2U && strcmp(target.mounts[0], "/mnt/first") == 0 &&
@@ -114,7 +114,7 @@ INKWELL_TEST_CASE(usb_storage_refuses_partial_unmount, unit) {
 INKWELL_TEST_CASE(usb_storage_claim_creates_nothing, unit) {
     struct storage_fixture fixture;
     INKWELL_TEST_FAIL_IF(!fixture_open(&fixture), "could not create storage fixture");
-    char path[128];
+    char path[PATH_MAX];
     snprintf(path, sizeof path, "%s/drive", fixture.dev);
     const int missing = inkwell_usb_storage_claim(path);
     const bool absent = access(path, F_OK) != 0;
@@ -132,7 +132,7 @@ INKWELL_TEST_CASE(usb_storage_claim_creates_nothing, unit) {
 INKWELL_TEST_CASE(usb_storage_writer_syncs_and_reports_bytes, unit) {
     struct storage_fixture fixture;
     INKWELL_TEST_FAIL_IF(!fixture_open(&fixture), "could not create storage fixture");
-    char path[128];
+    char path[PATH_MAX];
     snprintf(path, sizeof path, "%s/drive", fixture.dev);
     INKWELL_TEST_FAIL_IF_CLEANUP(!put_file(path, ""), fixture_close(&fixture),
                                  "could not seed drive");
@@ -172,7 +172,7 @@ INKWELL_TEST_CASE(usb_storage_writer_syncs_and_reports_bytes, unit) {
 INKWELL_TEST_CASE(usb_storage_writer_releases_claim_on_fd_zero, unit) {
     struct storage_fixture fixture;
     INKWELL_TEST_FAIL_IF(!fixture_open(&fixture), "could not create storage fixture");
-    char path[128];
+    char path[PATH_MAX];
     snprintf(path, sizeof path, "%s/drive", fixture.dev);
     INKWELL_TEST_FAIL_IF_CLEANUP(!put_file(path, ""), fixture_close(&fixture),
                                  "could not seed drive");
