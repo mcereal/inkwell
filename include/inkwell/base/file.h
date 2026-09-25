@@ -29,6 +29,17 @@ uint8_t *inkwell_file_read(const char *path, size_t max_len, size_t *out_len);
  */
 int inkwell_file_mkdir(const char *path);
 
+/*
+ * Moves `from` over `to`, replacing whatever `to` was: 0 or a negative errno.
+ *
+ * rename() does this on POSIX and refuses on Windows when `to` exists, which is exactly the case
+ * a writer through a temporary is in - so a program that renamed directly worked everywhere it
+ * was tested and nowhere a user on Windows ran it twice. Same directory, same filesystem: a
+ * reader opening `to` sees the old file or the new one. inkwell_record_replace() is this plus
+ * the write; this is for a writer that decides only after writing whether to publish at all.
+ */
+int inkwell_file_replace(const char *from, const char *to);
+
 #ifdef __cplusplus
 }
 #endif

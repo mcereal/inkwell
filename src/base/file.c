@@ -45,3 +45,10 @@ int inkwell_file_mkdir(const char *path) {
     }
     return inkwell_platform_dir_make(path) == 0 ? 0 : -errno;
 }
+
+int inkwell_file_replace(const char *from, const char *to) {
+    if (from == NULL || from[0] == '\0' || to == NULL || to[0] == '\0') {
+        return -EINVAL;
+    }
+    return inkwell_platform_file_replace(from, to, false) == 0 ? 0 : -errno;
+}
