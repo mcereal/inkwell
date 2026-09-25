@@ -124,6 +124,9 @@ struct inkwell_zip_fetch_request {
     uint32_t step_timeout_ms;
     /* The member's step, which is the one that carries the bytes; 0 is the fetcher's default. */
     uint32_t member_timeout_ms;
+    /* How long any range read may go without a byte once connected (inkwell_fetch_request's
+       idle_timeout_ms); 0 for no limit beyond the step's own. */
+    uint32_t idle_timeout_ms;
     inkwell_zip_fetch_done_fn on_done;
     void *userdata;
 };
@@ -141,6 +144,11 @@ struct inkwell_zip_fetch {
     uint32_t max_member_bytes;
     uint32_t step_timeout_ms;
     uint32_t member_timeout_ms;
+    uint32_t idle_timeout_ms;
+    /* The range read in flight, and whether it has already been asked for twice: a read that
+       failed on the way (NETWORK or TIMED_OUT) is sent once more before the download fails. */
+    void (*step)(struct inkwell_zip_fetch *zip);
+    bool retried;
 
     /* Filled in as the steps answer. */
     uint64_t zip_size;

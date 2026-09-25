@@ -147,6 +147,14 @@ struct inkwell_fetch_request {
     const char *output_path;
     /* The whole request - every lookup, hop and byte - gets this long, or TIMED_OUT. 0 is 30 s. */
     uint32_t timeout_ms;
+    /*
+     * Once a hop's handshake is done, the longest it may go without a byte arriving before it is
+     * TIMED_OUT; 0 for no such limit. A download given minutes for a slow link otherwise spends
+     * all of them on a server that took the request and never answered it - seen from a CDN
+     * that let a TLS session sit silent for the whole of a two-minute deadline - so a caller
+     * that can retry sets this to what a round trip plausibly costs and gets its failure early.
+     */
+    uint32_t idle_timeout_ms;
     /* Cap on a captured reply; 0 takes INKWELL_FETCH_RESPONSE_MAX. Ignored with output_path. */
     size_t response_max;
     /*
