@@ -24,6 +24,7 @@ set(INKWELL_TEST_SUITES
     suites/base_fd_socket.c
     suites/ble_central.c
     suites/ble_hci.c
+    suites/base_file.c
     suites/base_log.c
     suites/base_record_file.c
     suites/base_text.c

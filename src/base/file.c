@@ -1,4 +1,7 @@
 #include "inkwell/base/file.h"
+#include "platform.h"
+
+#include <errno.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,4 +37,11 @@ uint8_t *inkwell_file_read(const char *path, size_t max_len, size_t *out_len) {
     }
     *out_len = got;
     return bytes;
+}
+
+int inkwell_file_mkdir(const char *path) {
+    if (path == NULL || path[0] == '\0') {
+        return -EINVAL;
+    }
+    return inkwell_platform_dir_make(path) == 0 ? 0 : -errno;
 }

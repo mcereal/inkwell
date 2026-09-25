@@ -19,3 +19,4 @@ int inkwell_platform_file_sync(int fd);
 int inkwell_platform_file_stream_fd(FILE *file);
 int inkwell_platform_file_replace(const char *temp, const char *path, bool sync_data);
 int inkwell_platform_parent_sync(const char *path);
+int inkwell_platform_dir_make(const char *path);

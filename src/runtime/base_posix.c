@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 uint64_t inkwell_platform_monotonic_ms(void) {
@@ -78,4 +79,8 @@ int inkwell_platform_parent_sync(const char *path) {
     }
     free(parent);
     return result;
+}
+
+int inkwell_platform_dir_make(const char *path) {
+    return mkdir(path, 0700);
 }
