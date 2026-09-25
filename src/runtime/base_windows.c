@@ -1,5 +1,6 @@
 #include "../base/platform.h"
 
+#include <direct.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <io.h>
@@ -65,4 +66,8 @@ int inkwell_platform_file_replace(const char *temp, const char *path, bool sync_
 int inkwell_platform_parent_sync(const char *path) {
     (void)path;
     return 0;
+}
+
+int inkwell_platform_dir_make(const char *path) {
+    return _mkdir(path);
 }
