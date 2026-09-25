@@ -411,3 +411,49 @@ INKWELL_TEST_CASE(log_file_path_override_wins, unit) {
     INKWELL_TEST_FAIL_IF(!matched, "INKWELL_LOG_FILE did not override the derived path");
     record_success(test_name);
 }
+
+static char g_log_captured[512];
+
+static void log_capture_sink(const char *line) {
+    snprintf(g_log_captured, sizeof g_log_captured, "%s", line);
+}
+
+/* A sink's line is the stderr line, cut. Walking the component length across the sink's limit
+   puts the cut inside " (", the component, ")", ": " and the message in turn, and at every one
+   of them the captured line has to be a prefix of the full line - not a line with a separator
+   dropped and the message moved up into its place. */
+INKWELL_TEST_CASE(log_sink_line_is_a_prefix_of_the_full_line_wherever_it_is_cut, unit) {
+    const enum inkwell_log_level saved_level = inkwell_log_get_level();
+    inkwell_log_set_level(INKWELL_LOG_LEVEL_INFO);
+    inkwell_log_set_sink(log_capture_sink);
+
+    char component[300];
+    const char *failure = NULL;
+    for (size_t length = 200U; length <= 260U && failure == NULL; ++length) {
+        memset(component, 'c', length);
+        component[length] = '\0';
+        g_log_captured[0] = '\0';
+        inkwell_log_info(component, "%s", "Message");
+
+        const char *const open = strstr(g_log_captured, " (");
+        char expected[600];
+        if (open == NULL) {
+            failure = "the captured line lost the component's opening";
+            break;
+        }
+        snprintf(expected, sizeof expected, "%.*s (%s): Message", (int)(open - g_log_captured),
+                 g_log_captured, component);
+        const size_t captured = strlen(g_log_captured);
+        const size_t full = strlen(expected);
+        if (captured != (full < 255U ? full : 255U)) {
+            failure = "the captured line was not cut at the sink's limit";
+        } else if (strncmp(expected, g_log_captured, captured) != 0) {
+            failure = "the captured line is not a prefix of the full line";
+        }
+    }
+
+    inkwell_log_set_sink(NULL);
+    inkwell_log_set_level(saved_level);
+    INKWELL_TEST_FAIL_IF(failure != NULL, failure);
+    record_success(test_name);
+}
