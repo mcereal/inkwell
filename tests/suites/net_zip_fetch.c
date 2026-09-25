@@ -338,10 +338,10 @@ static bool zip_wait_live(struct inkwell_loop *loop, struct inkwell_fetch *fetch
 }
 
 /*
- * A range read that goes silent is asked for once more before the download fails. Seen on a
- * Brick: the member's read reached the CDN and was never answered, the whole download failed at
- * its two-minute deadline, and the same press a minute later fetched the image in five seconds.
- * Once, and only once - a CDN that stalls every time fails the download rather than looping.
+ * A range read that goes silent is asked for once more before the download fails. Seen from a
+ * device: the member's read reached the CDN and was never answered, the whole download failed at
+ * its two-minute deadline, and a retry a minute later fetched the member in five seconds. Once,
+ * and only once - a CDN that stalls every time fails the download rather than looping.
  */
 INKWELL_TEST_CASE(zip_fetch_asks_again_for_a_range_that_stalled, unit) {
     char dir[] = "/tmp/inkwell_zipfetch_XXXXXX";

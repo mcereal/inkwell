@@ -92,9 +92,12 @@ struct inkwell_fetch_conn {
     size_t address_count;
     size_t address_next;
     uint64_t attempt_deadline_ms;
-    /* The last time the hop moved - its handshake finishing, or a byte either way - which
-       idle_timeout_ms is measured from. */
+    /* When the hop last moved - its handshake finishing, or a byte either way - which
+       idle_timeout_ms is measured from. Movement is flagged where it happens and stamped by the
+       next tick, on the tick's clock: `now_ms` in an fd callback is the tick before a wait that
+       may have been long, and a byte that ended the wait would read as old as the wait. */
     uint64_t last_progress_ms;
+    bool progressed;
     inkwell_socket socket;
     /* The loop's token for `socket`, or -1 while it is not watched. */
     int token;
@@ -466,7 +469,7 @@ static void fetch_receive(struct inkwell_fetch *fetch) {
             fetch_on_close(fetch, rc);
             return;
         }
-        conn->last_progress_ms = fetch->now_ms;
+        conn->progressed = true;
         if (!fetch_feed(fetch, conn->buffer, (size_t)rc)) {
             return;
         }
@@ -492,7 +495,7 @@ static void fetch_send(struct inkwell_fetch *fetch) {
             return;
         }
         conn->request_sent += (size_t)rc;
-        conn->last_progress_ms = fetch->now_ms;
+        conn->progressed = true;
     }
     conn->phase = FETCH_RECEIVING;
     fetch_receive(fetch);
@@ -530,6 +533,7 @@ static void fetch_handshake(struct inkwell_fetch *fetch) {
     conn->head_seen = false;
     conn->phase = FETCH_SENDING;
     conn->last_progress_ms = fetch->now_ms;
+    conn->progressed = true;
     fetch_send(fetch);
 }
 
@@ -887,6 +891,10 @@ void inkwell_fetch_tick(struct inkwell_fetch *fetch, uint64_t now_ms) {
                    0);
         fetch_fail(fetch, INKWELL_FETCH_TIMED_OUT, "%s did not finish in time", conn->url.host);
         return;
+    }
+    if (conn->progressed) {
+        conn->progressed = false;
+        conn->last_progress_ms = now_ms;
     }
     if (conn->idle_timeout_ms > 0U &&
         (conn->phase == FETCH_SENDING || conn->phase == FETCH_RECEIVING) &&

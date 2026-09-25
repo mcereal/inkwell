@@ -13,6 +13,7 @@
 
 #include "framework/inkwell_test.h"
 
+#include "inkwell/base/time.h"
 #include "inkwell/net/fetch.h"
 #include "inkwell/runtime/loop.h"
 
@@ -125,6 +126,13 @@ static void fetch_serve(void *userdata, const struct https_fixture_request *requ
         https_fixture_printf(conn, "SSH-2.0-OpenSSH\r\n\r\n");
     } else if (strcmp(target, "/slow") == 0) {
         sleep(30);
+    } else if (strcmp(target, "/trickle") == 0) {
+        /* A body in two halves with a pause before each: moving, but slowly. */
+        https_fixture_printf(conn, "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n");
+        sleep(1);
+        https_fixture_send(conn, "first half", 10U);
+        sleep(2);
+        https_fixture_send(conn, "other half", 10U);
     } else {
         https_fixture_reply(conn, 404, NULL, "not here", 8U);
     }
@@ -956,7 +964,7 @@ cleanup:
 
 /*
  * A server that takes the request and then says nothing is given the idle limit, not the whole
- * deadline. A CDN once held a firmware range read silent for all of a two-minute deadline that
+ * deadline. A CDN once held a range read silent for all of a two-minute deadline that
  * was sized for a slow link; the retry that got it in five seconds had to wait for that.
  */
 INKWELL_TEST_CASE(fetch_gives_up_on_a_silent_server_at_the_idle_limit, unit) {
@@ -992,6 +1000,63 @@ INKWELL_TEST_CASE(fetch_gives_up_on_a_silent_server_at_the_idle_limit, unit) {
     if (h.probe.calls != 1U || h.probe.outcome[0] != INKWELL_FETCH_TIMED_OUT ||
         h.probe.failure[0].reason != INKWELL_NET_TIMED_OUT || inkwell_fetch_busy(&h.fetch)) {
         failure = "silence past the idle limit should end the request long before its deadline";
+        goto cleanup;
+    }
+
+cleanup:
+    harness_stop(&h);
+    if (failure != NULL) {
+        record_failure(test_name, failure);
+    } else {
+        record_success(test_name);
+    }
+}
+
+/*
+ * Bytes that arrive during a long wait count from when the wait ended, not from the tick before
+ * it. Stamped with the older clock, half a body that had just landed read as a second of silence
+ * and the next tick called the request idle.
+ */
+INKWELL_TEST_CASE(fetch_counts_progress_from_the_tick_that_saw_it, unit) {
+    struct fetch_harness h;
+    const char *failure = NULL;
+    if (!harness_start(&h)) {
+        failure = "the harness did not start";
+        goto cleanup;
+    }
+
+    const struct inkwell_fetch_request trickle = {
+        .url = "https://api.github.com/trickle",
+        .timeout_ms = 60000U,
+        .idle_timeout_ms = 500U,
+        .on_done = probe_record,
+        .userdata = &h.probe,
+    };
+    if (inkwell_fetch_start(&h.fetch, &trickle, 0U) != 0) {
+        failure = "the request should start";
+        goto cleanup;
+    }
+    for (int turn = 0; turn < 20; ++turn) {
+        (void)inkwell_loop_run(&h.loop, 10);
+        inkwell_fetch_tick(&h.fetch, 0U);
+    }
+    /* One long wait with no tick in it, across the first half's arrival. */
+    const uint64_t until = inkwell_time_monotonic_ms() + 1500U;
+    while (inkwell_time_monotonic_ms() < until && h.probe.calls == 0U) {
+        (void)inkwell_loop_run(&h.loop, 50);
+    }
+    inkwell_fetch_tick(&h.fetch, 900U);
+    if (h.probe.calls != 0U) {
+        failure = "bytes that landed during the wait are not silence";
+        goto cleanup;
+    }
+    for (int turn = 0; turn < 400 && h.probe.calls == 0U; ++turn) {
+        (void)inkwell_loop_run(&h.loop, 10);
+        inkwell_fetch_tick(&h.fetch, 900U);
+    }
+    if (h.probe.calls != 1U || h.probe.outcome[0] != INKWELL_FETCH_OK ||
+        strcmp(h.probe.body[0], "first halfother half") != 0) {
+        failure = "and the body should arrive whole";
         goto cleanup;
     }
 
