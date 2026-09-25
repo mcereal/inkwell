@@ -93,12 +93,18 @@ int inkwell_platform_dir_list(const char *dir, void (*visit)(void *context, cons
     if (handle == INVALID_HANDLE_VALUE) {
         return GetLastError() == ERROR_FILE_NOT_FOUND ? 0 : -EIO;
     }
-    do {
-        if (strcmp(found.cFileName, ".") == 0 || strcmp(found.cFileName, "..") == 0) {
-            continue;
+    int result = 0;
+    for (;;) {
+        if (strcmp(found.cFileName, ".") != 0 && strcmp(found.cFileName, "..") != 0) {
+            visit(context, found.cFileName);
         }
-        visit(context, found.cFileName);
-    } while (FindNextFileA(handle, &found));
+        if (!FindNextFileA(handle, &found)) {
+            /* Read at once, before anything else can overwrite it: the end of the directory is
+               ERROR_NO_MORE_FILES, and anything else stopped the walk short. */
+            result = GetLastError() == ERROR_NO_MORE_FILES ? 0 : -EIO;
+            break;
+        }
+    }
     FindClose(handle);
-    return 0;
+    return result;
 }

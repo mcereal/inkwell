@@ -165,3 +165,29 @@ INKWELL_TEST_CASE(file_list_visits_every_entry_and_lets_the_visitor_remove_it, u
                          "an empty path or no visitor was not refused");
     record_success(test_name);
 }
+
+static void list_visit_failing(void *context, const char *name) {
+    unsigned *seen = context;
+    (*seen)++;
+    (void)name;
+    /* A visitor whose own work failed leaves errno behind; the walk must not read it as its own. */
+    errno = EACCES;
+}
+
+INKWELL_TEST_CASE(file_list_is_not_failed_by_a_visitor_that_set_errno, unit) {
+    char parent[] = "/tmp/inkwell_list_errno_XXXXXX";
+    INKWELL_TEST_FAIL_IF(mkdtemp(parent) == NULL, "could not create a temporary directory");
+    char path[sizeof parent + 16U];
+    snprintf(path, sizeof path, "%s/only", parent);
+    const bool staged = file_write(path, "x");
+
+    unsigned seen = 0U;
+    const int listed = inkwell_file_list(parent, list_visit_failing, &seen);
+
+    remove(path);
+    rmdir(parent);
+    INKWELL_TEST_FAIL_IF(!staged, "could not stage the file");
+    INKWELL_TEST_FAIL_IF(listed != 0 || seen != 1U,
+                         "a finished walk was reported failed because the visitor set errno");
+    record_success(test_name);
+}

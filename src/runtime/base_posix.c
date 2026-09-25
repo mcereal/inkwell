@@ -97,13 +97,22 @@ int inkwell_platform_dir_list(const char *dir, void (*visit)(void *context, cons
     if (handle == NULL) {
         return -errno;
     }
-    const struct dirent *entry = NULL;
-    while ((entry = readdir(handle)) != NULL) {
+    int result = 0;
+    for (;;) {
+        /* readdir() says "the end" and "it failed" with the same NULL, and only errno tells them
+           apart - so it is cleared before every call, not once: a visitor that removed a file
+           and failed has left its own errno behind. */
+        errno = 0;
+        const struct dirent *entry = readdir(handle);
+        if (entry == NULL) {
+            result = errno != 0 ? -errno : 0;
+            break;
+        }
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
             continue;
         }
         visit(context, entry->d_name);
     }
     closedir(handle);
-    return 0;
+    return result;
 }

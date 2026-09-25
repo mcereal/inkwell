@@ -51,7 +51,9 @@ bool inkwell_file_is_dir(const char *path);
 /*
  * Calls `visit` once for every entry in `dir` by name, "." and ".." aside, in whatever order the
  * system keeps them. 0, or a negative errno when the directory cannot be listed (-ENOTDIR for a
- * file). The name is the entry's alone; the caller joins it to `dir`.
+ * file) or the listing stopped short of its end - a caller removing what it is shown must not
+ * take a walk that failed halfway for one that finished. The name is the entry's alone; the
+ * caller joins it to `dir`.
  *
  * A visitor may remove the entry it was handed - a wipe of a program's own files is the reason
  * this exists - and the walk carries on; it may not rely on seeing an entry created meanwhile.
