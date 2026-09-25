@@ -52,3 +52,14 @@ int inkwell_file_replace(const char *from, const char *to) {
     }
     return inkwell_platform_file_replace(from, to, false) == 0 ? 0 : -errno;
 }
+
+bool inkwell_file_is_dir(const char *path) {
+    return path != NULL && path[0] != '\0' && inkwell_platform_is_dir(path);
+}
+
+int inkwell_file_list(const char *dir, inkwell_file_entry_fn visit, void *context) {
+    if (dir == NULL || dir[0] == '\0' || visit == NULL) {
+        return -EINVAL;
+    }
+    return inkwell_platform_dir_list(dir, visit, context);
+}

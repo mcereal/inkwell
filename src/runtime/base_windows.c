@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <stdio.h>
+#include <string.h>
 #include <windows.h>
 
 uint64_t inkwell_platform_monotonic_ms(void) {
@@ -70,4 +71,34 @@ int inkwell_platform_parent_sync(const char *path) {
 
 int inkwell_platform_dir_make(const char *path) {
     return _mkdir(path);
+}
+
+bool inkwell_platform_is_dir(const char *path) {
+    const DWORD attributes = GetFileAttributesA(path);
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U;
+}
+
+int inkwell_platform_dir_list(const char *dir, void (*visit)(void *context, const char *name),
+                              void *context) {
+    if (!inkwell_platform_is_dir(dir)) {
+        return GetFileAttributesA(dir) == INVALID_FILE_ATTRIBUTES ? -ENOENT : -ENOTDIR;
+    }
+    char pattern[MAX_PATH];
+    const int written = snprintf(pattern, sizeof pattern, "%s\\*", dir);
+    if (written <= 0 || written >= (int)sizeof pattern) {
+        return -ENAMETOOLONG;
+    }
+    WIN32_FIND_DATAA found;
+    HANDLE handle = FindFirstFileA(pattern, &found);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return GetLastError() == ERROR_FILE_NOT_FOUND ? 0 : -EIO;
+    }
+    do {
+        if (strcmp(found.cFileName, ".") == 0 || strcmp(found.cFileName, "..") == 0) {
+            continue;
+        }
+        visit(context, found.cFileName);
+    } while (FindNextFileA(handle, &found));
+    FindClose(handle);
+    return 0;
 }

@@ -1,5 +1,6 @@
 #include "../base/platform.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -83,4 +84,26 @@ int inkwell_platform_parent_sync(const char *path) {
 
 int inkwell_platform_dir_make(const char *path) {
     return mkdir(path, 0700);
+}
+
+bool inkwell_platform_is_dir(const char *path) {
+    struct stat info;
+    return stat(path, &info) == 0 && S_ISDIR(info.st_mode);
+}
+
+int inkwell_platform_dir_list(const char *dir, void (*visit)(void *context, const char *name),
+                              void *context) {
+    DIR *handle = opendir(dir);
+    if (handle == NULL) {
+        return -errno;
+    }
+    const struct dirent *entry = NULL;
+    while ((entry = readdir(handle)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        visit(context, entry->d_name);
+    }
+    closedir(handle);
+    return 0;
 }
