@@ -91,6 +91,18 @@ void inkwell_log_set_sink(void (*sink)(const char *line)) {
     g_sink = sink;
 }
 
+/* Copies `text` onto the end of `line` and returns the new end, stopping a byte short of `size`
+   so a long line is cut exactly where the stderr line would have been cut. A byte loop rather
+   than snprintf(): gcc cannot see that `offset` stays below `size`, and at -O2 reported each
+   fixed separator as truncated into a one-byte region. */
+static size_t log_append(char *line, size_t size, size_t offset, const char *text) {
+    while (*text != '\0' && offset + 1U < size) {
+        line[offset++] = *text++;
+    }
+    line[offset] = '\0';
+    return offset;
+}
+
 static void log_capture(const char *timestamp, enum inkwell_log_level level, const char *component,
                         const char *fmt, va_list args)
     __attribute__((format(INKWELL_PRINTF_ARCHETYPE, 4, 0)));
@@ -105,18 +117,12 @@ static void log_capture(const char *timestamp, enum inkwell_log_level level, con
     }
     size_t offset = (size_t)used < sizeof line ? (size_t)used : sizeof line - 1U;
 
-    if (component != NULL && component[0] != '\0' && offset + 2U < sizeof line) {
-        used = snprintf(line + offset, sizeof line - offset, " (%s)", component);
-        if (used > 0) {
-            offset +=
-                (size_t)used < sizeof line - offset ? (size_t)used : sizeof line - offset - 1U;
-        }
+    if (component != NULL && component[0] != '\0') {
+        offset = log_append(line, sizeof line, offset, " (");
+        offset = log_append(line, sizeof line, offset, component);
+        offset = log_append(line, sizeof line, offset, ")");
     }
-    if (offset + 2U < sizeof line) {
-        line[offset++] = ':';
-        line[offset++] = ' ';
-        line[offset] = '\0';
-    }
+    offset = log_append(line, sizeof line, offset, ": ");
     (void)vsnprintf(line + offset, sizeof line - offset, fmt, args);
 
     /* The message may have ended in the newline the stderr path below adds for itself. A ring
