@@ -1878,7 +1878,7 @@ int inkwell_ble_backend_request_connection_interval(
     if (fd < 0) {
         return fd;
     }
-    struct inkwell_hci_connection_info info;
+    struct inkwell_hci_connection_info info = {0};
     const int found = hci_connection(fd, bdaddr, &info);
     if (found < 0) {
         close(fd);

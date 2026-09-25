@@ -105,16 +105,17 @@ static void log_capture(const char *timestamp, enum inkwell_log_level level, con
     }
     size_t offset = (size_t)used < sizeof line ? (size_t)used : sizeof line - 1U;
 
-    if (component != NULL && component[0] != '\0') {
+    if (component != NULL && component[0] != '\0' && offset + 2U < sizeof line) {
         used = snprintf(line + offset, sizeof line - offset, " (%s)", component);
         if (used > 0) {
             offset +=
                 (size_t)used < sizeof line - offset ? (size_t)used : sizeof line - offset - 1U;
         }
     }
-    used = snprintf(line + offset, sizeof line - offset, ": ");
-    if (used > 0) {
-        offset += (size_t)used < sizeof line - offset ? (size_t)used : sizeof line - offset - 1U;
+    if (offset + 2U < sizeof line) {
+        line[offset++] = ':';
+        line[offset++] = ' ';
+        line[offset] = '\0';
     }
     (void)vsnprintf(line + offset, sizeof line - offset, fmt, args);
 
