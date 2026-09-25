@@ -954,6 +954,56 @@ cleanup:
     }
 }
 
+/*
+ * A server that takes the request and then says nothing is given the idle limit, not the whole
+ * deadline. A CDN once held a firmware range read silent for all of a two-minute deadline that
+ * was sized for a slow link; the retry that got it in five seconds had to wait for that.
+ */
+INKWELL_TEST_CASE(fetch_gives_up_on_a_silent_server_at_the_idle_limit, unit) {
+    struct fetch_harness h;
+    const char *failure = NULL;
+    if (!harness_start(&h)) {
+        failure = "the harness did not start";
+        goto cleanup;
+    }
+
+    const struct inkwell_fetch_request slow = {
+        .url = "https://api.github.com/slow",
+        .timeout_ms = 60000U,
+        .idle_timeout_ms = 500U,
+        .on_done = probe_record,
+        .userdata = &h.probe,
+    };
+    if (inkwell_fetch_start(&h.fetch, &slow, 0U) != 0) {
+        failure = "the request should start";
+        goto cleanup;
+    }
+    /* Long enough for the handshake and the request to go out; the clock stays at 0. */
+    for (int turn = 0; turn < 20; ++turn) {
+        (void)inkwell_loop_run(&h.loop, 10);
+        inkwell_fetch_tick(&h.fetch, 0U);
+    }
+    inkwell_fetch_tick(&h.fetch, 499U);
+    if (h.probe.calls != 0U) {
+        failure = "nothing should have finished inside the idle limit";
+        goto cleanup;
+    }
+    inkwell_fetch_tick(&h.fetch, 500U);
+    if (h.probe.calls != 1U || h.probe.outcome[0] != INKWELL_FETCH_TIMED_OUT ||
+        h.probe.failure[0].reason != INKWELL_NET_TIMED_OUT || inkwell_fetch_busy(&h.fetch)) {
+        failure = "silence past the idle limit should end the request long before its deadline";
+        goto cleanup;
+    }
+
+cleanup:
+    harness_stop(&h);
+    if (failure != NULL) {
+        record_failure(test_name, failure);
+    } else {
+        record_success(test_name);
+    }
+}
+
 INKWELL_TEST_CASE(fetch_gives_up_on_a_server_that_does_not_answer, unit) {
     struct fetch_harness h;
     const char *failure = NULL;

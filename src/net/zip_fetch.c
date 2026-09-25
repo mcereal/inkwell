@@ -189,12 +189,14 @@ static bool zip_range(struct inkwell_zip_fetch *zip, const char *name, uint64_t 
        sending after the last byte asked for is not allowed to fill the staging directory. */
     request.output_max = last - first + 1U;
     request.timeout_ms = timeout_ms;
+    request.idle_timeout_ms = zip->idle_timeout_ms;
     request.on_done = zip_on_fetch;
     request.userdata = zip;
     return inkwell_fetch_start(zip->fetch, &request, inkwell_time_monotonic_ms()) == 0;
 }
 
 static void zip_step_window(struct inkwell_zip_fetch *zip) {
+    zip->step = zip_step_window;
     /*
      * The largest tail a conforming zip can need, or the whole file when it is smaller than
      * that - which no real archive is, but a 404 page dressed as one might be.
@@ -210,6 +212,7 @@ static void zip_step_window(struct inkwell_zip_fetch *zip) {
 }
 
 static void zip_step_central(struct inkwell_zip_fetch *zip) {
+    zip->step = zip_step_central;
     zip->state = INKWELL_ZIP_FETCH_READING;
     zip->directory_only = true;
     if (!zip_range(zip, ZIP_FILE_CENTRAL, zip->window_offset,
@@ -219,6 +222,7 @@ static void zip_step_central(struct inkwell_zip_fetch *zip) {
 }
 
 static void zip_step_header(struct inkwell_zip_fetch *zip) {
+    zip->step = zip_step_header;
     zip->state = INKWELL_ZIP_FETCH_LOCATING;
     if (!zip_range(zip, ZIP_FILE_HEADER, zip->entry.local_header_offset,
                    zip->entry.local_header_offset + INKWELL_ZIP_LOCAL_HEADER_SIZE - 1U,
@@ -228,6 +232,7 @@ static void zip_step_header(struct inkwell_zip_fetch *zip) {
 }
 
 static void zip_step_member(struct inkwell_zip_fetch *zip) {
+    zip->step = zip_step_member;
     zip->state = INKWELL_ZIP_FETCH_FETCHING;
     if (!zip_range(zip, ZIP_FILE_MEMBER, zip->data_offset,
                    zip->data_offset + zip->entry.compressed_size - 1U, zip->member_timeout_ms)) {
@@ -374,11 +379,25 @@ static void zip_read_header(struct inkwell_zip_fetch *zip) {
 static void zip_on_fetch(void *userdata, const struct inkwell_fetch_result *result) {
     struct inkwell_zip_fetch *const zip = (struct inkwell_zip_fetch *)userdata;
     if (result->outcome != INKWELL_FETCH_OK) {
-        inkwell_log_error("zip_fetch", "A range read failed (outcome %d, status %d)",
-                          (int)result->outcome, result->status);
+        /* Once, and only for the way there failing: a server that answered with the wrong thing
+           will answer with it again. The HEAD is not retried - it has no step to repeat, and a
+           host that cannot answer one is not about to serve a range. */
+        const bool transient =
+            result->outcome == INKWELL_FETCH_NETWORK || result->outcome == INKWELL_FETCH_TIMED_OUT;
+        if (transient && zip->step != NULL && !zip->retried) {
+            inkwell_log_warn("zip_fetch", "A range read failed (%s: %s); trying it once more",
+                             inkwell_fetch_outcome_name(result->outcome), result->detail);
+            zip->retried = true;
+            zip->step(zip);
+            return;
+        }
+        inkwell_log_error("zip_fetch", "A range read failed (%s, status %d: %s)",
+                          inkwell_fetch_outcome_name(result->outcome), result->status,
+                          result->detail);
         zip_fail(zip, INKWELL_ZIP_FETCH_ERROR_NETWORK);
         return;
     }
+    zip->retried = false;
     switch (zip->state) {
     case INKWELL_ZIP_FETCH_MEASURING: {
         uint64_t size = 0U;
@@ -548,6 +567,7 @@ int inkwell_zip_fetch_start(struct inkwell_zip_fetch *zip, struct inkwell_fetch 
     zip->max_member_bytes = request->max_member_bytes;
     zip->step_timeout_ms = request->step_timeout_ms;
     zip->member_timeout_ms = request->member_timeout_ms;
+    zip->idle_timeout_ms = request->idle_timeout_ms;
     zip->on_done = request->on_done;
     zip->userdata = request->userdata;
     zip->state = INKWELL_ZIP_FETCH_MEASURING;

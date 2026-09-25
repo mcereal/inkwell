@@ -79,6 +79,7 @@ struct inkwell_fetch_conn {
     size_t response_max;
     uint64_t output_max;
     uint64_t deadline_ms;
+    uint32_t idle_timeout_ms;
     inkwell_fetch_done_fn on_done;
     void *userdata;
 
@@ -91,6 +92,9 @@ struct inkwell_fetch_conn {
     size_t address_count;
     size_t address_next;
     uint64_t attempt_deadline_ms;
+    /* The last time the hop moved - its handshake finishing, or a byte either way - which
+       idle_timeout_ms is measured from. */
+    uint64_t last_progress_ms;
     inkwell_socket socket;
     /* The loop's token for `socket`, or -1 while it is not watched. */
     int token;
@@ -462,6 +466,7 @@ static void fetch_receive(struct inkwell_fetch *fetch) {
             fetch_on_close(fetch, rc);
             return;
         }
+        conn->last_progress_ms = fetch->now_ms;
         if (!fetch_feed(fetch, conn->buffer, (size_t)rc)) {
             return;
         }
@@ -487,6 +492,7 @@ static void fetch_send(struct inkwell_fetch *fetch) {
             return;
         }
         conn->request_sent += (size_t)rc;
+        conn->last_progress_ms = fetch->now_ms;
     }
     conn->phase = FETCH_RECEIVING;
     fetch_receive(fetch);
@@ -523,6 +529,7 @@ static void fetch_handshake(struct inkwell_fetch *fetch) {
     inkwell_http_response_init(&conn->response, conn->method == INKWELL_FETCH_HEAD);
     conn->head_seen = false;
     conn->phase = FETCH_SENDING;
+    conn->last_progress_ms = fetch->now_ms;
     fetch_send(fetch);
 }
 
@@ -841,6 +848,7 @@ int inkwell_fetch_start(struct inkwell_fetch *fetch, const struct inkwell_fetch_
     conn->output_max = (uint64_t)request->output_max;
     conn->deadline_ms =
         now_ms + (request->timeout_ms > 0U ? request->timeout_ms : FETCH_DEFAULT_TIMEOUT_MS);
+    conn->idle_timeout_ms = request->idle_timeout_ms;
     conn->on_done = request->on_done;
     conn->userdata = request->userdata;
 
@@ -878,6 +886,15 @@ void inkwell_fetch_tick(struct inkwell_fetch *fetch, uint64_t now_ms) {
                                                   : INKWELL_NET_TIMED_OUT,
                    0);
         fetch_fail(fetch, INKWELL_FETCH_TIMED_OUT, "%s did not finish in time", conn->url.host);
+        return;
+    }
+    if (conn->idle_timeout_ms > 0U &&
+        (conn->phase == FETCH_SENDING || conn->phase == FETCH_RECEIVING) &&
+        now_ms >= conn->last_progress_ms &&
+        now_ms - conn->last_progress_ms >= conn->idle_timeout_ms) {
+        fetch_note(conn, INKWELL_NET_TIMED_OUT, 0);
+        fetch_fail(fetch, INKWELL_FETCH_TIMED_OUT, "nothing from %s in %u ms", conn->url.host,
+                   conn->idle_timeout_ms);
         return;
     }
     if (conn->phase == FETCH_CONNECTING && now_ms >= conn->attempt_deadline_ms) {

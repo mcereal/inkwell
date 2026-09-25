@@ -16,6 +16,7 @@
 
 #include "framework/inkwell_test.h"
 
+#include "inkwell/base/time.h"
 #include "inkwell/codec/inflate.h"
 #include "inkwell/net/fetch.h"
 #include "inkwell/net/zip_fetch.h"
@@ -71,6 +72,10 @@ enum zip_cdn {
     CDN_CORRUPT_MEMBER,
     /* That member's uncompressed size in the central directory rewritten to 2 GiB. */
     CDN_OVERSIZED_MEMBER,
+    /* The member's range read taken and never answered, the first time it is asked for. */
+    CDN_STALLS_MEMBER_ONCE,
+    /* ...and every time. */
+    CDN_STALLS_MEMBER,
 };
 
 /* Where that size field sits in the tail window: the member's central record starts at 50,000,
@@ -128,6 +133,14 @@ static void zip_serve(void *userdata, const struct https_fixture_request *reques
             memcpy(body + TAIL_MEMBER_SIZE_FIELD, "\x00\x00\x00\x80", 4U);
         }
     } else if (count <= sizeof body && first >= MEMBER_BASE) {
+        /* The child serves one connection at a time, so this also holds the retry in the accept
+           queue for a second - which is a server slow to take a connection, and fine. */
+        static unsigned member_reads;
+        if (first - MEMBER_BASE == 111U &&
+            (cdn == CDN_STALLS_MEMBER || (cdn == CDN_STALLS_MEMBER_ONCE && member_reads++ == 0U))) {
+            sleep(1);
+            return;
+        }
         got = zip_slice("zip_member_t114_mt_json_2.7.26.bin", first - MEMBER_BASE, count, body);
         if (cdn == CDN_CORRUPT_MEMBER && first - MEMBER_BASE == 111U && got > 200U) {
             body[200] = '\0';
@@ -296,6 +309,99 @@ INKWELL_TEST_CASE(zip_fetch_fetches_a_member_end_to_end, unit) {
     }
     if (!zip_exists(dir, "dl.image")) {
         failure = "and the result kept";
+        goto cleanup;
+    }
+
+cleanup:
+    if (fetch_up) {
+        inkwell_fetch_shutdown(&fetch);
+    }
+    if (loop_up) {
+        inkwell_loop_shutdown(&loop);
+    }
+    https_fixture_stop(&server);
+    zip_clean_dir(dir);
+    INKWELL_TEST_FAIL_IF(failure != NULL, failure);
+    record_success(test_name);
+}
+
+/* zip_wait() on the real clock, for the cases an idle limit has to be able to run out in. */
+static bool zip_wait_live(struct inkwell_loop *loop, struct inkwell_fetch *fetch,
+                          struct inkwell_zip_fetch *zip, const struct zip_probe *probe) {
+    for (int turn = 0; turn < 1000 && probe->calls == 0U; ++turn) {
+        (void)inkwell_loop_run(loop, 10);
+        const uint64_t now = inkwell_time_monotonic_ms();
+        inkwell_fetch_tick(fetch, now);
+        inkwell_zip_fetch_tick(zip, now);
+    }
+    return probe->calls > 0U;
+}
+
+/*
+ * A range read that goes silent is asked for once more before the download fails. Seen on a
+ * Brick: the member's read reached the CDN and was never answered, the whole download failed at
+ * its two-minute deadline, and the same press a minute later fetched the image in five seconds.
+ * Once, and only once - a CDN that stalls every time fails the download rather than looping.
+ */
+INKWELL_TEST_CASE(zip_fetch_asks_again_for_a_range_that_stalled, unit) {
+    char dir[] = "/tmp/inkwell_zipfetch_XXXXXX";
+    INKWELL_TEST_FAIL_IF(mkdtemp(dir) == NULL, "could not create a temporary directory");
+
+    const char *failure = NULL;
+    struct https_fixture server;
+    memset(&server, 0, sizeof server);
+    struct inkwell_loop loop;
+    struct inkwell_fetch fetch;
+    struct inkwell_zip_fetch zip;
+    struct zip_probe probe;
+    struct inkwell_zip_fetch_request request;
+    bool loop_up = false;
+    bool fetch_up = false;
+
+    if (inkwell_loop_init(&loop) != 0) {
+        failure = "event loop init failed";
+        goto cleanup;
+    }
+    loop_up = true;
+    if (inkwell_fetch_init(&fetch, &loop) != 0) {
+        failure = "fetch init failed";
+        goto cleanup;
+    }
+    fetch_up = true;
+
+    if (!zip_serve_as(&server, CDN_STALLS_MEMBER_ONCE, &fetch)) {
+        failure = "could not stand up the fake CDN";
+        goto cleanup;
+    }
+    memset(&probe, 0, sizeof probe);
+    memset(&zip, 0, sizeof zip);
+    zip_request(&request, FIXTURE_MEMBER, dir, &probe);
+    request.idle_timeout_ms = 300U;
+    if (inkwell_zip_fetch_start(&zip, &fetch, &request) != 0 ||
+        !zip_wait_live(&loop, &fetch, &zip, &probe)) {
+        failure = "the download should have finished";
+        goto cleanup;
+    }
+    if (probe.state != INKWELL_ZIP_FETCH_READY || probe.size != 1157ULL) {
+        failure = "a range that stalled once should be asked for again and land";
+        goto cleanup;
+    }
+
+    if (!zip_serve_as(&server, CDN_STALLS_MEMBER, &fetch)) {
+        failure = "could not stand the fake CDN up again";
+        goto cleanup;
+    }
+    memset(&probe, 0, sizeof probe);
+    memset(&zip, 0, sizeof zip);
+    zip_request(&request, FIXTURE_MEMBER, dir, &probe);
+    request.idle_timeout_ms = 300U;
+    if (inkwell_zip_fetch_start(&zip, &fetch, &request) != 0 ||
+        !zip_wait_live(&loop, &fetch, &zip, &probe)) {
+        failure = "the second download should have finished";
+        goto cleanup;
+    }
+    if (probe.state != INKWELL_ZIP_FETCH_FAILED || probe.error != INKWELL_ZIP_FETCH_ERROR_NETWORK) {
+        failure = "a range that stalls every time should fail the download, not loop";
         goto cleanup;
     }
 
