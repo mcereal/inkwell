@@ -36,25 +36,8 @@ per connector, one session per TLS context, one request per fetch. Composition i
 Something that wants a connection pool, a thread pool or a scheduler wants a different library,
 and the day this one grows them is the day it stops being small enough to read.
 
-## Why it exists
-
 It was extracted from [mesh-client](https://github.com/mcereal/mesh-client), a Meshtastic client
-that began on the TrimUI Brick, and the split was made twice for the same reason. The first pass
-took out everything that was never about Meshtastic *and was about drawing*, and that became
-inkcell. What is here is the rest of that sentence: everything that was never about Meshtastic
-and was never about drawing either.
-
-The giveaway was that mesh-client's event loop, its DNS resolver and its TLS client all
-`#include "inkcell/utils/log.h"`. A clock and a log line are not UI. They were in the toolkit
-because the toolkit happened to be extracted first, and the day the loop moved out of the
-application was the day that stopped being tenable — a platform layer that has to depend on a
-*widget library* to write a log line has its arrows the wrong way round.
-
-So the foundation moved down here, and inkcell stands on it.
-
-It began as the layer under one handheld and stayed portable because of one rule: only
-`runtime/` and `base/fd.c` say which kernel this is. That rule is why macOS arrived as a second
-backend rather than a fork, and why Windows is arriving as a third.
+for the TrimUI Brick: everything in it that was never about Meshtastic and never about drawing.
 
 ## What is in it
 
@@ -115,9 +98,9 @@ per system, so nothing above this layer names any of them.
 
 "Refuses" is the same contract as a missing optional dependency: the header exists, every symbol
 links, and a call reports itself unavailable, so a program builds unchanged on every system and
-asks at runtime what it can do. Windows is the youngest backend and each of those rows is a gap
-being closed, not a boundary. A fourth system is a decision about the shape of the stack, in the
-same way a new area is.
+asks at runtime what it can do. Closing a gap is swapping the `<name>_unavailable.c` an area
+compiles for a real backend and updating this table. A fourth system is a decision about the
+shape of the stack, in the same way a new area is.
 
 ### Building it
 
@@ -175,11 +158,19 @@ new suite file goes in `INKWELL_TEST_SUITES` in `tests/CMakeLists.txt`.
 ./build/tests/inkwell_tests --suite codec_zip
 ```
 
-## Status
+## What does not belong here
 
-The platform pieces identified during the extraction from mesh-client are here. The current
-boundary and the evidence for everything that stayed in the application are recorded in
-[`docs/extraction.md`](docs/extraction.md).
+- **A word a user reads.** A failure is a reason and a number (`net/reason.h`); the application
+  turns the pair into a sentence. Nothing here collapses two reasons it can tell apart, because
+  merging them is a decision about words.
+- **A policy dressed as a mechanism.** A CA bundle, a `User-Agent`, a retry schedule, a size
+  limit: the mechanism lives here and the number is the caller's. A component that moved down
+  left a two-line wrapper behind in the application holding exactly that number.
+- **A string catalog.** Translation stays in inkcell even though a headless program could use
+  one, because "inkwell has no catalog" makes the no-words rule impossible to break rather than
+  something to remember. Revisit only when something that does not draw needs translated text.
+- **Anything that names an application's domain**, in code or in a comment.
+- **A thread.** Whatever would block gets a descriptor and a callback.
 
 ## Licence
 
