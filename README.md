@@ -168,7 +168,7 @@ new suite file goes in `INKWELL_TEST_SUITES` in `tests/CMakeLists.txt`.
   left a two-line wrapper behind in the application holding exactly that number.
 - **A string catalog.** Translation stays in inkcell even though a headless program could use
   one, because "inkwell has no catalog" makes the no-words rule impossible to break rather than
-  something to remember. Revisit only when something that does not draw needs translated text.
+  something to remember.
 - **Anything that names an application's domain**, in code or in a comment.
 - **A thread.** Whatever would block gets a descriptor and a callback.
 
