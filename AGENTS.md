@@ -96,20 +96,21 @@ header's source by *filename*, never by path.
   that builds that way, because the claim is worth nothing if nobody checks it. A third
   dependency, if it ever arrives, arrives the same way.
 
-## Extracting something from mesh-client
+## Docs
 
-[`docs/extraction.md`](docs/extraction.md) is the running map: what has already come down, what
-is next, and the evidence for each candidate. The error-vocabulary question that used to block
-several rows is answered - `net/reason.h` - and where inkcell ends is the one still open. Read
-it before picking something up.
+The docs are reference: the README says what inkwell is and what does not belong in it, this
+file says how to work in it, and each public header says why its component works the way it
+does. **Planned work, open questions and roadmaps are tracked as issues, not written into the
+repository.** A doc describes what is true now; it is not a log of how it got that way.
+
+## Extracting something from mesh-client
 
 Most of what lands here arrives the same way, and the order matters:
 
 1. **Check what it actually depends on.** `grep -h '#include "' <file>` over the source **and
    its header**, then check what the source *calls* across the line. A candidate that includes
-   an application header is not ready; find the seam first. Reading only the source is how
-   `stream_link.c` sat in `docs/extraction.md` as a file move for a tranche - it includes one
-   application header, its own, which includes two more.
+   an application header is not ready; find the seam first. A source can look clean while its
+   own header pulls in two application headers.
 2. **Move the tests with it.** A component that arrives without the cases that held it is a
    downgrade, however clean the diff looks. If the cases live inside a larger suite, slice out
    the ones that belong to the component and leave the rest behind.
@@ -117,9 +118,12 @@ Most of what lands here arrives the same way, and the order matters:
    application gets the better name now rather than later: `mesh_event_loop` is
    `inkwell_loop`.
 4. **Generalise the prose, do not delete it.** The comments explain real decisions and are worth
-   more than the code. Rewrite "the radio" as "a peer"; keep the war story about why a rearming
-   timer used to starve the loop, because the next person will hit it too.
-5. **Leave the seam in the application.** Where the component had an application-specific
+   more than the code. Rewrite "the radio" as "a peer", and keep the reason behind a rule - why
+   a rearming timer used to starve the loop, say - because the next person will hit it too.
+5. **Make the seam and the move separate commits.** One commit changes behaviour with the old
+   tests still in place; the next is only a move. A rename folded into a relocation hides wrong
+   names inside a diff nobody can read.
+6. **Leave the seam in the application.** Where the component had an application-specific
    convenience — a lookup by one well-known UUID, say — the general form comes here and the
    two-line wrapper stays there.
 
