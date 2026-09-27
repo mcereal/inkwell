@@ -149,7 +149,8 @@ struct inkwell_serial_mock_config {
     int bind_result; /* returned by inkwell_serial_bind */
     /* How many binds of an unbound port answer -EAGAIN before one succeeds. */
     unsigned bind_pending_polls;
-    int line_state_result; /* returned by inkwell_serial_set_line_state */
+    int line_state_result;  /* returned by inkwell_serial_set_line_state */
+    int line_coding_result; /* returned by inkwell_serial_set_line_coding */
     /* The path a successful bind reports for a port the scan found unbound. */
     const char *bound_path;
     /* When >= 0, inkwell_serial_open dup()s this instead of opening a tty: a test hands it one

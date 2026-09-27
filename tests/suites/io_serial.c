@@ -364,6 +364,22 @@ INKWELL_TEST_CASE(serial_line_coding_goes_where_the_line_state_does, unit) {
     INKWELL_TEST_FAIL_IF(states != 1U || dtr || rts || !after,
                          "and DTR dropped after it, which is what the bootloader reads");
 
+    /* The two requests fail on their own. */
+    struct inkwell_serial_mock_config mock;
+    memset(&mock, 0, sizeof mock);
+    mock.open_fd = -1;
+    mock.line_state_result = -EPIPE;
+    inkwell_serial_mock_enable(&mock);
+    const int coded_alone = inkwell_serial_set_line_coding(&port, 1200U);
+    const int state_alone = inkwell_serial_set_line_state(&port, false, false);
+    mock.line_state_result = 0;
+    mock.line_coding_result = -EIO;
+    inkwell_serial_mock_enable(&mock);
+    const int coding_failed = inkwell_serial_set_line_coding(&port, 1200U);
+    inkwell_serial_mock_disable();
+    INKWELL_TEST_FAIL_IF(coded_alone != 0 || state_alone != -EPIPE || coding_failed != -EIO,
+                         "each request answers with its own result");
+
     INKWELL_TEST_FAIL_IF(inkwell_serial_set_line_coding(NULL, 1200U) != -EINVAL ||
                              inkwell_serial_set_line_coding(&port, 0U) != -EINVAL,
                          "no port, no rate");

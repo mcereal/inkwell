@@ -278,7 +278,7 @@ int inkwell_serial_set_line_coding(const struct inkwell_serial_port_info *port, 
         g_mock.line_coding_calls += 1U;
         g_mock.line_coding_baud = baud;
         g_mock.line_coding_last = true;
-        return g_mock.config.line_state_result;
+        return g_mock.config.line_coding_result;
     }
     return -ENOTSUP;
 }

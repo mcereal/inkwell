@@ -650,7 +650,7 @@ int inkwell_serial_set_line_coding(const struct inkwell_serial_port_info *device
         g_mock_state.line_coding_calls += 1U;
         g_mock_state.line_coding_baud = baud;
         g_mock_state.line_coding_last = true;
-        return g_mock_state.config.line_state_result;
+        return g_mock_state.config.line_coding_result;
     }
 
     if (device->control_interface < 0) {
