@@ -592,10 +592,16 @@ int inkwell_serial_set_lines(int fd, bool dtr, bool rts) {
     if (port == NULL) {
         return -ENOTTY;
     }
-    /* EscapeCommFunction is one line at a time, so the change is as close together as this
-       API can put it: two calls with nothing between them. */
-    if (!EscapeCommFunction(port->com, dtr ? SETDTR : CLRDTR) ||
-        !EscapeCommFunction(port->com, rts ? SETRTS : CLRRTS)) {
+    /* One SetCommState with both control fields, not two EscapeCommFunction calls: the state
+       between two calls is a real line state, and on an auto-program circuit it is a reset or
+       a strap. */
+    DCB dcb = {.DCBlength = sizeof dcb};
+    if (!GetCommState(port->com, &dcb)) {
+        return errno_from_win32(GetLastError());
+    }
+    dcb.fDtrControl = dtr ? DTR_CONTROL_ENABLE : DTR_CONTROL_DISABLE;
+    dcb.fRtsControl = rts ? RTS_CONTROL_ENABLE : RTS_CONTROL_DISABLE;
+    if (!SetCommState(port->com, &dcb)) {
         return errno_from_win32(GetLastError());
     }
     return 0;

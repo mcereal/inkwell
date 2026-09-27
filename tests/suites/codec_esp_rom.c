@@ -137,7 +137,8 @@ INKWELL_TEST_CASE(esp_rom_reads_a_refusal_and_an_md5, unit) {
             strcmp(inkwell_esp_rom_error_name(response.error), "invalid message") != 0,
         "a refusal carries its error");
 
-    /* The V3's answer to SPI_FLASH_MD5 over MeshCore 1.17.1's app: hex text, then status. */
+    /* The V3's answer to SPI_FLASH_MD5 over a captured 644 KB app region: hex text, then
+       status. */
     static const char k_hex[] = "e3ed7342fc711f2fc28dcfa89c953e33";
     uint8_t frame[64] = {0xC0, 0x01, 0x13, 36, 0x00, 0x00, 0x00, 0x00, 0x00};
     memcpy(frame + 9, k_hex, 32);
