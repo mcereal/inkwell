@@ -94,9 +94,11 @@ add_library(inkwell STATIC
     # codec: bytes in, bytes out. They parse; they do not know what the bytes are for.
     src/codec/base64.c
     src/codec/esp_image.c
+    src/codec/esp_rom.c
     src/codec/http.c
     src/codec/inflate.c
     src/codec/json.c
+    src/codec/md5.c
     src/codec/mqtt.c
     src/codec/png.c
     src/codec/wuffs.c

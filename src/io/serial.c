@@ -22,6 +22,10 @@
 #include <termios.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#include <IOKit/serial/ioss.h>
+#endif
+
 /* usbfs is Linux's. On a Mac the scan reads the I/O Registry instead (serial_iokit.c);
    elsewhere it finds no tree and so no port. The two calls that need sysfs or usbfs refuse off
    Linux, and termios opens a port the same way everywhere. */
@@ -74,6 +78,10 @@ struct inkwell_serial_mock_state {
     size_t bind_calls;
     size_t line_state_calls;
     unsigned bind_pending_left;
+    size_t lines_calls;
+    bool dtr;
+    bool rts;
+    unsigned baud;
 };
 
 static struct inkwell_serial_mock_state g_mock_state;
@@ -99,6 +107,20 @@ size_t inkwell_serial_mock_bind_calls(void) {
 
 size_t inkwell_serial_mock_line_state_calls(void) {
     return g_mock_state.line_state_calls;
+}
+
+size_t inkwell_serial_mock_lines_calls(bool *dtr, bool *rts) {
+    if (dtr != NULL) {
+        *dtr = g_mock_state.dtr;
+    }
+    if (rts != NULL) {
+        *rts = g_mock_state.rts;
+    }
+    return g_mock_state.lines_calls;
+}
+
+unsigned inkwell_serial_mock_baud(void) {
+    return g_mock_state.baud;
 }
 
 /* Reads a one-line sysfs attribute with the trailing newline stripped. */
@@ -712,4 +734,59 @@ int inkwell_serial_set_dtr(int fd, bool on) {
         return -errno;
     }
     return 0;
+}
+
+int inkwell_serial_set_lines(int fd, bool dtr, bool rts) {
+    if (fd < 0) {
+        return -EINVAL;
+    }
+    if (g_mock_state.enabled) {
+        g_mock_state.lines_calls += 1U;
+        g_mock_state.dtr = dtr;
+        g_mock_state.rts = rts;
+        return 0;
+    }
+    int bits = 0;
+    if (ioctl(fd, inkwell_ioctl_request_of(TIOCMGET), &bits) < 0) {
+        return -errno;
+    }
+    bits = dtr ? (bits | TIOCM_DTR) : (bits & ~TIOCM_DTR);
+    bits = rts ? (bits | TIOCM_RTS) : (bits & ~TIOCM_RTS);
+    if (ioctl(fd, inkwell_ioctl_request_of(TIOCMSET), &bits) < 0) {
+        return -errno;
+    }
+    return 0;
+}
+
+int inkwell_serial_set_baud(int fd, unsigned baud) {
+    if (fd < 0 || baud == 0U) {
+        return -EINVAL;
+    }
+    if (g_mock_state.enabled) {
+        g_mock_state.baud = baud;
+        return 0;
+    }
+#if defined(__APPLE__)
+    /* termios on macOS stops at 230400; the driver's own ioctl takes any rate it can make. */
+    speed_t speed = (speed_t)baud;
+    if (ioctl(fd, IOSSIOSPEED, &speed) < 0) {
+        return -errno;
+    }
+    return 0;
+#else
+    const speed_t speed = serial_speed(baud);
+    if (speed == B0) {
+        return -EINVAL;
+    }
+    struct termios tio;
+    if (tcgetattr(fd, &tio) < 0) {
+        return -errno;
+    }
+    cfsetispeed(&tio, speed);
+    cfsetospeed(&tio, speed);
+    if (tcsetattr(fd, TCSANOW, &tio) < 0) {
+        return -errno;
+    }
+    return 0;
+#endif
 }
