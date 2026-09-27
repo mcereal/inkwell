@@ -33,9 +33,11 @@ set(INKWELL_TEST_SUITES
     suites/base_wipe.c
     suites/codec_base64.c
     suites/codec_esp_image.c
+    suites/codec_esp_rom.c
     suites/codec_http.c
     suites/codec_inflate.c
     suites/codec_json.c
+    suites/codec_md5.c
     suites/codec_mqtt.c
     suites/codec_png.c
     suites/codec_sha256.c

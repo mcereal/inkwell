@@ -322,3 +322,23 @@ INKWELL_TEST_CASE(serial_open_makes_the_tty_raw, unit) {
                          "VMIN 1 is what makes an empty buffer EAGAIN rather than EOF");
     INKWELL_TEST_FAIL_IF(inkwell_serial_open("", 115200U) != -EINVAL, "an empty path is refused");
 }
+
+INKWELL_TEST_CASE(serial_lines_and_baud_go_through_the_mock, unit) {
+    inkwell_serial_mock_enable(NULL);
+    const int lines = inkwell_serial_set_lines(3, true, false);
+    const int again = inkwell_serial_set_lines(3, false, true);
+    bool dtr = true;
+    bool rts = false;
+    const size_t calls = inkwell_serial_mock_lines_calls(&dtr, &rts);
+    const int baud = inkwell_serial_set_baud(3, 460800U);
+    const unsigned set = inkwell_serial_mock_baud();
+    inkwell_serial_mock_disable();
+
+    INKWELL_TEST_FAIL_IF(lines != 0 || again != 0 || calls != 2U || dtr || !rts,
+                         "each change is counted, and the last one is what the lines hold");
+    INKWELL_TEST_FAIL_IF(baud != 0 || set != 460800U, "the rate asked for is recorded");
+    INKWELL_TEST_FAIL_IF(inkwell_serial_set_lines(-1, true, true) != -EINVAL ||
+                             inkwell_serial_set_baud(-1, 115200U) != -EINVAL ||
+                             inkwell_serial_set_baud(3, 0U) != -EINVAL,
+                         "no descriptor, no rate");
+}

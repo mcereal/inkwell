@@ -109,6 +109,27 @@ void inkwell_serial_close(int fd);
    tty, as for the generic-driver ports that need `inkwell_serial_set_line_state()` instead. */
 int inkwell_serial_set_dtr(int fd, bool on);
 
+/*
+ * Sets DTR and RTS together, in one change, on a bridge's tty - which is what a chip wired
+ * for auto-programming reads as two pins. The common circuit (two transistors between DTR/RTS
+ * and the chip's EN and boot-strap pins, on nearly every ESP32 board with a CP210x or CH340)
+ * has only two states that do anything, EN low when RTS alone is raised and the strap low when
+ * DTR alone is, so a sequence of these is how a host resets a chip into its ROM bootloader or
+ * back out of it.
+ *
+ * Together because a change of one line and then the other passes through the state between,
+ * and on that circuit the state between is either a reset or a strap. Returns 0 or a negative
+ * errno; -ENOTTY for a descriptor that is not a tty.
+ */
+int inkwell_serial_set_lines(int fd, bool dtr, bool rts);
+
+/*
+ * Changes an open port's rate, for a peer that has just been asked to change its own. Any
+ * rate the driver takes, including the 460800 and 921600 that macOS's termios has no constant
+ * for. Returns 0, -EINVAL for a rate this platform cannot set, or a negative errno.
+ */
+int inkwell_serial_set_baud(int fd, unsigned baud);
+
 /* Reads the USB tree from `root` instead of /sys/bus/usb/devices - on macOS too, where it
    replaces the I/O Registry - so a test can lay one out on disk. NULL restores the default. A
    test seam: nothing outside a test should call it. */
@@ -136,6 +157,10 @@ void inkwell_serial_mock_disable(void);
 /* How many binds and line-state requests were asked for since the mock was enabled. */
 size_t inkwell_serial_mock_bind_calls(void);
 size_t inkwell_serial_mock_line_state_calls(void);
+/* How many inkwell_serial_set_lines() calls the mock took, and the lines the last one left. */
+size_t inkwell_serial_mock_lines_calls(bool *dtr, bool *rts);
+/* The rate the last inkwell_serial_set_baud() asked for, or 0 when none has. */
+unsigned inkwell_serial_mock_baud(void);
 
 #ifdef __cplusplus
 }

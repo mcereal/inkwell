@@ -71,6 +71,10 @@ struct inkwell_serial_windows_mock {
     size_t bind_calls;
     size_t line_state_calls;
     unsigned bind_pending_left;
+    size_t lines_calls;
+    bool dtr;
+    bool rts;
+    unsigned baud;
 };
 
 static struct inkwell_serial_windows_mock g_mock;
@@ -574,6 +578,58 @@ int inkwell_serial_set_dtr(int fd, bool on) {
     return 0;
 }
 
+int inkwell_serial_set_lines(int fd, bool dtr, bool rts) {
+    if (fd < 0) {
+        return -EINVAL;
+    }
+    if (g_mock.enabled) {
+        g_mock.lines_calls += 1U;
+        g_mock.dtr = dtr;
+        g_mock.rts = rts;
+        return 0;
+    }
+    struct serial_windows_port *port = port_for_token(fd);
+    if (port == NULL) {
+        return -ENOTTY;
+    }
+    /* One SetCommState with both control fields, not two EscapeCommFunction calls: the state
+       between two calls is a real line state, and on an auto-program circuit it is a reset or
+       a strap. */
+    DCB dcb = {.DCBlength = sizeof dcb};
+    if (!GetCommState(port->com, &dcb)) {
+        return errno_from_win32(GetLastError());
+    }
+    dcb.fDtrControl = dtr ? DTR_CONTROL_ENABLE : DTR_CONTROL_DISABLE;
+    dcb.fRtsControl = rts ? RTS_CONTROL_ENABLE : RTS_CONTROL_DISABLE;
+    if (!SetCommState(port->com, &dcb)) {
+        return errno_from_win32(GetLastError());
+    }
+    return 0;
+}
+
+int inkwell_serial_set_baud(int fd, unsigned baud) {
+    if (fd < 0 || baud == 0U) {
+        return -EINVAL;
+    }
+    if (g_mock.enabled) {
+        g_mock.baud = baud;
+        return 0;
+    }
+    struct serial_windows_port *port = port_for_token(fd);
+    if (port == NULL) {
+        return -ENOTTY;
+    }
+    DCB dcb = {.DCBlength = sizeof dcb};
+    if (!GetCommState(port->com, &dcb)) {
+        return errno_from_win32(GetLastError());
+    }
+    dcb.BaudRate = baud;
+    if (!SetCommState(port->com, &dcb)) {
+        return errno_from_win32(GetLastError());
+    }
+    return 0;
+}
+
 /* ------------------------------------------------------------------ the mock */
 
 void inkwell_serial_mock_enable(const struct inkwell_serial_mock_config *config) {
@@ -597,4 +653,18 @@ size_t inkwell_serial_mock_bind_calls(void) {
 
 size_t inkwell_serial_mock_line_state_calls(void) {
     return g_mock.line_state_calls;
+}
+
+size_t inkwell_serial_mock_lines_calls(bool *dtr, bool *rts) {
+    if (dtr != NULL) {
+        *dtr = g_mock.dtr;
+    }
+    if (rts != NULL) {
+        *rts = g_mock.rts;
+    }
+    return g_mock.lines_calls;
+}
+
+unsigned inkwell_serial_mock_baud(void) {
+    return g_mock.baud;
 }
