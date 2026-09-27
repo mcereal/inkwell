@@ -1,0 +1,68 @@
+name: Bug report
+description: Something in inkwell does not behave the way its header says it should.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting this. A small program or test case that shows the problem is the fastest route to a fix.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce it
+      description: The smallest code, or the steps, that show the problem. A failing `INKWELL_TEST_CASE` is ideal.
+      render: c
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - base/
+        - runtime/
+        - codec/
+        - net/
+        - ble/
+        - io/
+        - Build / CMake
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The release tag or `git rev-parse --short HEAD`.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      multiple: true
+      options:
+        - Linux
+        - macOS
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: toolchain
+    attributes:
+      label: Compiler and build options
+      description: Compiler and version, and any non-default CMake options (sanitizers, optional dependencies turned off).
+      placeholder: e.g. clang 18, -DINKWELL_ENABLE_ASAN=ON
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output
+      description: Build errors, test output or a sanitizer report.
+      render: text
