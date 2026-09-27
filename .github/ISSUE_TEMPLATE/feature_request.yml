@@ -1,0 +1,45 @@
+name: Feature request
+description: Suggest something new for inkwell (the runtime), or a change to how something works.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. inkwell is the bottom of the stack and knows no application: say what a program needs from the runtime ("a peer", "a transport"), not what your app calls it.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The problem, and why it cannot be done well with what is there today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+      description: The behaviour you want. An API sketch is welcome but not required; put code in a fenced `c` code block.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - base/
+        - runtime/
+        - codec/
+        - net/
+        - ble/
+        - io/
+        - Build / CMake
+        - Not sure
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+      description: Workarounds you use now, or how you would build it in your own code.
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
