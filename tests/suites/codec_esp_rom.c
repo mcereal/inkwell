@@ -26,8 +26,8 @@ static size_t unslip(const uint8_t *in, size_t len, uint8_t *out) {
 INKWELL_TEST_CASE(esp_rom_sync_is_the_bytes_the_rom_tunes_on, unit) {
     uint8_t out[INKWELL_ESP_ROM_REQUEST_MAX];
     const int len = inkwell_esp_rom_sync(out, sizeof out);
-    uint8_t expected[46] = {0xC0, 0x00, 0x08, 0x24, 0x00, 0x00, 0x00, 0x00,
-                            0x00, 0x07, 0x07, 0x12, 0x20};
+    uint8_t expected[46] = {0xC0, 0x00, 0x08, 0x24, 0x00, 0x00, 0x00,
+                            0x00, 0x00, 0x07, 0x07, 0x12, 0x20};
     memset(expected + 13, 0x55, 32);
     expected[45] = 0xC0;
     INKWELL_TEST_FAIL_IF(len != (int)sizeof expected || memcmp(out, expected, sizeof expected) != 0,
@@ -38,8 +38,8 @@ INKWELL_TEST_CASE(esp_rom_sync_is_the_bytes_the_rom_tunes_on, unit) {
 INKWELL_TEST_CASE(esp_rom_flash_begin_counts_words_by_chip, unit) {
     uint8_t out[INKWELL_ESP_ROM_REQUEST_MAX];
     uint8_t raw[64];
-    const int s3 = inkwell_esp_rom_flash_begin(INKWELL_ESP_CHIP_ESP32_S3, 644000U, 0x10000U, out,
-                                               sizeof out);
+    const int s3 =
+        inkwell_esp_rom_flash_begin(INKWELL_ESP_CHIP_ESP32_S3, 644000U, 0x10000U, out, sizeof out);
     const size_t s3_len = unslip(out, (size_t)s3, raw);
     INKWELL_TEST_FAIL_IF(s3_len != 8U + 20U || raw[2] != 20U,
                          "every ROM after the ESP32's takes five words");
@@ -47,8 +47,8 @@ INKWELL_TEST_CASE(esp_rom_flash_begin_counts_words_by_chip, unit) {
     INKWELL_TEST_FAIL_IF(raw[12] != 0x75U || raw[13] != 0x02U || raw[16] != 0x00U ||
                              raw[17] != 0x04U || raw[22] != 0x01U,
                          "size, blocks, block size, offset");
-    const int esp32 = inkwell_esp_rom_flash_begin(INKWELL_ESP_CHIP_ESP32, 644000U, 0x10000U, out,
-                                                  sizeof out);
+    const int esp32 =
+        inkwell_esp_rom_flash_begin(INKWELL_ESP_CHIP_ESP32, 644000U, 0x10000U, out, sizeof out);
     INKWELL_TEST_FAIL_IF(unslip(out, (size_t)esp32, raw) != 8U + 16U,
                          "the original ESP32's takes four and refuses a fifth");
     INKWELL_TEST_FAIL_IF(inkwell_esp_rom_blocks(1024U) != 1U || inkwell_esp_rom_blocks(1025U) != 2U,
@@ -83,8 +83,8 @@ INKWELL_TEST_CASE(esp_rom_reader_finds_answers_in_a_noisy_port, unit) {
     /* The boot banner a V3 prints on its way into download mode, then the answer to SYNC it
        gave - split across two reads, the way a port delivers it. */
     static const char k_banner[] = "ESP-ROM:esp32s3-20210327\r\nwaiting for download\r\n";
-    static const uint8_t k_sync_answer[] = {0xC0, 0x01, 0x08, 0x04, 0x00, 0x07, 0x07, 0x12,
-                                            0x20, 0x00, 0x00, 0x00, 0x00, 0xC0};
+    static const uint8_t k_sync_answer[] = {0xC0, 0x01, 0x08, 0x04, 0x00, 0x07, 0x07,
+                                            0x12, 0x20, 0x00, 0x00, 0x00, 0x00, 0xC0};
     struct inkwell_esp_rom_reader reader;
     inkwell_esp_rom_reader_reset(&reader);
     struct inkwell_esp_rom_response response;
@@ -125,17 +125,17 @@ INKWELL_TEST_CASE(esp_rom_reader_finds_answers_in_a_noisy_port, unit) {
 
 INKWELL_TEST_CASE(esp_rom_reads_a_refusal_and_an_md5, unit) {
     /* What the V3 said to a 16 KB FLASH_BEGIN: status 1, error 5. */
-    static const uint8_t k_refused[] = {0xC0, 0x01, 0x02, 0x04, 0x00, 0x00, 0x00, 0x00,
-                                        0x00, 0x01, 0x05, 0x00, 0x00, 0xC0};
+    static const uint8_t k_refused[] = {0xC0, 0x01, 0x02, 0x04, 0x00, 0x00, 0x00,
+                                        0x00, 0x00, 0x01, 0x05, 0x00, 0x00, 0xC0};
     struct inkwell_esp_rom_reader reader;
     inkwell_esp_rom_reader_reset(&reader);
     struct inkwell_esp_rom_response response;
     bool ready = false;
     (void)inkwell_esp_rom_reader_feed(&reader, k_refused, sizeof k_refused, &response, &ready);
-    INKWELL_TEST_FAIL_IF(!ready || response.status != 1U || response.error != 5U ||
-                             strcmp(inkwell_esp_rom_error_name(response.error),
-                                    "invalid message") != 0,
-                         "a refusal carries its error");
+    INKWELL_TEST_FAIL_IF(
+        !ready || response.status != 1U || response.error != 5U ||
+            strcmp(inkwell_esp_rom_error_name(response.error), "invalid message") != 0,
+        "a refusal carries its error");
 
     /* The V3's answer to SPI_FLASH_MD5 over MeshCore 1.17.1's app: hex text, then status. */
     static const char k_hex[] = "e3ed7342fc711f2fc28dcfa89c953e33";

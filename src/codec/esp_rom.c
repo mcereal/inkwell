@@ -136,12 +136,12 @@ int inkwell_esp_rom_flash_begin(uint16_t chip, uint32_t size, uint32_t offset, u
     }
     const uint32_t values[5] = {size, inkwell_esp_rom_blocks(size), INKWELL_ESP_ROM_BLOCK, offset,
                                 0U};
-    return words(INKWELL_ESP_ROM_FLASH_BEGIN, values, chip == INKWELL_ESP_CHIP_ESP32 ? 4U : 5U,
-                 out, out_len);
+    return words(INKWELL_ESP_ROM_FLASH_BEGIN, values, chip == INKWELL_ESP_CHIP_ESP32 ? 4U : 5U, out,
+                 out_len);
 }
 
-int inkwell_esp_rom_flash_data(uint32_t sequence, const uint8_t *block, size_t len,
-                               uint8_t *out, size_t out_len) {
+int inkwell_esp_rom_flash_data(uint32_t sequence, const uint8_t *block, size_t len, uint8_t *out,
+                               size_t out_len) {
     if ((block == NULL && len > 0U) || len > INKWELL_ESP_ROM_BLOCK) {
         return -EINVAL;
     }

@@ -91,8 +91,8 @@ int inkwell_esp_rom_flash_begin(uint16_t chip, uint32_t size, uint32_t offset, u
                                 size_t out_len);
 /* FLASH_DATA block `sequence`, `len` bytes of it, padded with 0xFF to a whole block - which is
    what erased flash reads as, so the padding writes nothing. -EINVAL above a block. */
-int inkwell_esp_rom_flash_data(uint32_t sequence, const uint8_t *block, size_t len,
-                               uint8_t *out, size_t out_len);
+int inkwell_esp_rom_flash_data(uint32_t sequence, const uint8_t *block, size_t len, uint8_t *out,
+                               size_t out_len);
 /* FLASH_END. `run` leaves download mode and starts the application from flash. */
 int inkwell_esp_rom_flash_end(bool run, uint8_t *out, size_t out_len);
 int inkwell_esp_rom_flash_md5(uint32_t offset, uint32_t size, uint8_t *out, size_t out_len);
