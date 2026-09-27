@@ -17,8 +17,7 @@ body:
     id: repro
     attributes:
       label: How to reproduce it
-      description: The smallest code, or the steps, that show the problem. A failing `INKWELL_TEST_CASE` is ideal.
-      render: c
+      description: The smallest code, or the steps, that show the problem. A failing `INKWELL_TEST_CASE` is ideal; put code in a fenced `c` code block.
     validations:
       required: true
   - type: dropdown

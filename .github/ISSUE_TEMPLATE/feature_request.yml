@@ -18,8 +18,7 @@ body:
     id: proposal
     attributes:
       label: What would you like to happen?
-      description: The behaviour you want. An API sketch is welcome but not required.
-      render: c
+      description: The behaviour you want. An API sketch is welcome but not required; put code in a fenced `c` code block.
     validations:
       required: true
   - type: dropdown
