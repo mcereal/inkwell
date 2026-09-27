@@ -70,6 +70,11 @@ struct inkwell_serial_windows_mock {
     struct inkwell_serial_mock_config config;
     size_t bind_calls;
     size_t line_state_calls;
+    bool line_state_dtr;
+    bool line_state_rts;
+    size_t line_coding_calls;
+    unsigned line_coding_baud;
+    bool line_coding_last;
     unsigned bind_pending_left;
     size_t lines_calls;
     bool dtr;
@@ -256,6 +261,23 @@ int inkwell_serial_set_line_state(const struct inkwell_serial_port_info *port, b
     }
     if (g_mock.enabled) {
         g_mock.line_state_calls += 1U;
+        g_mock.line_state_dtr = dtr;
+        g_mock.line_state_rts = rts;
+        g_mock.line_coding_last = false;
+        return g_mock.config.line_state_result;
+    }
+    return -ENOTSUP;
+}
+
+/* usbser takes the line coding from SetCommState, so it never goes around the driver either. */
+int inkwell_serial_set_line_coding(const struct inkwell_serial_port_info *port, unsigned baud) {
+    if (port == NULL || baud == 0U) {
+        return -EINVAL;
+    }
+    if (g_mock.enabled) {
+        g_mock.line_coding_calls += 1U;
+        g_mock.line_coding_baud = baud;
+        g_mock.line_coding_last = true;
         return g_mock.config.line_state_result;
     }
     return -ENOTSUP;
@@ -653,6 +675,26 @@ size_t inkwell_serial_mock_bind_calls(void) {
 
 size_t inkwell_serial_mock_line_state_calls(void) {
     return g_mock.line_state_calls;
+}
+
+size_t inkwell_serial_mock_line_state(bool *dtr, bool *rts, bool *after_coding) {
+    if (dtr != NULL) {
+        *dtr = g_mock.line_state_dtr;
+    }
+    if (rts != NULL) {
+        *rts = g_mock.line_state_rts;
+    }
+    if (after_coding != NULL) {
+        *after_coding = !g_mock.line_coding_last && g_mock.line_coding_calls > 0U;
+    }
+    return g_mock.line_state_calls;
+}
+
+size_t inkwell_serial_mock_line_coding(unsigned *baud) {
+    if (baud != NULL) {
+        *baud = g_mock.line_coding_baud;
+    }
+    return g_mock.line_coding_calls;
 }
 
 size_t inkwell_serial_mock_lines_calls(bool *dtr, bool *rts) {

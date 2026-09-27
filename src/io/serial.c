@@ -65,6 +65,9 @@ static const char *sysfs_usb_root(void) {
 /* CDC SET_CONTROL_LINE_STATE (USB CDC 1.1, 6.2.14). */
 #define INKWELL_CDC_REQUEST_TYPE 0x21U
 #define INKWELL_CDC_SET_CONTROL_LINE_STATE 0x22U
+/* CDC SET_LINE_CODING (6.2.12): the rate, stop bits, parity and data bits, seven bytes. */
+#define INKWELL_CDC_SET_LINE_CODING 0x20U
+#define INKWELL_CDC_LINE_CODING_LEN 7U
 
 /* usbserial drivers whose interfaces are worth offering before their tty has appeared. An
    interface that has published a tty is a port whichever driver published it; this list is only
@@ -77,6 +80,12 @@ struct inkwell_serial_mock_state {
     struct inkwell_serial_mock_config config;
     size_t bind_calls;
     size_t line_state_calls;
+    bool line_state_dtr;
+    bool line_state_rts;
+    size_t line_coding_calls;
+    unsigned line_coding_baud;
+    /* Which of the two went last, so a caller's order can be held to. */
+    bool line_coding_last;
     unsigned bind_pending_left;
     size_t lines_calls;
     bool dtr;
@@ -107,6 +116,26 @@ size_t inkwell_serial_mock_bind_calls(void) {
 
 size_t inkwell_serial_mock_line_state_calls(void) {
     return g_mock_state.line_state_calls;
+}
+
+size_t inkwell_serial_mock_line_state(bool *dtr, bool *rts, bool *after_coding) {
+    if (dtr != NULL) {
+        *dtr = g_mock_state.line_state_dtr;
+    }
+    if (rts != NULL) {
+        *rts = g_mock_state.line_state_rts;
+    }
+    if (after_coding != NULL) {
+        *after_coding = !g_mock_state.line_coding_last && g_mock_state.line_coding_calls > 0U;
+    }
+    return g_mock_state.line_state_calls;
+}
+
+size_t inkwell_serial_mock_line_coding(unsigned *baud) {
+    if (baud != NULL) {
+        *baud = g_mock_state.line_coding_baud;
+    }
+    return g_mock_state.line_coding_calls;
 }
 
 size_t inkwell_serial_mock_lines_calls(bool *dtr, bool *rts) {
@@ -532,6 +561,57 @@ int inkwell_serial_bind(struct inkwell_serial_port_info *device) {
 #endif
 }
 
+#if defined(__linux__)
+/*
+ * One CDC class request to the port's control interface through usbfs, with `len` bytes of
+ * `data` after it. The control interface has no driver (the generic one refused it), so
+ * claiming it is what lets usbfs deliver the request.
+ */
+static int serial_usbfs_request(const struct inkwell_serial_port_info *device, uint8_t request,
+                                uint16_t value, uint8_t *data, uint16_t len, const char *what) {
+    char usbfs_path[PATH_MAX];
+    snprintf(usbfs_path, sizeof usbfs_path, "/dev/bus/usb/%03u/%03u", (unsigned)device->busnum,
+             (unsigned)device->devnum);
+
+    const int fd = open(usbfs_path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        inkwell_log_warn("serial", "Cannot open %s: %s", usbfs_path, strerror(errno));
+        return -errno;
+    }
+
+    unsigned int iface = (unsigned int)device->control_interface;
+    bool claimed = ioctl(fd, inkwell_ioctl_request_of(USBDEVFS_CLAIMINTERFACE), &iface) == 0;
+    if (!claimed) {
+        inkwell_log_debug("serial", "Claim of interface %u on %s failed: %s", iface, usbfs_path,
+                          strerror(errno));
+    }
+
+    struct usbdevfs_ctrltransfer transfer;
+    memset(&transfer, 0, sizeof transfer);
+    transfer.bRequestType = INKWELL_CDC_REQUEST_TYPE;
+    transfer.bRequest = request;
+    transfer.wValue = value;
+    transfer.wIndex = (uint16_t)device->control_interface;
+    transfer.wLength = len;
+    transfer.timeout = 1000U;
+    transfer.data = data;
+
+    int result = 0;
+    if (ioctl(fd, inkwell_ioctl_request_of(USBDEVFS_CONTROL), &transfer) < 0) {
+        result = -errno;
+        inkwell_log_warn("serial", "%s on %s failed: %s", what, usbfs_path, strerror(errno));
+    } else {
+        inkwell_log_info("serial", "%s on %s interface %u", what, usbfs_path, iface);
+    }
+
+    if (claimed) {
+        (void)ioctl(fd, inkwell_ioctl_request_of(USBDEVFS_RELEASEINTERFACE), &iface);
+    }
+    close(fd);
+    return result;
+}
+#endif
+
 int inkwell_serial_set_line_state(const struct inkwell_serial_port_info *device, bool dtr,
                                   bool rts) {
     if (device == NULL) {
@@ -540,6 +620,9 @@ int inkwell_serial_set_line_state(const struct inkwell_serial_port_info *device,
 
     if (g_mock_state.enabled) {
         g_mock_state.line_state_calls += 1U;
+        g_mock_state.line_state_dtr = dtr;
+        g_mock_state.line_state_rts = rts;
+        g_mock_state.line_coding_last = false;
         return g_mock_state.config.line_state_result;
     }
 
@@ -552,49 +635,43 @@ int inkwell_serial_set_line_state(const struct inkwell_serial_port_info *device,
     (void)rts;
     return -ENOTSUP;
 #else
-    char usbfs_path[PATH_MAX];
-    snprintf(usbfs_path, sizeof usbfs_path, "/dev/bus/usb/%03u/%03u", (unsigned)device->busnum,
-             (unsigned)device->devnum);
+    return serial_usbfs_request(device, INKWELL_CDC_SET_CONTROL_LINE_STATE,
+                                (uint16_t)((dtr ? 0x01U : 0U) | (rts ? 0x02U : 0U)), NULL, 0U,
+                                dtr ? "Asserted DTR" : "Dropped DTR");
+#endif
+}
 
-    const int fd = open(usbfs_path, O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-        inkwell_log_warn("serial", "Cannot open %s: %s", usbfs_path, strerror(errno));
-        return -errno;
+int inkwell_serial_set_line_coding(const struct inkwell_serial_port_info *device, unsigned baud) {
+    if (device == NULL || baud == 0U) {
+        return -EINVAL;
     }
 
-    /* The control interface has no driver (the generic one refused it), so claiming it is what
-       lets usbfs deliver the request. */
-    unsigned int iface = (unsigned int)device->control_interface;
-    bool claimed = ioctl(fd, inkwell_ioctl_request_of(USBDEVFS_CLAIMINTERFACE), &iface) == 0;
-    if (!claimed) {
-        inkwell_log_debug("serial", "Claim of interface %u on %s failed: %s", iface, usbfs_path,
-                          strerror(errno));
+    if (g_mock_state.enabled) {
+        g_mock_state.line_coding_calls += 1U;
+        g_mock_state.line_coding_baud = baud;
+        g_mock_state.line_coding_last = true;
+        return g_mock_state.config.line_state_result;
     }
 
-    struct usbdevfs_ctrltransfer transfer;
-    memset(&transfer, 0, sizeof transfer);
-    transfer.bRequestType = INKWELL_CDC_REQUEST_TYPE;
-    transfer.bRequest = INKWELL_CDC_SET_CONTROL_LINE_STATE;
-    transfer.wValue = (uint16_t)((dtr ? 0x01U : 0U) | (rts ? 0x02U : 0U));
-    transfer.wIndex = (uint16_t)device->control_interface;
-    transfer.wLength = 0U;
-    transfer.timeout = 1000U;
-    transfer.data = NULL;
-
-    int result = 0;
-    if (ioctl(fd, inkwell_ioctl_request_of(USBDEVFS_CONTROL), &transfer) < 0) {
-        result = -errno;
-        inkwell_log_warn("serial", "SET_CONTROL_LINE_STATE on %s failed: %s", usbfs_path,
-                         strerror(errno));
-    } else {
-        inkwell_log_info("serial", "Asserted DTR on %s interface %u", usbfs_path, iface);
+    if (device->control_interface < 0) {
+        return -ENOTSUP;
     }
 
-    if (claimed) {
-        (void)ioctl(fd, inkwell_ioctl_request_of(USBDEVFS_RELEASEINTERFACE), &iface);
-    }
-    close(fd);
-    return result;
+#if !defined(__linux__)
+    return -ENOTSUP;
+#else
+    /* dwDTERate little-endian, one stop bit, no parity, eight data bits. */
+    uint8_t coding[INKWELL_CDC_LINE_CODING_LEN] = {
+        (uint8_t)baud,
+        (uint8_t)(baud >> 8),
+        (uint8_t)(baud >> 16),
+        (uint8_t)(baud >> 24),
+        0U,
+        0U,
+        8U,
+    };
+    return serial_usbfs_request(device, INKWELL_CDC_SET_LINE_CODING, 0U, coding,
+                                (uint16_t)sizeof coding, "SET_LINE_CODING");
 #endif
 }
 

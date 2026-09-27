@@ -342,3 +342,32 @@ INKWELL_TEST_CASE(serial_lines_and_baud_go_through_the_mock, unit) {
                              inkwell_serial_set_baud(3, 0U) != -EINVAL,
                          "no descriptor, no rate");
 }
+
+/* The two usbfs requests a generic-driver port needs for the 1200-baud touch, in order. */
+INKWELL_TEST_CASE(serial_line_coding_goes_where_the_line_state_does, unit) {
+    struct inkwell_serial_port_info port;
+    memset(&port, 0, sizeof port);
+    port.control_interface = 0;
+    port.needs_line_state = true;
+    inkwell_serial_mock_enable(NULL);
+    const int coded = inkwell_serial_set_line_coding(&port, 1200U);
+    const int dropped = inkwell_serial_set_line_state(&port, false, false);
+    unsigned baud = 0U;
+    const size_t codings = inkwell_serial_mock_line_coding(&baud);
+    bool dtr = true;
+    bool rts = true;
+    bool after = false;
+    const size_t states = inkwell_serial_mock_line_state(&dtr, &rts, &after);
+    inkwell_serial_mock_disable();
+    INKWELL_TEST_FAIL_IF(coded != 0 || dropped != 0, "both requests should be taken");
+    INKWELL_TEST_FAIL_IF(codings != 1U || baud != 1200U, "the rate is the one asked for");
+    INKWELL_TEST_FAIL_IF(states != 1U || dtr || rts || !after,
+                         "and DTR dropped after it, which is what the bootloader reads");
+
+    INKWELL_TEST_FAIL_IF(inkwell_serial_set_line_coding(NULL, 1200U) != -EINVAL ||
+                             inkwell_serial_set_line_coding(&port, 0U) != -EINVAL,
+                         "no port, no rate");
+    port.control_interface = -1;
+    INKWELL_TEST_FAIL_IF(inkwell_serial_set_line_coding(&port, 1200U) != -ENOTSUP,
+                         "a port with no control interface has nothing to send it to");
+}
