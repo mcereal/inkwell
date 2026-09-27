@@ -93,6 +93,13 @@ int inkwell_serial_bind(struct inkwell_serial_port_info *port);
 /* One CDC SET_CONTROL_LINE_STATE to the port's control interface through usbfs. Returns 0,
    -ENOTSUP when there is no control interface or no usbfs, or a negative errno. */
 int inkwell_serial_set_line_state(const struct inkwell_serial_port_info *port, bool dtr, bool rts);
+/*
+ * One CDC SET_LINE_CODING the same way: `baud`, 8N1. The generic driver's termios never reaches
+ * the device, and a rate is sometimes the message rather than the setting - an Adafruit nRF52
+ * bootloader is entered by DTR dropping while the line coding says 1200. Returns as
+ * inkwell_serial_set_line_state().
+ */
+int inkwell_serial_set_line_coding(const struct inkwell_serial_port_info *port, unsigned baud);
 
 /*
  * Opens the tty raw and non-blocking at `baud` (meaningless over USB CDC, honoured by bridges).
@@ -142,7 +149,8 @@ struct inkwell_serial_mock_config {
     int bind_result; /* returned by inkwell_serial_bind */
     /* How many binds of an unbound port answer -EAGAIN before one succeeds. */
     unsigned bind_pending_polls;
-    int line_state_result; /* returned by inkwell_serial_set_line_state */
+    int line_state_result;  /* returned by inkwell_serial_set_line_state */
+    int line_coding_result; /* returned by inkwell_serial_set_line_coding */
     /* The path a successful bind reports for a port the scan found unbound. */
     const char *bound_path;
     /* When >= 0, inkwell_serial_open dup()s this instead of opening a tty: a test hands it one
@@ -157,6 +165,10 @@ void inkwell_serial_mock_disable(void);
 /* How many binds and line-state requests were asked for since the mock was enabled. */
 size_t inkwell_serial_mock_bind_calls(void);
 size_t inkwell_serial_mock_line_state_calls(void);
+/* The line state the last request set, and whether it came after the last line coding. */
+size_t inkwell_serial_mock_line_state(bool *dtr, bool *rts, bool *after_coding);
+/* How many line codings were asked for, and the rate the last one said. */
+size_t inkwell_serial_mock_line_coding(unsigned *baud);
 /* How many inkwell_serial_set_lines() calls the mock took, and the lines the last one left. */
 size_t inkwell_serial_mock_lines_calls(bool *dtr, bool *rts);
 /* The rate the last inkwell_serial_set_baud() asked for, or 0 when none has. */
