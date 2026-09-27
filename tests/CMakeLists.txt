@@ -30,6 +30,7 @@ set(INKWELL_TEST_SUITES
     suites/base_text.c
     suites/base_time.c
     suites/base_version.c
+    suites/base_wipe.c
     suites/codec_base64.c
     suites/codec_esp_image.c
     suites/codec_http.c

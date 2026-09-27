@@ -1,6 +1,7 @@
 #include "inkwell/net/stream.h"
 
 #include "inkwell/base/log.h"
+#include "inkwell/base/wipe.h"
 
 #include <errno.h>
 #include <string.h>
@@ -79,7 +80,7 @@ static uint8_t *slot_bytes_at(const struct inkwell_stream *stream, size_t index)
 /* A slot's bytes, zeroed once they are done with: a frame can carry a secret, and a slot is
    otherwise only overwritten when the ring comes round to it again. */
 static void slot_wipe(struct inkwell_stream *stream, size_t index) {
-    memset(slot_bytes_at(stream, index), 0, stream->slot_bytes);
+    inkwell_wipe(slot_bytes_at(stream, index), stream->slot_bytes);
 }
 
 static void stream_drop_queue(struct inkwell_stream *stream) {
