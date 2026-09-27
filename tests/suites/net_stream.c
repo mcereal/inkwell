@@ -126,6 +126,7 @@ INKWELL_TEST_CASE(stream_round_trips_bytes, unit) {
 
     struct inkwell_stream_slot slots[2];
     uint8_t queue[2 * 8];
+    memset(queue, 0, sizeof queue);
     struct inkwell_stream stream;
     struct stream_probe probe;
     memset(&probe, 0, sizeof probe);
@@ -155,6 +156,11 @@ INKWELL_TEST_CASE(stream_round_trips_bytes, unit) {
     INKWELL_TEST_FAIL_IF_CLEANUP(
         inkwell_stream_queued(&stream) != 0U, inkwell_stream_close(&stream);
         (void)close(fds[1]), "a write the descriptor took should leave the queue empty");
+    /* And leave nothing of it behind in the caller's buffer: a frame can carry a secret. */
+    for (size_t i = 0; i < sizeof queue; ++i) {
+        INKWELL_TEST_FAIL_IF_CLEANUP(queue[i] != 0U, inkwell_stream_close(&stream);
+                                     (void)close(fds[1]), "a sent slot's bytes should be wiped");
+    }
 
     /* And in the other direction, through pump(). */
     const uint8_t inbound[] = {1U, 2U, 3U};
