@@ -31,10 +31,14 @@
 #define FETCH_READ_CHUNK 16384U
 #define FETCH_READS_PER_TURN 8U
 
-/* The request line and Host, plus every header the caller may add. */
+/* The headers a request may carry: the caller's, then the two this adds - a `User-Agent` when
+   the caller named none, and a POST's `Content-Length`. */
+#define FETCH_HEADER_SLOTS (INKWELL_FETCH_HEADERS_MAX + 2U)
+
+/* The request line and Host, plus every header above. */
 #define FETCH_REQUEST_MAX                                                                          \
     (INKWELL_HTTP_URL_MAX + INKWELL_HTTP_HOST_MAX + 128U +                                         \
-     (INKWELL_FETCH_HEADERS_MAX + 1U) * (INKWELL_FETCH_HEADER_MAX + 2U))
+     FETCH_HEADER_SLOTS * (INKWELL_FETCH_HEADER_MAX + 2U))
 
 #define FETCH_DEFAULT_TIMEOUT_MS 30000U
 /*
@@ -72,8 +76,12 @@ void inkwell_fetch_set_user_agent(const char *product) {
 struct inkwell_fetch_conn {
     /* ---- the request, copied: a caller's strings need not outlive start() */
     enum inkwell_fetch_method method;
-    char headers[INKWELL_FETCH_HEADERS_MAX + 1U][INKWELL_FETCH_HEADER_MAX];
+    char headers[FETCH_HEADER_SLOTS][INKWELL_FETCH_HEADER_MAX];
     size_t header_count;
+    /* A POST's body, copied, and how much of it this hop has sent. */
+    uint8_t *upload;
+    size_t upload_len;
+    size_t upload_sent;
     bool ranged;
     char output_path[INKWELL_FETCH_PATH_MAX];
     size_t response_max;
@@ -150,6 +158,7 @@ static void fetch_free(struct inkwell_fetch *fetch, struct inkwell_fetch_conn *c
         (void)inkwell_fd_close(conn->out_fd);
     }
     free(conn->body);
+    free(conn->upload);
     free(conn);
 }
 
@@ -333,6 +342,13 @@ static bool fetch_on_head(struct inkwell_fetch *fetch) {
     struct inkwell_fetch_conn *const conn = fetch->conn;
     const int status = conn->response.status;
 
+    /* See enum inkwell_fetch_method: a body goes to the host the caller named. Every 3xx, not
+       only the five a GET follows - a 300 is a server pointing somewhere else too. */
+    if (conn->method == INKWELL_FETCH_POST && status >= 300 && status <= 399) {
+        fetch_fail(fetch, INKWELL_FETCH_PROTOCOL, "POST redirected: %d from %s", status,
+                   conn->url.host);
+        return false;
+    }
     if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
         const char *value = NULL;
         size_t len = 0U;
@@ -497,8 +513,36 @@ static void fetch_send(struct inkwell_fetch *fetch) {
         conn->request_sent += (size_t)rc;
         conn->progressed = true;
     }
+    while (conn->upload_sent < conn->upload_len) {
+        const int rc = inkwell_tls_client_write(&conn->tls, conn->upload + conn->upload_sent,
+                                                conn->upload_len - conn->upload_sent);
+        if (rc == -EAGAIN) {
+            fetch_arm(fetch, conn, conn->tls.wants_write);
+            return;
+        }
+        if (rc < 0) {
+            fetch_note_session(conn, rc);
+            fetch_fail(fetch, INKWELL_FETCH_NETWORK, "sending to %s: %s", conn->url.host,
+                       inkwell_tls_client_error(&conn->tls));
+            return;
+        }
+        conn->upload_sent += (size_t)rc;
+        conn->progressed = true;
+    }
     conn->phase = FETCH_RECEIVING;
     fetch_receive(fetch);
+}
+
+static enum inkwell_http_method fetch_http_method(enum inkwell_fetch_method method) {
+    switch (method) {
+    case INKWELL_FETCH_HEAD:
+        return INKWELL_HTTP_HEAD;
+    case INKWELL_FETCH_POST:
+        return INKWELL_HTTP_POST;
+    case INKWELL_FETCH_GET:
+        break;
+    }
+    return INKWELL_HTTP_GET;
 }
 
 static void fetch_handshake(struct inkwell_fetch *fetch) {
@@ -515,20 +559,20 @@ static void fetch_handshake(struct inkwell_fetch *fetch) {
         return;
     }
 
-    const char *lines[INKWELL_FETCH_HEADERS_MAX + 1U];
+    const char *lines[FETCH_HEADER_SLOTS];
     for (size_t i = 0U; i < conn->header_count; ++i) {
         lines[i] = conn->headers[i];
     }
-    const int len = inkwell_http_request_format(
-        conn->request, sizeof conn->request,
-        conn->method == INKWELL_FETCH_HEAD ? INKWELL_HTTP_HEAD : INKWELL_HTTP_GET, &conn->url,
-        lines, conn->header_count);
+    const int len = inkwell_http_request_format(conn->request, sizeof conn->request,
+                                                fetch_http_method(conn->method), &conn->url, lines,
+                                                conn->header_count);
     if (len < 0) {
         fetch_fail(fetch, INKWELL_FETCH_PROTOCOL, "request to %s does not fit", conn->url.host);
         return;
     }
     conn->request_len = (size_t)len;
     conn->request_sent = 0U;
+    conn->upload_sent = 0U;
     inkwell_http_response_init(&conn->response, conn->method == INKWELL_FETCH_HEAD);
     conn->head_seen = false;
     conn->phase = FETCH_SENDING;
@@ -814,6 +858,18 @@ int inkwell_fetch_start(struct inkwell_fetch *fetch, const struct inkwell_fetch_
     if (fetch->conn != NULL) {
         return -EBUSY;
     }
+    const bool post = request->method == INKWELL_FETCH_POST;
+    if (request->method != INKWELL_FETCH_GET && request->method != INKWELL_FETCH_HEAD && !post) {
+        return -EINVAL;
+    }
+    if ((!post && (request->body != NULL || request->body_len > 0U)) ||
+        (post && request->body == NULL && request->body_len > 0U) ||
+        (post && request->output_path != NULL)) {
+        return -EINVAL;
+    }
+    if (request->body_len > INKWELL_FETCH_BODY_MAX) {
+        return -E2BIG;
+    }
 
     struct inkwell_fetch_conn *const conn = calloc(1U, sizeof *conn);
     if (conn == NULL) {
@@ -833,6 +889,14 @@ int inkwell_fetch_start(struct inkwell_fetch *fetch, const struct inkwell_fetch_
             free(conn);
             return -EINVAL;
         }
+        /* The body goes as `Content-Length` bytes, so a caller's own length - or a
+           Transfer-Encoding that would tell the server to read it some other way - is a second
+           account of where it ends. */
+        if (post && (fetch_header_is(request->headers[i], "content-length:") ||
+                     fetch_header_is(request->headers[i], "transfer-encoding:"))) {
+            free(conn);
+            return -EINVAL;
+        }
         agent = agent || fetch_header_is(request->headers[i], "user-agent:");
         conn->ranged = conn->ranged || fetch_header_is(request->headers[i], "range:");
         conn->header_count++;
@@ -845,6 +909,19 @@ int inkwell_fetch_start(struct inkwell_fetch *fetch, const struct inkwell_fetch_
         !inkwell_str_copy(conn->output_path, sizeof conn->output_path, request->output_path)) {
         free(conn);
         return -EINVAL;
+    }
+    if (post) {
+        snprintf(conn->headers[conn->header_count++], INKWELL_FETCH_HEADER_MAX,
+                 "Content-Length: %zu", request->body_len);
+        if (request->body_len > 0U) {
+            conn->upload = malloc(request->body_len);
+            if (conn->upload == NULL) {
+                free(conn);
+                return -ENOMEM;
+            }
+            memcpy(conn->upload, request->body, request->body_len);
+            conn->upload_len = request->body_len;
+        }
     }
     conn->method = request->method;
     conn->response_max =

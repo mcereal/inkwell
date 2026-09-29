@@ -243,6 +243,17 @@ INKWELL_TEST_CASE(http_request_is_the_1_1_shape, unit) {
     INKWELL_TEST_FAIL_IF(
         len < 0 || strncmp(out, "HEAD /x HTTP/1.1\r\nHost: [fd00::1]:8080\r\n", 40U) != 0,
         "a HEAD to a v6 literal on its own port brackets the host and names the port");
+
+    INKWELL_TEST_FAIL_IF(!inkwell_http_url_parse("https://o1.ingest.example/api/7/envelope/", &url),
+                         "parse the POST's URL");
+    const char *const post_headers[] = {"Content-Length: 12"};
+    len = inkwell_http_request_format(out, sizeof out, INKWELL_HTTP_POST, &url, post_headers, 1U);
+    INKWELL_TEST_FAIL_IF(len < 0 || strcmp(out, "POST /api/7/envelope/ HTTP/1.1\r\n"
+                                                "Host: o1.ingest.example\r\n"
+                                                "Connection: close\r\n"
+                                                "Content-Length: 12\r\n"
+                                                "\r\n") != 0,
+                         "a POST is its head alone, with the length the caller gave");
     record_success(test_name);
 }
 
