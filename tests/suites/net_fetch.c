@@ -109,6 +109,10 @@ static void fetch_serve(void *userdata, const struct https_fixture_request *requ
         const int len = snprintf(reply, sizeof reply, "%s %zu %lu %.*s", request->method,
                                  request->body_len, sum, shown, request->body);
         https_fixture_reply(conn, 200, NULL, reply, (size_t)len);
+    } else if (strcmp(target, "/choices") == 0) {
+        /* A 300: a redirect of a kind a GET does not follow either. */
+        https_fixture_reply(conn, 300, "Location: https://objects.githubusercontent.com/x\r\n",
+                            NULL, 0U);
     } else if (strcmp(target, "/whole") == 0) {
         /* A server that ignores a range and sends the file. */
         https_fixture_reply(conn, 200, NULL, "the whole file", 14U);
@@ -531,9 +535,20 @@ INKWELL_TEST_CASE(fetch_does_not_follow_a_redirect_with_a_body, unit) {
         failure = "a redirected POST should fail and say what the server answered";
         goto cleanup;
     }
+    const struct inkwell_fetch_request choices = {
+        .url = "https://github.com/choices",
+        .method = INKWELL_FETCH_POST,
+        .body = "x",
+        .body_len = 1U,
+    };
+    if (!harness_fetch(&h, &choices) || h.probe.outcome[1] != INKWELL_FETCH_PROTOCOL ||
+        h.probe.status[1] != 300) {
+        failure = "every 3xx to a POST is a protocol failure, not only the ones a GET follows";
+        goto cleanup;
+    }
     char log[1024];
     https_fixture_requests(&h.server, log, sizeof log);
-    if (strcmp(log, "POST github.com /release\n") != 0) {
+    if (strcmp(log, "POST github.com /release\nPOST github.com /choices\n") != 0) {
         failure = "and the host the redirect named should never have been asked";
         goto cleanup;
     }
@@ -570,6 +585,11 @@ INKWELL_TEST_CASE(fetch_refuses_a_body_it_should_not_send, unit) {
     request.headers[0] = "content-length: 1";
     if (inkwell_fetch_start(&h.fetch, &request, 0U) != -EINVAL) {
         failure = "a POST that names its own length should be refused";
+        goto cleanup;
+    }
+    request.headers[0] = "Transfer-Encoding: chunked";
+    if (inkwell_fetch_start(&h.fetch, &request, 0U) != -EINVAL) {
+        failure = "a POST that says its body is framed some other way should be refused";
         goto cleanup;
     }
     request.headers[0] = NULL;

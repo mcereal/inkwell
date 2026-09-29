@@ -342,13 +342,14 @@ static bool fetch_on_head(struct inkwell_fetch *fetch) {
     struct inkwell_fetch_conn *const conn = fetch->conn;
     const int status = conn->response.status;
 
+    /* See enum inkwell_fetch_method: a body goes to the host the caller named. Every 3xx, not
+       only the five a GET follows - a 300 is a server pointing somewhere else too. */
+    if (conn->method == INKWELL_FETCH_POST && status >= 300 && status <= 399) {
+        fetch_fail(fetch, INKWELL_FETCH_PROTOCOL, "POST redirected: %d from %s", status,
+                   conn->url.host);
+        return false;
+    }
     if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
-        if (conn->method == INKWELL_FETCH_POST) {
-            /* See enum inkwell_fetch_method: a body goes to the host the caller named. */
-            fetch_fail(fetch, INKWELL_FETCH_PROTOCOL, "POST redirected: %d from %s", status,
-                       conn->url.host);
-            return false;
-        }
         const char *value = NULL;
         size_t len = 0U;
         if (!inkwell_http_response_header(&conn->response, "location", &value, &len)) {
@@ -888,7 +889,11 @@ int inkwell_fetch_start(struct inkwell_fetch *fetch, const struct inkwell_fetch_
             free(conn);
             return -EINVAL;
         }
-        if (post && fetch_header_is(request->headers[i], "content-length:")) {
+        /* The body goes as `Content-Length` bytes, so a caller's own length - or a
+           Transfer-Encoding that would tell the server to read it some other way - is a second
+           account of where it ends. */
+        if (post && (fetch_header_is(request->headers[i], "content-length:") ||
+                     fetch_header_is(request->headers[i], "transfer-encoding:"))) {
             free(conn);
             return -EINVAL;
         }

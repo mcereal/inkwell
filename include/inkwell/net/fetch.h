@@ -161,7 +161,8 @@ struct inkwell_fetch_request {
     /*
      * What a POST sends, and how long it is: at most INKWELL_FETCH_BODY_MAX, copied at start, so
      * it need not outlive the call. `Content-Length` is added from `body_len` - a caller that
-     * writes its own is refused, since two lengths are two readers disagreeing - and the type is
+     * writes its own is refused, since two lengths are two readers disagreeing, and so is one
+     * that names a `Transfer-Encoding`, which would be a third - and the type is
      * the caller's to name among `headers`. Must be empty for any other method.
      */
     const void *body;
@@ -256,9 +257,9 @@ void inkwell_fetch_connect_to(struct inkwell_fetch *fetch, const char *host, uin
 /*
  * Starts `request`. Returns 0, or -errno: -ENOTSUP when unavailable, -EBUSY with a request
  * already running, -EINVAL for a request with no callback, a URL that is not https, a body on
- * anything but a POST, a POST with an `output_path` or a `Content-Length` of its own, -E2BIG for
- * a body past INKWELL_FETCH_BODY_MAX, -ENOMEM.
- * On any error nothing was started and `on_done` will not be called.
+ * anything but a POST, a POST with an `output_path`, a `Content-Length` or a `Transfer-Encoding` of
+ * its own, -E2BIG for a body past INKWELL_FETCH_BODY_MAX, -ENOMEM. On any error nothing was started
+ * and `on_done` will not be called.
  *
  * On 0 the callback is called exactly once, later, from the loop - never before this returns.
  */
