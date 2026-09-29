@@ -26,9 +26,13 @@
    which would hide half of what the rest of this file includes. */
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 #include <sys/ucontext.h>
 #else
 #include <ucontext.h>
+#endif
+#if defined(__linux__)
+#include <link.h>
 #endif
 
 /* ---- what the handler is allowed to have ----------------------------------------------------
@@ -49,6 +53,22 @@ static bool g_report_waiting;
    below and a PIE build's are meaningless without it. Empty when it could not be read, in which
    case the report says so rather than printing a zero that looks like an answer. */
 static char g_load_base[32];
+
+/*
+ * Which binary this is, as the linker named it, in hex: the ELF GNU build-id note on Linux, the
+ * Mach-O LC_UUID on a Mac. Read at install for the reason the load base is.
+ *
+ * A version says which *release* a report came from; this says which *file*, and they are not
+ * the same question. Two builds of one tag differ by compiler and flags, a local build carries
+ * the version of the tree it came from, and the address arithmetic the report exists for is
+ * only right against the exact binary that faulted. A symbol server matches on this and nothing
+ * else. Empty when the binary carries none - a link without `--build-id`, a system this has no
+ * reader for - and the line is then left out rather than printed with nothing after it.
+ *
+ * 20 bytes is SHA-1, what `--build-id` writes by default; a longer id is cut at the buffer and a
+ * reader who needs the rest has the binary.
+ */
+static char g_build_id[2U * 32U + 1U];
 
 /* The probe pipe. Writing an address to it reports EFAULT instead of faulting, which is what
    makes walking a broken stack survivable. Both ends non-blocking so a probe can never wait. */
@@ -456,6 +476,11 @@ static void crash_report(int fd, int signal_number, const siginfo_t *info, void 
         crash_puts(fd, g_load_base);
         crash_puts(fd, "\n");
     }
+    if (g_build_id[0] != '\0') {
+        crash_puts(fd, "build id     ");
+        crash_puts(fd, g_build_id);
+        crash_puts(fd, "\n");
+    }
     crash_write_notes(fd);
 
     uint64_t pc = 0U;
@@ -571,6 +596,72 @@ static void crash_capture_load_base(void) {
         }
     }
     (void)fclose(maps);
+#endif
+}
+
+static void crash_hex(const uint8_t *bytes, size_t len, char *out, size_t out_len) {
+    static const char k_hex[] = "0123456789abcdef";
+    size_t at = 0U;
+    for (size_t i = 0U; i < len && at + 2U < out_len; ++i) {
+        out[at++] = k_hex[bytes[i] >> 4U];
+        out[at++] = k_hex[bytes[i] & 0x0fU];
+    }
+    out[at] = '\0';
+}
+
+#if defined(__linux__)
+/* The executable is the first object dl_iterate_phdr() visits; its notes are in PT_NOTE. */
+static int crash_find_build_id(struct dl_phdr_info *info, size_t size, void *userdata) {
+    (void)size;
+    (void)userdata;
+    for (size_t i = 0U; i < (size_t)info->dlpi_phnum; ++i) {
+        const ElfW(Phdr) *const phdr = &info->dlpi_phdr[i];
+        if (phdr->p_type != PT_NOTE) {
+            continue;
+        }
+        const uint8_t *at = (const uint8_t *)(uintptr_t)(info->dlpi_addr + phdr->p_vaddr);
+        const uint8_t *const end = at + phdr->p_memsz;
+        while (at + sizeof(ElfW(Nhdr)) <= end) {
+            const ElfW(Nhdr) *const note = (const ElfW(Nhdr) *)(const void *)at;
+            const size_t name_len = ((size_t)note->n_namesz + 3U) & ~(size_t)3U;
+            const size_t desc_len = ((size_t)note->n_descsz + 3U) & ~(size_t)3U;
+            const uint8_t *const name = at + sizeof *note;
+            const uint8_t *const desc = name + name_len;
+            if (desc + desc_len > end) {
+                break;
+            }
+            /* NT_GNU_BUILD_ID, spelled as its value: musl's <elf.h> has not always named it. */
+            if (note->n_type == 3U && note->n_namesz == 4U && memcmp(name, "GNU", 4U) == 0) {
+                crash_hex(desc, note->n_descsz, g_build_id, sizeof g_build_id);
+                return 1;
+            }
+            at = desc + desc_len;
+        }
+    }
+    return 1; /* only the first object is this binary; the rest are its libraries */
+}
+#endif
+
+static void crash_capture_build_id(void) {
+    g_build_id[0] = '\0';
+#if defined(__APPLE__)
+    const struct mach_header_64 *const header =
+        (const struct mach_header_64 *)(const void *)_dyld_get_image_header(0);
+    if (header == NULL || header->magic != MH_MAGIC_64) {
+        return;
+    }
+    const uint8_t *at = (const uint8_t *)(header + 1);
+    for (uint32_t i = 0U; i < header->ncmds; ++i) {
+        const struct load_command *const command = (const struct load_command *)(const void *)at;
+        if (command->cmd == LC_UUID) {
+            const struct uuid_command *const uuid = (const struct uuid_command *)(const void *)at;
+            crash_hex(uuid->uuid, sizeof uuid->uuid, g_build_id, sizeof g_build_id);
+            return;
+        }
+        at += command->cmdsize;
+    }
+#elif defined(__linux__)
+    (void)dl_iterate_phdr(crash_find_build_id, NULL);
 #endif
 }
 
@@ -721,6 +812,7 @@ int inkwell_crash_install(const struct inkwell_crash_config *config) {
     }
     if (!g_installed) {
         crash_capture_load_base();
+        crash_capture_build_id();
     }
 
     /*

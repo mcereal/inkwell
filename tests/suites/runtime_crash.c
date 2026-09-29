@@ -152,6 +152,47 @@ INKWELL_TEST_CASE(crash_report_carries_its_notes, unit) {
     record_success(test_name);
 }
 
+/*
+ * Which file faulted, not only which release: the id a symbol server matches a binary on. The
+ * test binary is linked with one (tests/CMakeLists.txt), so on the two systems with a reader for
+ * it the line has to be there and has to be hex of an id's length.
+ */
+INKWELL_TEST_CASE(crash_report_names_the_binary_it_came_from, unit) {
+#if defined(__linux__) || defined(__APPLE__)
+    char dir[] = "/tmp/inkwell_crash_buildidXXXXXX";
+    INKWELL_TEST_FAIL_IF(!crash_test_tempdir(dir), "mkdtemp failed");
+    INKWELL_TEST_FAIL_IF_CLEANUP(crash_test_install(dir) != 0, inkwell_test_remove_tree(dir),
+                                 "the install refused a usable config");
+    char path[256];
+    snprintf(path, sizeof path, "%s/report.txt", dir);
+    FILE *file = fopen(path, "we");
+    INKWELL_TEST_FAIL_IF_CLEANUP(file == NULL, inkwell_test_remove_tree(dir),
+                                 "could not open a report");
+    inkwell_crash_write_report(fileno(file), 11);
+    (void)fclose(file);
+
+    static char body[16384];
+    const bool read = crash_test_slurp(path, body, sizeof body);
+    inkwell_test_remove_tree(dir);
+    INKWELL_TEST_FAIL_IF(!read, "report was unreadable or longer than the buffer");
+
+    const char *const line = strstr(body, "\nbuild id     ");
+    INKWELL_TEST_FAIL_IF(line == NULL, "the report does not say which binary it came from");
+    const char *const id = line + strlen("\nbuild id     ");
+    size_t len = 0U;
+    while ((id[len] >= '0' && id[len] <= '9') || (id[len] >= 'a' && id[len] <= 'f')) {
+        ++len;
+    }
+    INKWELL_TEST_FAIL_IF(id[len] != '\n', "the build id is not lowercase hex to the end of line");
+    INKWELL_TEST_FAIL_IF(len < 32U || len % 2U != 0U,
+                         "the build id is shorter than any the linker writes");
+    INKWELL_TEST_FAIL_IF(strstr(body, "load base    0x") == NULL ||
+                             strstr(body, "load base") > line,
+                         "the id belongs beside the load base it is used with");
+#endif
+    record_success(test_name);
+}
+
 INKWELL_TEST_CASE(crash_report_keeps_the_newest_log_lines, unit) {
     /*
      * Two full turns of the ring plus a bit, so nothing any other case logged can still be in
