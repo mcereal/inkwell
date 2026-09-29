@@ -52,6 +52,10 @@ struct inkwell_fetch_conn; /* the request in flight; defined in fetch.c */
 /* Hops a request may take before the chain is refused. One is common: a release asset on a large
    forge is typically a 302 from the API host to a CDN. */
 #define INKWELL_FETCH_REDIRECTS_MAX 5U
+/* The largest body a POST may send. It is copied when the request starts, so a caller may build
+   it on the stack - and a copy is an allocation, which is what this bounds. A report or a form
+   is a few KB; a file upload is not what POST here is for. */
+#define INKWELL_FETCH_BODY_MAX (1024U * 1024U)
 
 /* How a finished request ended. Every one of these is a sentence the caller has to be able to
    put on a screen, so they are told apart by what the reader would do next. */
@@ -110,16 +114,32 @@ struct inkwell_fetch_result {
 };
 
 /*
- * What a request asks for. GET is the body; HEAD is the headers and nothing else.
+ * What a request asks for. GET is the body; HEAD is the headers and nothing else; POST sends
+ * `body` and reads the reply the way a GET does.
  *
  * HEAD exists for one reason and it is not tidiness: a zip is read from the back, the CDN in
  * front of these files answers `501 Unsupported client range` to a suffix range, and so the only
  * way to ask for the last 64 KB of a file is to know how long it is first. The final reply's head
  * is captured as the body, which is what `inkwell_fetch_content_length()` reads.
+ *
+ * POST exists for the one thing a program on a device has to *say* to a server rather than ask
+ * of it - a report it was told it may send, say. It is deliberately narrower than a GET:
+ *
+ *  - **It is not followed through a redirect.** Any 3xx fails the request as PROTOCOL. A GET
+ *    that moves has been asked the same question somewhere else; a body that moves has been
+ *    handed to a host the caller never named, which is not something to do on its behalf
+ *    without saying so. A caller whose server really does move says the new URL itself.
+ *  - **It is not written to a file.** `output_path` is for downloads, and a POST's reply is an
+ *    acknowledgement - small, and captured like any other.
+ *  - **It is sent once per address, never retried after it has gone.** The body goes out after
+ *    the handshake, so a connection that fails before then tries the next address exactly as a
+ *    GET does, and one that fails after it is the caller's failure to judge: whether sending
+ *    twice is harmless is a fact about the server, not about HTTP.
  */
 enum inkwell_fetch_method {
     INKWELL_FETCH_GET = 0,
     INKWELL_FETCH_HEAD,
+    INKWELL_FETCH_POST,
 };
 
 /* Called once per started request, from the event loop, when it is over. */
@@ -138,6 +158,14 @@ struct inkwell_fetch_request {
      * 100 MB zip is owed a failure rather than the zip.
      */
     const char *headers[INKWELL_FETCH_HEADERS_MAX];
+    /*
+     * What a POST sends, and how long it is: at most INKWELL_FETCH_BODY_MAX, copied at start, so
+     * it need not outlive the call. `Content-Length` is added from `body_len` - a caller that
+     * writes its own is refused, since two lengths are two readers disagreeing - and the type is
+     * the caller's to name among `headers`. Must be empty for any other method.
+     */
+    const void *body;
+    size_t body_len;
     /*
      * Where the body goes. NULL captures it in memory and hands it to the callback; a path
      * streams it into that file as it arrives, which is what makes a download's progress a
@@ -227,7 +255,9 @@ void inkwell_fetch_connect_to(struct inkwell_fetch *fetch, const char *host, uin
 
 /*
  * Starts `request`. Returns 0, or -errno: -ENOTSUP when unavailable, -EBUSY with a request
- * already running, -EINVAL for a request with no callback or a URL that is not https, -ENOMEM.
+ * already running, -EINVAL for a request with no callback, a URL that is not https, a body on
+ * anything but a POST, a POST with an `output_path` or a `Content-Length` of its own, -E2BIG for
+ * a body past INKWELL_FETCH_BODY_MAX, -ENOMEM.
  * On any error nothing was started and `on_done` will not be called.
  *
  * On 0 the callback is called exactly once, later, from the loop - never before this returns.

@@ -74,11 +74,17 @@ bool inkwell_http_url_resolve(const struct inkwell_http_url *base, const char *l
 enum inkwell_http_method {
     INKWELL_HTTP_GET = 0,
     INKWELL_HTTP_HEAD,
+    INKWELL_HTTP_POST,
 };
 
 /*
  * Writes a whole request - request line, `Host`, `Connection: close`, then `headers` (whole
  * lines without their CRLF, read up to the first NULL or `header_count`) - into `out`.
+ *
+ * The head only. A POST's body follows it on the wire and its `Content-Length` is one of
+ * `headers`, because the body is the caller's and so is knowing how long it is: this writes
+ * what a request *says*, and a length it made up would be a second place for the two to
+ * disagree.
  *
  * Returns the length, or -1 when it does not fit or a header line carries a CR or LF: a caller's
  * header is one line, and one that is not would be a second header nobody wrote.

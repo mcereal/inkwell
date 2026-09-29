@@ -276,6 +276,18 @@ bool inkwell_http_url_resolve(const struct inkwell_http_url *base, const char *l
 
 /* ------------------------------------------------------------------ the request */
 
+static const char *http_method_name(enum inkwell_http_method method) {
+    switch (method) {
+    case INKWELL_HTTP_HEAD:
+        return "HEAD";
+    case INKWELL_HTTP_POST:
+        return "POST";
+    case INKWELL_HTTP_GET:
+        break;
+    }
+    return "GET";
+}
+
 int inkwell_http_request_format(char *out, size_t cap, enum inkwell_http_method method,
                                 const struct inkwell_http_url *url, const char *const *headers,
                                 size_t header_count) {
@@ -293,8 +305,8 @@ int inkwell_http_request_format(char *out, size_t cap, enum inkwell_http_method 
                            "%s %s HTTP/1.1\r\n"
                            "Host: %s%s%s%s\r\n"
                            "Connection: close\r\n",
-                           method == INKWELL_HTTP_HEAD ? "HEAD" : "GET", url->target, v6 ? "[" : "",
-                           url->host, v6 ? "]" : "", port);
+                           http_method_name(method), url->target, v6 ? "[" : "", url->host,
+                           v6 ? "]" : "", port);
     if (written < 0 || (size_t)written >= cap) {
         return -1;
     }

@@ -97,6 +97,18 @@ static void fetch_serve(void *userdata, const struct https_fixture_request *requ
             }
             https_fixture_reply(conn, 200, "Accept-Ranges: bytes\r\n", asset, sizeof asset);
         }
+    } else if (strcmp(target, "/echo") == 0) {
+        /* What arrived, in a line a suite can check without seeing the whole of a large body:
+           the method, the length, a byte sum, and the first few bytes as they were. */
+        unsigned long sum = 0U;
+        for (size_t i = 0U; i < request->body_len; ++i) {
+            sum += (unsigned char)request->body[i];
+        }
+        char reply[160];
+        const int shown = request->body_len < 32U ? (int)request->body_len : 32;
+        const int len = snprintf(reply, sizeof reply, "%s %zu %lu %.*s", request->method,
+                                 request->body_len, sum, shown, request->body);
+        https_fixture_reply(conn, 200, NULL, reply, (size_t)len);
     } else if (strcmp(target, "/whole") == 0) {
         /* A server that ignores a range and sends the file. */
         https_fixture_reply(conn, 200, NULL, "the whole file", 14U);
@@ -416,6 +428,170 @@ INKWELL_TEST_CASE(fetch_refuses_redirects_it_should_not_follow, unit) {
     }
     if (loops != INKWELL_FETCH_REDIRECTS_MAX + 1U) {
         failure = "the cap should be the first request and INKWELL_FETCH_REDIRECTS_MAX more";
+        goto cleanup;
+    }
+
+cleanup:
+    harness_stop(&h);
+    if (failure != NULL) {
+        record_failure(test_name, failure);
+    } else {
+        record_success(test_name);
+    }
+}
+
+/*
+ * A POST: the body goes out whole after the head, with a length this added, and the reply comes
+ * back the way a GET's does. Larger than one TLS record, so the send has to go round more than
+ * once; and empty, which is still a POST that says so.
+ */
+INKWELL_TEST_CASE(fetch_posts_a_body_and_reads_the_reply, unit) {
+    struct fetch_harness h;
+    const char *failure = NULL;
+    static char big[40000];
+    if (!harness_start(&h)) {
+        failure = "the harness did not start";
+        goto cleanup;
+    }
+
+    static const char k_small[] = "{\"hello\":\"there\"}";
+    const struct inkwell_fetch_request small = {
+        .url = "https://api.github.com/echo",
+        .method = INKWELL_FETCH_POST,
+        .headers = {"Content-Type: application/json"},
+        .body = k_small,
+        .body_len = sizeof k_small - 1U,
+    };
+    unsigned long sum = 0U;
+    for (size_t i = 0U; i < sizeof k_small - 1U; ++i) {
+        sum += (unsigned char)k_small[i];
+    }
+    char expected[160];
+    snprintf(expected, sizeof expected, "POST %zu %lu %s", sizeof k_small - 1U, sum, k_small);
+    if (!harness_fetch(&h, &small) || h.probe.outcome[0] != INKWELL_FETCH_OK ||
+        strcmp(h.probe.body[0], expected) != 0) {
+        failure = "a small body should arrive exactly as it was handed in";
+        goto cleanup;
+    }
+
+    sum = 0U;
+    for (size_t i = 0U; i < sizeof big; ++i) {
+        big[i] = (char)('A' + i % 23U);
+        sum += (unsigned char)big[i];
+    }
+    const struct inkwell_fetch_request large = {
+        .url = "https://api.github.com/echo",
+        .method = INKWELL_FETCH_POST,
+        .body = big,
+        .body_len = sizeof big,
+    };
+    snprintf(expected, sizeof expected, "POST %zu %lu %.32s", sizeof big, sum, big);
+    if (!harness_fetch(&h, &large) || h.probe.outcome[1] != INKWELL_FETCH_OK ||
+        strcmp(h.probe.body[1], expected) != 0) {
+        failure = "a body past one record should arrive whole and in order";
+        goto cleanup;
+    }
+
+    const struct inkwell_fetch_request empty = {
+        .url = "https://api.github.com/echo",
+        .method = INKWELL_FETCH_POST,
+    };
+    if (!harness_fetch(&h, &empty) || h.probe.outcome[2] != INKWELL_FETCH_OK ||
+        strcmp(h.probe.body[2], "POST 0 0 ") != 0) {
+        failure = "an empty POST is still a POST";
+        goto cleanup;
+    }
+
+cleanup:
+    harness_stop(&h);
+    if (failure != NULL) {
+        record_failure(test_name, failure);
+    } else {
+        record_success(test_name);
+    }
+}
+
+/* See enum inkwell_fetch_method: a body goes to the host the caller named, or nowhere. */
+INKWELL_TEST_CASE(fetch_does_not_follow_a_redirect_with_a_body, unit) {
+    struct fetch_harness h;
+    const char *failure = NULL;
+    if (!harness_start(&h)) {
+        failure = "the harness did not start";
+        goto cleanup;
+    }
+
+    const struct inkwell_fetch_request moved = {
+        .url = "https://github.com/release",
+        .method = INKWELL_FETCH_POST,
+        .body = "x",
+        .body_len = 1U,
+    };
+    if (!harness_fetch(&h, &moved) || h.probe.outcome[0] != INKWELL_FETCH_PROTOCOL ||
+        h.probe.status[0] != 302) {
+        failure = "a redirected POST should fail and say what the server answered";
+        goto cleanup;
+    }
+    char log[1024];
+    https_fixture_requests(&h.server, log, sizeof log);
+    if (strcmp(log, "POST github.com /release\n") != 0) {
+        failure = "and the host the redirect named should never have been asked";
+        goto cleanup;
+    }
+
+cleanup:
+    harness_stop(&h);
+    if (failure != NULL) {
+        record_failure(test_name, failure);
+    } else {
+        record_success(test_name);
+    }
+}
+
+INKWELL_TEST_CASE(fetch_refuses_a_body_it_should_not_send, unit) {
+    struct fetch_harness h;
+    const char *failure = NULL;
+    if (!harness_start(&h)) {
+        failure = "the harness did not start";
+        goto cleanup;
+    }
+
+    struct inkwell_fetch_request request = {
+        .url = "https://api.github.com/echo",
+        .body = "x",
+        .body_len = 1U,
+        .on_done = probe_record,
+        .userdata = &h.probe,
+    };
+    if (inkwell_fetch_start(&h.fetch, &request, 0U) != -EINVAL) {
+        failure = "a GET with a body should be refused";
+        goto cleanup;
+    }
+    request.method = INKWELL_FETCH_POST;
+    request.headers[0] = "content-length: 1";
+    if (inkwell_fetch_start(&h.fetch, &request, 0U) != -EINVAL) {
+        failure = "a POST that names its own length should be refused";
+        goto cleanup;
+    }
+    request.headers[0] = NULL;
+    request.output_path = "/tmp/inkwell-fetch-post";
+    if (inkwell_fetch_start(&h.fetch, &request, 0U) != -EINVAL) {
+        failure = "a POST written to a file should be refused";
+        goto cleanup;
+    }
+    request.output_path = NULL;
+    request.body_len = INKWELL_FETCH_BODY_MAX + 1U;
+    if (inkwell_fetch_start(&h.fetch, &request, 0U) != -E2BIG) {
+        failure = "a body past the cap should be refused as too big";
+        goto cleanup;
+    }
+    request.body = NULL;
+    request.body_len = 1U;
+    if (inkwell_fetch_start(&h.fetch, &request, 0U) != -EINVAL) {
+        failure = "a length with no body behind it should be refused";
+        goto cleanup;
+    }
+    if (inkwell_fetch_busy(&h.fetch) || h.probe.calls != 0U) {
+        failure = "nothing refused should have started or called back";
         goto cleanup;
     }
 
