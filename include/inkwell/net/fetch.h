@@ -131,10 +131,12 @@ struct inkwell_fetch_result {
  *    without saying so. A caller whose server really does move says the new URL itself.
  *  - **It is not written to a file.** `output_path` is for downloads, and a POST's reply is an
  *    acknowledgement - small, and captured like any other.
- *  - **It is sent once per address, never retried after it has gone.** The body goes out after
- *    the handshake, so a connection that fails before then tries the next address exactly as a
- *    GET does, and one that fails after it is the caller's failure to judge: whether sending
- *    twice is harmless is a fact about the server, not about HTTP.
+ *  - **It is never sent twice.** An address that refuses the connection, or does not answer
+ *    it, moves on to the next exactly as a GET does - nothing has been sent by then. From the
+ *    connection's acceptance on, a failure is the request's: the handshake, the head and the
+ *    body are one attempt, and a POST is not retried from the top once any of it may have
+ *    reached the server. Whether sending twice is harmless is a fact about the server, not
+ *    about HTTP, so that retry is the caller's to make.
  */
 enum inkwell_fetch_method {
     INKWELL_FETCH_GET = 0,
