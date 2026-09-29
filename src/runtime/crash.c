@@ -70,6 +70,11 @@ static char g_load_base[32];
  */
 static char g_build_id[2U * 32U + 1U];
 
+/* How much address space the image spans from its load base, as "0x...": the extent of its
+   loaded segments. What turns "an address past the base" into "an address inside this binary"
+   for a reader holding several images - a symbol server asks for it beside the id. */
+static char g_image_size[32];
+
 /* The probe pipe. Writing an address to it reports EFAULT instead of faulting, which is what
    makes walking a broken stack survivable. Both ends non-blocking so a probe can never wait. */
 static int g_probe_fd[2] = {-1, -1};
@@ -481,6 +486,11 @@ static void crash_report(int fd, int signal_number, const siginfo_t *info, void 
         crash_puts(fd, g_build_id);
         crash_puts(fd, "\n");
     }
+    if (g_image_size[0] != '\0') {
+        crash_puts(fd, "image size   ");
+        crash_puts(fd, g_image_size);
+        crash_puts(fd, "\n");
+    }
     crash_write_notes(fd);
 
     uint64_t pc = 0U;
@@ -610,10 +620,21 @@ static void crash_hex(const uint8_t *bytes, size_t len, char *out, size_t out_le
 }
 
 #if defined(__linux__)
-/* The executable is the first object dl_iterate_phdr() visits; its notes are in PT_NOTE. */
+/* The executable is the first object dl_iterate_phdr() visits; its notes are in PT_NOTE and its
+   extent is the end of its last PT_LOAD. */
 static int crash_find_build_id(struct dl_phdr_info *info, size_t size, void *userdata) {
     (void)size;
     (void)userdata;
+    uint64_t extent = 0U;
+    for (size_t i = 0U; i < (size_t)info->dlpi_phnum; ++i) {
+        const ElfW(Phdr) *const phdr = &info->dlpi_phdr[i];
+        if (phdr->p_type == PT_LOAD && (uint64_t)(phdr->p_vaddr + phdr->p_memsz) > extent) {
+            extent = (uint64_t)(phdr->p_vaddr + phdr->p_memsz);
+        }
+    }
+    if (extent > 0U) {
+        (void)snprintf(g_image_size, sizeof g_image_size, "0x%llx", (unsigned long long)extent);
+    }
     for (size_t i = 0U; i < (size_t)info->dlpi_phnum; ++i) {
         const ElfW(Phdr) *const phdr = &info->dlpi_phdr[i];
         if (phdr->p_type != PT_NOTE) {
@@ -644,21 +665,41 @@ static int crash_find_build_id(struct dl_phdr_info *info, size_t size, void *use
 
 static void crash_capture_build_id(void) {
     g_build_id[0] = '\0';
+    g_image_size[0] = '\0';
 #if defined(__APPLE__)
     const struct mach_header_64 *const header =
         (const struct mach_header_64 *)(const void *)_dyld_get_image_header(0);
     if (header == NULL || header->magic != MH_MAGIC_64) {
         return;
     }
+    /* The extent is measured from __TEXT, which is where the header - the load base - sits;
+       __PAGEZERO is below it and is not part of the image anybody resolves against. */
+    uint64_t text = 0U;
+    uint64_t extent = 0U;
+    bool have_text = false;
     const uint8_t *at = (const uint8_t *)(header + 1);
     for (uint32_t i = 0U; i < header->ncmds; ++i) {
         const struct load_command *const command = (const struct load_command *)(const void *)at;
         if (command->cmd == LC_UUID) {
             const struct uuid_command *const uuid = (const struct uuid_command *)(const void *)at;
             crash_hex(uuid->uuid, sizeof uuid->uuid, g_build_id, sizeof g_build_id);
-            return;
+        } else if (command->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *const segment =
+                (const struct segment_command_64 *)(const void *)at;
+            if (strncmp(segment->segname, "__TEXT", sizeof segment->segname) == 0) {
+                text = segment->vmaddr;
+                have_text = true;
+            }
+            if (strncmp(segment->segname, "__PAGEZERO", sizeof segment->segname) != 0 &&
+                segment->vmaddr + segment->vmsize > extent) {
+                extent = segment->vmaddr + segment->vmsize;
+            }
         }
         at += command->cmdsize;
+    }
+    if (have_text && extent > text) {
+        (void)snprintf(g_image_size, sizeof g_image_size, "0x%llx",
+                       (unsigned long long)(extent - text));
     }
 #elif defined(__linux__)
     (void)dl_iterate_phdr(crash_find_build_id, NULL);

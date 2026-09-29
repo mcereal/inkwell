@@ -189,6 +189,8 @@ INKWELL_TEST_CASE(crash_report_names_the_binary_it_came_from, unit) {
     INKWELL_TEST_FAIL_IF(strstr(body, "load base    0x") == NULL ||
                              strstr(body, "load base") > line,
                          "the id belongs beside the load base it is used with");
+    INKWELL_TEST_FAIL_IF(strstr(body, "\nimage size   0x") == NULL,
+                         "the report does not say how far the image reaches");
 #endif
     record_success(test_name);
 }
