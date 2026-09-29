@@ -620,20 +620,37 @@ static void crash_hex(const uint8_t *bytes, size_t len, char *out, size_t out_le
 }
 
 #if defined(__linux__)
-/* The executable is the first object dl_iterate_phdr() visits; its notes are in PT_NOTE and its
-   extent is the end of its last PT_LOAD. */
+/*
+ * The executable is the first object dl_iterate_phdr() visits; its notes are in PT_NOTE.
+ *
+ * Its extent is measured from where its first PT_LOAD is mapped - that segment's address rounded
+ * down to its alignment, which is the start of the mapping the load base was read from - to the
+ * end of its last. From the lowest segment rather than from zero: a position-independent binary
+ * is linked at 0 and the two agree, but a fixed-address one is linked at 0x400000 or so, and
+ * measured from zero its "size" would be its end address.
+ */
 static int crash_find_build_id(struct dl_phdr_info *info, size_t size, void *userdata) {
     (void)size;
     (void)userdata;
+    uint64_t start = UINT64_MAX;
     uint64_t extent = 0U;
     for (size_t i = 0U; i < (size_t)info->dlpi_phnum; ++i) {
         const ElfW(Phdr) *const phdr = &info->dlpi_phdr[i];
-        if (phdr->p_type == PT_LOAD && (uint64_t)(phdr->p_vaddr + phdr->p_memsz) > extent) {
+        if (phdr->p_type != PT_LOAD) {
+            continue;
+        }
+        const uint64_t align = phdr->p_align > 1U ? (uint64_t)phdr->p_align : 1U;
+        const uint64_t mapped = (uint64_t)phdr->p_vaddr & ~(align - 1U);
+        if (mapped < start) {
+            start = mapped;
+        }
+        if ((uint64_t)(phdr->p_vaddr + phdr->p_memsz) > extent) {
             extent = (uint64_t)(phdr->p_vaddr + phdr->p_memsz);
         }
     }
-    if (extent > 0U) {
-        (void)snprintf(g_image_size, sizeof g_image_size, "0x%llx", (unsigned long long)extent);
+    if (extent > start) {
+        (void)snprintf(g_image_size, sizeof g_image_size, "0x%llx",
+                       (unsigned long long)(extent - start));
     }
     for (size_t i = 0U; i < (size_t)info->dlpi_phnum; ++i) {
         const ElfW(Phdr) *const phdr = &info->dlpi_phdr[i];
