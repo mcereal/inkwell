@@ -137,6 +137,14 @@ struct inkwell_fetch_result {
  *    body are one attempt, and a POST is not retried from the top once any of it may have
  *    reached the server. Whether sending twice is harmless is a fact about the server, not
  *    about HTTP, so that retry is the caller's to make.
+ *  - **The reply is read once the body has gone.** A server that answers before it has read
+ *    the whole body - an early 401 or 413 - is not heard until the send finishes, and if it stops
+ *    reading, the send never does: the request ends TIMED_OUT, or NETWORK when the server
+ *    closes, rather than with the status it sent. Reading while a write is part way through is
+ *    not something the TLS session allows (a write that would block must be repeated before
+ *    anything else is done with it), so this is the shape rather than an omission. It costs
+ *    nothing at the size POST is for: a body of a few KB is in the socket's buffer before a
+ *    server can refuse it, and the refusal is then read like any other reply.
  */
 enum inkwell_fetch_method {
     INKWELL_FETCH_GET = 0,
