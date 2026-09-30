@@ -262,25 +262,41 @@ static void resolve_pick(const struct resolve_apple_backend *backend,
  * when every family said there is no such name or no such record (or answered only with
  * addresses this machine cannot reach), FAILED when any family's lookup did not work at all -
  * which says nothing about the name.
+ *
+ * And TIMED_OUT when a family gave up with kDNSServiceErr_Timeout (kDNSServiceFlagsTimeout's
+ * own deadline) and none failed outright: that is the same answer the deadline in
+ * inkwell_resolve_tick() gives, and it is a different sentence on a screen from FAILED.
  */
 static enum inkwell_resolve_outcome resolve_outcome_of(const struct resolve_apple_backend *backend,
                                                        int *error) {
-    enum inkwell_resolve_outcome outcome = INKWELL_RESOLVE_NOT_FOUND;
+    bool failed = false;
+    bool timed_out = false;
     *error = 0;
     for (int i = 0; i < RESOLVE_FAMILIES; ++i) {
         const DNSServiceErrorType why = backend->families[i].error;
         if (why == kDNSServiceErr_NoError) {
             continue;
         }
-        if (*error == 0) {
-            *error = (int)why;
+        if (why == kDNSServiceErr_NoSuchName || why == kDNSServiceErr_NoSuchRecord) {
+            if (*error == 0) {
+                *error = (int)why;
+            }
+            continue;
         }
-        if (why != kDNSServiceErr_NoSuchName && why != kDNSServiceErr_NoSuchRecord) {
-            *error = (int)why;
-            outcome = INKWELL_RESOLVE_FAILED;
+        if (why == kDNSServiceErr_Timeout) {
+            timed_out = true;
+            if (!failed) {
+                *error = (int)why;
+            }
+            continue;
         }
+        failed = true;
+        *error = (int)why;
     }
-    return outcome;
+    if (failed) {
+        return INKWELL_RESOLVE_FAILED;
+    }
+    return timed_out ? INKWELL_RESOLVE_TIMED_OUT : INKWELL_RESOLVE_NOT_FOUND;
 }
 
 /* Hands the outcome over exactly once, with the resolver already idle - see resolve.c. */

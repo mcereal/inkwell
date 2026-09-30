@@ -18,10 +18,12 @@
  * this binary is already linked against.
  *
  * **A literal is not a lookup.** inkwell_resolve_literal() answers `192.168.1.50` and `fd00::1`
- * with inet_pton and no child at all, which is both faster and what keeps the behaviour a caller
- * already had for an address exactly as it was. A caller checks that first and only starts a
- * lookup for what is left; on POSIX start() therefore always forks and always reports later,
- * and never calls back before it returns.
+ * with inet_pton and no lookup at all, which is both faster and what keeps the behaviour a
+ * caller already had for an address exactly as it was. A caller checks that first and only
+ * starts a lookup for what is left. On every platform start() reports later, from the loop or
+ * the tick, and never calls back before it returns - on Linux because it always forks, and on
+ * macOS even for the numeric forms inet_pton refuses (`127.1`), which are answered at start and
+ * handed over by the next tick.
  *
  * One lookup at a time. A second is refused with -EBUSY, which is all either caller needs: a link
  * resolves one host because it is about to connect to one host.
@@ -40,8 +42,9 @@ extern "C" {
 
 struct inkwell_loop;
 
-/* How long a lookup is given before the child is killed and the outcome is TIMED_OUT. A DNS
-   server that is there answers in milliseconds; one that is not is what this is for. */
+/* How long a lookup is given before it is abandoned (on Linux, the child killed) and the outcome
+   is TIMED_OUT. A DNS server that is there answers in milliseconds; one that is not is what this
+   is for. */
 #define INKWELL_RESOLVE_TIMEOUT_MS 5000U
 /* How many of getaddrinfo()'s answers come back. See inkwell_resolve_result.addresses. */
 #define INKWELL_RESOLVE_ADDRESSES_MAX 4U
@@ -59,7 +62,8 @@ enum inkwell_resolve_outcome {
        something wrong, or the host is not on this network. */
     INKWELL_RESOLVE_NOT_FOUND,
     /* The lookup itself did not work - no resolver configured, no route to the DNS server, the
-       child could not be read. Says nothing about whether the name exists. */
+       child could not be read, mDNSResponder went away. Says nothing about whether the name
+       exists. */
     INKWELL_RESOLVE_FAILED,
     INKWELL_RESOLVE_TIMED_OUT,
     INKWELL_RESOLVE_OUTCOME_COUNT,
@@ -95,18 +99,18 @@ struct inkwell_resolve_result {
     size_t address_count;
 };
 
-/* Called once per started lookup, from the event loop, when the child is gone. */
+/* Called once per started lookup, from the event loop or the tick, when the lookup is over. */
 typedef void (*inkwell_resolve_done_fn)(void *userdata,
                                         const struct inkwell_resolve_result *result);
 
 struct inkwell_resolve {
     struct inkwell_loop *loop;
 
-    /* Native asynchronous resolver state. POSIX leaves this NULL and uses the child fields
-       below; Windows owns a GetAddrInfoEx request through it. */
+    /* Native asynchronous resolver state. Linux leaves this NULL and uses the child fields
+       below; Windows owns a GetAddrInfoEx request through it, and macOS a DNS-SD connection. */
     void *backend;
 
-    /* The running child, or -1. Only ever one. */
+    /* The running child, or -1. Only ever one. Linux only; -1 throughout elsewhere. */
     pid_t child;
     int child_fd;
     uint64_t deadline_ms;
@@ -156,15 +160,16 @@ int inkwell_resolve_start(struct inkwell_resolve *resolve, const char *host, uin
                           inkwell_resolve_done_fn on_done, void *userdata, uint64_t now_ms);
 
 /*
- * Enforces the deadline and reaps a finished child. Call every loop turn.
+ * Enforces the deadline, and on Linux reaps a finished child. Call every loop turn.
  *
- * Both halves matter: the fd callback sees EOF, but a
- * child that wrote its answer and has not yet been reaped is only ever finished here.
+ * Both halves matter: the fd callback sees EOF, but a Linux child that wrote its answer and has
+ * not yet been reaped is only ever finished here - and so is a macOS numeric answer.
  */
 void inkwell_resolve_tick(struct inkwell_resolve *resolve, uint64_t now_ms);
 
 /*
- * Abandons anything in flight: the child is killed and the callback is *not* called. For a
+ * Abandons anything in flight: the lookup is dropped (on Linux, the child killed) and the
+ * callback is *not* called. For a
  * caller that has decided the outcome itself - a link torn down while a name was being looked
  * up - and does not want a completion arriving on top of the decision.
  */
