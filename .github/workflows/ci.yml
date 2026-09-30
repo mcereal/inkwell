@@ -141,11 +141,14 @@ jobs:
         shell: msys2 {0}
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DPython3_EXECUTABLE="$(command -v python)"
-          cmake --build build --target inkwell_windows_net_tests
+          cmake --build build --target inkwell_windows_net_tests inkwell_windows_crash_tests
 
       - name: Test
         shell: msys2 {0}
         run: ./build/tests/inkwell_windows_net_tests.exe
+      - name: Crash reports
+        shell: msys2 {0}
+        run: ./build/tests/inkwell_windows_crash_tests.exe
 
   format:
     name: clang-format

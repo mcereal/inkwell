@@ -26,6 +26,7 @@
  * ---- the discipline -------------------------------------------------------------------------
  *
  * A handler runs on a process that is already broken, which rules out most of libc. POSIX names
+ *
  * the functions that stay safe there and neither `printf` nor `malloc` is among them - a fault
  * inside `malloc` leaves the allocator's lock held, and a handler that takes it deadlocks
  * instead of reporting anything. So the writer here uses `write()` and formats its own integers,
@@ -40,6 +41,15 @@
  * writing it to a descriptor turns an unreadable page into `EFAULT` - a return value - where
  * dereferencing it would be a second fault inside the handler. It is what lets the backtrace be
  * attempted at all rather than being left out as too dangerous.
+ *
+ * The Windows backend keeps the
+ * same `signal` report label so existing readers can parse it:
+ * its number is the unsigned
+ * structured-exception code, and its name is the Windows exception
+ * name. SIGABRT uses its CRT
+ * signal number and name. Windows writes through Win32 file APIs,
+ * and walks from the faulting
+ * CONTEXT rather than from the handler's own stack.
  */
 
 #include <stdbool.h>

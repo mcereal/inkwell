@@ -11,7 +11,8 @@
 #include <stdint.h>
 
 typedef struct CrashFault {
-    int signal_number;
+    uint64_t signal_number;
+    bool signal_hex;
     const char *signal_name;
     bool has_info;
     int64_t code;
@@ -21,6 +22,7 @@ typedef struct CrashFault {
     uint64_t fp;
     const char *load_base;
     const char *build_id;
+    const char *code_id;
     const char *image_size;
 } CrashFault;
 
