@@ -45,7 +45,8 @@ int inkwell_crash_internal_unlink(const char *path) {
     if (DeleteFileW(wide)) {
         return 0;
     }
-    errno = GetLastError() == ERROR_FILE_NOT_FOUND ? ENOENT : EIO;
+    const DWORD error = GetLastError();
+    errno = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? ENOENT : EIO;
     return -1;
 }
 

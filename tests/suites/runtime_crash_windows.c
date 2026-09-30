@@ -45,6 +45,17 @@ static int child(const char *mode) {
                    ? 21
                    : 0;
     }
+    if (strcmp(mode, "missing-dir") == 0) {
+        WCHAR wide[INKWELL_CRASH_PATH_MAX];
+        if (!MultiByteToWideChar(CP_UTF8, 0, g_dir, -1, wide, INKWELL_CRASH_PATH_MAX) ||
+            !RemoveDirectoryW(wide))
+            return 24;
+        const bool discarded = inkwell_crash_discard() == 0 && inkwell_crash_discard() == 0 &&
+                               !inkwell_crash_report_waiting();
+        if (!CreateDirectoryW(wide, NULL))
+            return 25;
+        return discarded ? 0 : 26;
+    }
     if (strcmp(mode, "access") == 0)
         crash_access_caller();
     if (strcmp(mode, "refused") == 0) {
@@ -164,6 +175,8 @@ int main(int argc, char **argv) {
         "refused install changed the active report");
     failures += check(run_child("discard") == 0U, "waiting report was not discarded");
     failures += check(!read_report(body, sizeof body), "discard left the report on disk");
+    failures += check(run_child("missing-dir") == 0U,
+                      "discard failed after the report directory was removed");
     failures += check(run_child("abort") != 0U && read_report(body, sizeof body) &&
                           strstr(body, "SIGABRT") != NULL,
                       "abort left no report");
