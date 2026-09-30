@@ -58,6 +58,10 @@ static int child(const char *mode) {
     }
     if (strcmp(mode, "access") == 0)
         crash_access_caller();
+    if (strcmp(mode, "in-page") == 0) {
+        const ULONG_PTR details[] = {0U, 0x12345U, 0xC000000EU};
+        RaiseException(EXCEPTION_IN_PAGE_ERROR, 0U, 3U, details);
+    }
     if (strcmp(mode, "refused") == 0) {
         static const char *const bad_labels[] = {"a-label-far-too-long-to-pad"};
         const struct inkwell_crash_config bad = {
@@ -169,6 +173,11 @@ int main(int argc, char **argv) {
         failures += check(strstr(body, "build id     RSDS ") != NULL,
                           "CodeView binary has no RSDS build id in its report");
     failures += check(strstr(body, " #01 ") != NULL, "faulting stack has fewer than two frames");
+    failures +=
+        check(run_child("in-page") == EXCEPTION_IN_PAGE_ERROR && read_report(body, sizeof body) &&
+                  strstr(body, "EXCEPTION_IN_PAGE_ERROR") != NULL &&
+                  strstr(body, "fault addr   0x0000000000012345") != NULL,
+              "in-page error did not report the inaccessible address");
     failures += check(
         run_child("refused") == EXCEPTION_ACCESS_VIOLATION && read_report(body, sizeof body) &&
             strstr(body, "CrashTest crash report") != NULL && strstr(body, "Rejected") == NULL,

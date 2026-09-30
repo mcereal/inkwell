@@ -205,7 +205,9 @@ static void crash_report(DWORD code, const char *name, EXCEPTION_POINTERS *excep
         .has_info = record != NULL,
         .code = record != NULL ? (int64_t)record->ExceptionCode : 0,
         .fault_address =
-            record != NULL && code == EXCEPTION_ACCESS_VIOLATION && record->NumberParameters >= 2U
+            record != NULL &&
+                    (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_IN_PAGE_ERROR) &&
+                    record->NumberParameters >= 2U
                 ? record->ExceptionInformation[1]
             : record != NULL ? (uint64_t)(uintptr_t)record->ExceptionAddress
                              : 0U,
