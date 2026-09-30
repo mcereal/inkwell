@@ -57,7 +57,7 @@ set(INKWELL_TEST_SUITES
     suites/runtime_wake.c
 )
 if(WIN32)
-    list(APPEND INKWELL_TEST_SUITES suites/base_fd_device_windows.c suites/runtime_crash_windows.c
+    list(APPEND INKWELL_TEST_SUITES suites/base_fd_device_windows.c
          suites/net_mqtt_windows.c
          suites/net_resolve_windows.c suites/net_tcp_windows.c suites/net_stream_windows.c
          suites/net_tls_windows.c suites/runtime_windows_socket.c)
@@ -92,12 +92,15 @@ if(WIN32)
     add_executable(inkwell_windows_net_tests framework/inkwell_test.c support/tls_identity.c
                    suites/base_fd_device_windows.c suites/ble_central.c suites/io_serial_windows.c
                    suites/io_windows_unavailable.c suites/net_mqtt_windows.c
-                   suites/net_resolve_windows.c suites/net_tls_windows.c
-                   suites/runtime_crash_windows.c)
+                   suites/net_resolve_windows.c suites/net_tls_windows.c)
     target_include_directories(inkwell_windows_net_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(inkwell_windows_net_tests PRIVATE inkwell inkwell_options)
     add_test(NAME inkwell_windows_net COMMAND inkwell_windows_net_tests)
     set_tests_properties(inkwell_windows_net PROPERTIES LABELS unit)
+    add_executable(inkwell_windows_crash_tests suites/runtime_crash_windows.c)
+    target_link_libraries(inkwell_windows_crash_tests PRIVATE inkwell inkwell_options)
+    add_test(NAME inkwell_windows_crash COMMAND inkwell_windows_crash_tests)
+    set_tests_properties(inkwell_windows_crash PROPERTIES LABELS unit)
 endif()
 
 # The BlueZ backend's D-Bus half, against a fake org.bluez on an isolated bus. Its own

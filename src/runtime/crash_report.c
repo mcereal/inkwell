@@ -249,7 +249,15 @@ void inkwell_crash_internal_write_report(int fd, const CrashFault *fault,
     inkwell_crash_internal_puts(fd, "\n");
 
     inkwell_crash_internal_puts(fd, "signal       ");
-    crash_write_unsigned(fd, (uint64_t)fault->signal_number);
+    if (fault->signal_hex) {
+        char code[16];
+        inkwell_crash_internal_puts(fd, "0x");
+        const size_t len = inkwell_crash_internal_format_unsigned(code, sizeof code,
+                                                                  fault->signal_number, 16U, 8U);
+        inkwell_crash_internal_write(fd, code, len);
+    } else {
+        crash_write_unsigned(fd, fault->signal_number);
+    }
     inkwell_crash_internal_puts(fd, " (");
     inkwell_crash_internal_puts(fd, fault->signal_name);
     inkwell_crash_internal_puts(fd, ")\n");
@@ -280,6 +288,11 @@ void inkwell_crash_internal_write_report(int fd, const CrashFault *fault,
     if (fault->build_id[0] != '\0') {
         inkwell_crash_internal_puts(fd, "build id     ");
         inkwell_crash_internal_puts(fd, fault->build_id);
+        inkwell_crash_internal_puts(fd, "\n");
+    }
+    if (fault->code_id != NULL && fault->code_id[0] != '\0') {
+        inkwell_crash_internal_puts(fd, "code id      ");
+        inkwell_crash_internal_puts(fd, fault->code_id);
         inkwell_crash_internal_puts(fd, "\n");
     }
     if (fault->image_size[0] != '\0') {
@@ -382,8 +395,13 @@ static void crash_publish_prose(const struct inkwell_crash_config *config) {
     if (config->issues_url != NULL && config->issues_url[0] != '\0') {
         (void)snprintf(g_issues, sizeof g_issues, "\nIssues: %s\n", config->issues_url);
     }
+#if defined(_WIN32)
+    (void)snprintf(g_addr2line, sizeof g_addr2line,
+                   "Resolve addresses with the matching PE image and PDB for %s.\n", binary);
+#else
     (void)snprintf(g_addr2line, sizeof g_addr2line,
                    "Resolve an address with:  addr2line -fpe %s <address - load base>\n", binary);
+#endif
     (void)snprintf(g_empty_log, sizeof g_empty_log, "(%s logged nothing before it stopped)\n",
                    product);
 
