@@ -46,7 +46,7 @@ for the TrimUI Brick: everything in it that was never about Meshtastic and never
 | `base/` | The floor: a monotonic clock and a wall clock you can distrust, a levelled log that bounds its own file, `$PREFIX_`-namespaced environment knobs, whole-file reads, UTF-8 that counts characters rather than bytes. Includes nothing, including from each other's area. |
 | `runtime/` | One loop with a bounded number of sources - epoll on Linux, kqueue on macOS, `WaitForMultipleObjects()` over waitable handles and Winsock events on Windows - no threads anywhere, a timer and a wake that are sources like any other, and `SIGINT`/`SIGTERM`/`SIGHUP` (a console control event, on Windows) delivered through the loop so a shutdown runs the ordinary path instead of the default kill action. |
 | `codec/` | Bytes in, bytes out: base64 in both alphabets, SHA-256 and MD5, a non-allocating JSON reader, an HTTP/1.1 request formatter and response parser that takes its input in whatever sized pieces the network hands it, a zip central-directory walker that works on a window of a file rather than the whole thing, inflate and PNG, the UF2 and ESP firmware image formats, and the serial protocol an ESP32's ROM bootloader speaks. A codec parses; it does not know what the bytes are for. |
-| `net/` | One hostname turned into an address by a child that may block; a non-blocking TCP connector with a deadline; a byte stream over a descriptor; TLS that reports `-EAGAIN` rather than waiting; one HTTPS request; and one bounded MQTT 3.1.1 client with subscriptions, keepalive, and reconnect backoff. All run on the same loop and hold no application policy. |
+| `net/` | One hostname turned into an address without blocking the loop - a forked child on Linux, DNS-SD on macOS, overlapped `GetAddrInfoExW` on Windows; a non-blocking TCP connector with a deadline; a byte stream over a descriptor; TLS that reports `-EAGAIN` rather than waiting; one HTTPS request; and one bounded MQTT 3.1.1 client with subscriptions, keepalive, and reconnect backoff. All run on the same loop and hold no application policy. |
 | `ble/` | One Bluetooth LE central: discover, connect, pair, read, write, subscribe - BlueZ over D-Bus on Linux, CoreBluetooth on macOS, the Windows Runtime's LE API on Windows - as events on the loop. The only other threads in the tree are the stack's own - CoreBluetooth's dispatch queue, WinRT's thread pool - and both are kept to copies and a wake. |
 | `io/` | The USB serial ports the system has - sysfs on Linux, the I/O Registry on macOS, SetupAPI on Windows - with what the USB tree says about each (a bridge chip or the device's own USB, a mass-storage interface beside it or not), and a tty opened raw and non-blocking for the loop, whose rate and DTR/RTS lines can be changed while it is open. For a kernel without CDC-ACM, the generic-driver bind and the usbfs line-state request that make a native-USB device talk anyway. |
 
@@ -65,9 +65,10 @@ These are authoring rules — breaking one compiles and looks fine.
 - **Only `runtime/` and `base/fd.c` name the kernel.** Everything above asks them for a timer, a
   wake, a pipe or a socket and registers `INKWELL_LOOP_IN`/`_OUT`. A `timerfd_create()` above that
   line compiles on Linux and nowhere else, which is why CI builds on more than one system.
-- **A blocking call is a bug.** `getaddrinfo()` has no non-blocking form, so the resolver forks;
-  a TLS handshake reports `-EAGAIN` all the way up rather than waiting. Nothing here may sit
-  between two frames of somebody's UI.
+- **A blocking call is a bug.** `getaddrinfo()` has no non-blocking form, so on Linux the resolver
+  forks - and on macOS asks mDNSResponder over a socket, because a forked child of a process with
+  threads may not call `getaddrinfo()` there; a TLS handshake reports `-EAGAIN` all the way up
+  rather than waiting. Nothing here may sit between two frames of somebody's UI.
 - **A new directory under `src/` needs an entry in `ALLOWED`** in `scripts/check-layers.py`
   before it will compile clean. That is deliberate: adding an area is a decision about the
   shape of the stack, not a `mkdir`.
@@ -88,7 +89,7 @@ per system, so nothing above this layer names any of them.
 | Crash report | yes | yes | yes |
 | Codecs | yes | yes | yes |
 | TCP connector, byte stream | yes | yes | yes, over Winsock |
-| Resolver | forked child | forked child | overlapped `GetAddrInfoExW` |
+| Resolver | forked child | DNS-SD over the loop | overlapped `GetAddrInfoExW` |
 | TLS, HTTPS | Mbed TLS | Mbed TLS | Mbed TLS, over Winsock |
 | MQTT client | yes, TLS through Mbed TLS | yes, TLS through Mbed TLS | yes, over Winsock; TLS through Mbed TLS |
 | Bluetooth LE central | BlueZ over libdbus-1 | CoreBluetooth | Windows Runtime; no bonding |

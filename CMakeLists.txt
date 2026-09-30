@@ -68,6 +68,10 @@ if(WIN32)
     # backend, and refuse explicitly without pulling POSIX ioctl, mount or fork into the build.
     set(INKWELL_SERIAL_SOURCE src/io/serial_windows.c)
     set(INKWELL_USB_STORAGE_SOURCE src/io/usb_storage_unavailable.c)
+elseif(APPLE)
+    # A Mac process has threads it never started, so the forked resolver's child may not call
+    # getaddrinfo(); this one asks mDNSResponder over a socket instead. See resolve_apple.c.
+    set(INKWELL_RESOLVE_SOURCE src/net/resolve_apple.c)
 endif()
 
 add_library(inkwell STATIC
