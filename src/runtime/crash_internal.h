@@ -26,6 +26,11 @@ typedef struct CrashFault {
 
 typedef void (*CrashWriteFrames)(int fd, uint64_t fp);
 
+/* Minimal file operations keep the writer and report state independent of the host CRT. */
+ptrdiff_t crash_backend_write(int fd, const char *data, size_t len);
+bool crash_backend_path_exists(const char *path);
+int crash_backend_unlink(const char *path);
+
 int crash_report_prepare(const struct inkwell_crash_config *config);
 const char *crash_report_path(void);
 void crash_report_write(int fd, const CrashFault *fault, CrashWriteFrames write_frames);

@@ -14,7 +14,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 /* ---- what the handler is allowed to have ----------------------------------------------------
  *
@@ -84,7 +83,7 @@ static volatile sig_atomic_t g_log_filled;
    the line rather than the report. */
 void crash_write(int fd, const char *data, size_t len) {
     while (len > 0U) {
-        const ssize_t written = write(fd, data, len);
+        const ptrdiff_t written = crash_backend_write(fd, data, len);
         if (written < 0) {
             if (errno == EINTR) {
                 continue;
@@ -112,8 +111,7 @@ void crash_puts(int fd, const char *text) {
  * exactly the reason it matters here: a locale-aware formatter takes locks. `out` is written
  * backwards and reversed, which is the shortest correct way to do this without a division table.
  */
-size_t crash_format_unsigned(char *out, size_t out_len, uint64_t value, unsigned base,
-                                    size_t pad) {
+size_t crash_format_unsigned(char *out, size_t out_len, uint64_t value, unsigned base, size_t pad) {
     static const char k_digits[] = "0123456789abcdef";
     char scratch[32];
     size_t len = 0U;
@@ -285,7 +283,6 @@ void crash_report_write(int fd, const CrashFault *fault, CrashWriteFrames write_
     }
     crash_write_notes(fd);
 
-
     crash_puts(fd, "\n--- where ---------------------------------------------------------------\n");
     if (fault->have_registers) {
         crash_puts(fd, "pc           ");
@@ -444,7 +441,7 @@ int crash_report_prepare(const struct inkwell_crash_config *config) {
      * the disk on demand would start telling the user it had already crashed while they were
      * still using it, on a screen that is meant to be reporting the *previous* run.
      */
-    g_report_waiting = access(g_report_path, F_OK) == 0;
+    g_report_waiting = crash_backend_path_exists(g_report_path);
 
     return 0;
 }
@@ -473,7 +470,7 @@ int inkwell_crash_discard(void) {
     if (g_report_path[0] == '\0') {
         return -EINVAL;
     }
-    if (unlink(g_report_path) != 0 && errno != ENOENT) {
+    if (crash_backend_unlink(g_report_path) != 0 && errno != ENOENT) {
         return -errno;
     }
     g_report_waiting = false;

@@ -33,6 +33,18 @@
 #include <link.h>
 #endif
 
+ptrdiff_t crash_backend_write(int fd, const char *data, size_t len) {
+    return (ptrdiff_t)write(fd, data, len);
+}
+
+bool crash_backend_path_exists(const char *path) {
+    return access(path, F_OK) == 0;
+}
+
+int crash_backend_unlink(const char *path) {
+    return unlink(path);
+}
+
 /* ---- what the handler is allowed to have ----------------------------------------------------
  *
  * Everything in this block is written from ordinary context and only ever read from the signal
@@ -498,7 +510,6 @@ int inkwell_crash_install(const struct inkwell_crash_config *config) {
     g_installed = true;
     return 0;
 }
-
 
 void inkwell_crash_write_report(int fd, int signal_number) {
     const CrashFault fault = {

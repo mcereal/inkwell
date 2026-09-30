@@ -1,8 +1,20 @@
-#include "inkwell/runtime/crash.h"
+#include "crash_internal.h"
 
 #include <errno.h>
 #include <io.h>
 #include <string.h>
+
+ptrdiff_t crash_backend_write(int fd, const char *data, size_t len) {
+    return (ptrdiff_t)_write(fd, data, (unsigned)len);
+}
+
+bool crash_backend_path_exists(const char *path) {
+    return _access(path, 0) == 0;
+}
+
+int crash_backend_unlink(const char *path) {
+    return _unlink(path);
+}
 
 int inkwell_crash_install(const struct inkwell_crash_config *config) {
     if (config == NULL || config->dir == NULL || config->product == NULL ||
@@ -10,30 +22,6 @@ int inkwell_crash_install(const struct inkwell_crash_config *config) {
         return -EINVAL;
     }
     return -ENOTSUP;
-}
-
-bool inkwell_crash_report_path(char *out, size_t out_len) {
-    if (out != NULL && out_len > 0U) {
-        out[0] = '\0';
-    }
-    return false;
-}
-
-bool inkwell_crash_report_waiting(void) {
-    return false;
-}
-
-int inkwell_crash_discard(void) {
-    return 0;
-}
-
-void inkwell_crash_note(unsigned slot, const char *value) {
-    (void)slot;
-    (void)value;
-}
-
-void inkwell_crash_log_line(const char *line) {
-    (void)line;
 }
 
 void inkwell_crash_write_report(int fd, int signal_number) {
