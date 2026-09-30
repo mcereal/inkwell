@@ -51,6 +51,7 @@ if(INKWELL_ENABLE_UBSAN)
 endif()
 
 set(INKWELL_CRASH_SOURCE src/runtime/crash.c)
+set(INKWELL_CRASH_REPORT_SOURCE src/runtime/crash_report.c)
 set(INKWELL_SIGNALS_SOURCE src/runtime/signals.c)
 set(INKWELL_WINDOWS_RUNTIME_SOURCE)
 set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_posix.c)
@@ -60,6 +61,7 @@ set(INKWELL_SERIAL_SOURCE src/io/serial.c)
 set(INKWELL_USB_STORAGE_SOURCE src/io/usb_storage.c)
 if(WIN32)
     set(INKWELL_CRASH_SOURCE src/runtime/crash_windows.c)
+    set(INKWELL_CRASH_REPORT_SOURCE)
     set(INKWELL_SIGNALS_SOURCE src/runtime/signals_windows.c)
     set(INKWELL_WINDOWS_RUNTIME_SOURCE src/runtime/windows_handle.c)
     set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_windows.c)
@@ -89,6 +91,7 @@ add_library(inkwell STATIC
     # runtime: the one loop everything else is driven from, the signals that stop it, and the two
     # descriptors - a timer and a wake - that let something which is not I/O wait on it too
     ${INKWELL_CRASH_SOURCE}
+    ${INKWELL_CRASH_REPORT_SOURCE}
     src/runtime/loop.c
     ${INKWELL_SIGNALS_SOURCE}
     src/runtime/timer.c
