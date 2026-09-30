@@ -9,11 +9,13 @@
  * That is why a TCP link tends to take a numeric address and nothing else for as long as it can
  * get away with.
  *
- * On POSIX the way out is to fork, let the child block, and read the answer back through the
- * event loop. Windows uses GetAddrInfoEx with an overlapped event watched by the same loop.
- * The child does not exec. There is nothing to exec - `getent` is not on the Brick and busybox's
- * `nslookup` prints a different thing every version - and the resolver we want is the one this
- * binary is already linked against.
+ * On Linux the way out is to fork, let the child block, and read the answer back through the
+ * event loop. Windows uses GetAddrInfoEx with an overlapped event watched by the same loop, and
+ * macOS asks mDNSResponder through DNS-SD's socket (src/net/resolve_apple.c): a Mac process has
+ * threads it never started, and getaddrinfo() in a forked child of one faults.
+ * The Linux child does not exec. There is nothing to exec - `getent` is not on the Brick and
+ * busybox's `nslookup` prints a different thing every version - and the resolver we want is the one
+ * this binary is already linked against.
  *
  * **A literal is not a lookup.** inkwell_resolve_literal() answers `192.168.1.50` and `fd00::1`
  * with inet_pton and no child at all, which is both faster and what keeps the behaviour a caller
@@ -66,9 +68,10 @@ enum inkwell_resolve_outcome {
 struct inkwell_resolve_result {
     enum inkwell_resolve_outcome outcome;
     /*
-     * The `EAI_*` code the child got, or 0. Worth logging through gai_strerror() and not worth
-     * showing: "Temporary failure in name resolution" is not a sentence that helps somebody
-     * holding a handheld, which is what the outcome above is for.
+     * The `EAI_*` code the child got (a `kDNSServiceErr_*` on macOS, a `WSA*` on Windows), or 0.
+     * Worth logging through gai_strerror() and not worth showing: "Temporary failure in name
+     * resolution" is not a sentence that helps somebody holding a handheld, which is what the
+     * outcome above is for.
      */
     int error;
     /*
