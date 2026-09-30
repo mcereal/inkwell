@@ -81,9 +81,9 @@ static volatile sig_atomic_t g_log_filled;
 /* write(2) until it is done or refuses. A short write on a regular file is possible (a full
    card, a signal) and a report that stopped half way is still worth having, so a refusal ends
    the line rather than the report. */
-void crash_write(int fd, const char *data, size_t len) {
+void inkwell_crash_internal_write(int fd, const char *data, size_t len) {
     while (len > 0U) {
-        const ptrdiff_t written = crash_backend_write(fd, data, len);
+        const ptrdiff_t written = inkwell_crash_internal_backend_write(fd, data, len);
         if (written < 0) {
             if (errno == EINTR) {
                 continue;
@@ -98,9 +98,9 @@ void crash_write(int fd, const char *data, size_t len) {
     }
 }
 
-void crash_puts(int fd, const char *text) {
+void inkwell_crash_internal_puts(int fd, const char *text) {
     if (text != NULL) {
-        crash_write(fd, text, strlen(text));
+        inkwell_crash_internal_write(fd, text, strlen(text));
     }
 }
 
@@ -111,7 +111,8 @@ void crash_puts(int fd, const char *text) {
  * exactly the reason it matters here: a locale-aware formatter takes locks. `out` is written
  * backwards and reversed, which is the shortest correct way to do this without a division table.
  */
-size_t crash_format_unsigned(char *out, size_t out_len, uint64_t value, unsigned base, size_t pad) {
+size_t inkwell_crash_internal_format_unsigned(char *out, size_t out_len, uint64_t value,
+                                              unsigned base, size_t pad) {
     static const char k_digits[] = "0123456789abcdef";
     char scratch[32];
     size_t len = 0U;
@@ -146,30 +147,33 @@ size_t crash_format_unsigned(char *out, size_t out_len, uint64_t value, unsigned
 static void crash_write_signed(int fd, int64_t value) {
     uint64_t magnitude;
     if (value < 0) {
-        crash_puts(fd, "-");
+        inkwell_crash_internal_puts(fd, "-");
         /* Negated through the unsigned type, because -INT64_MIN is not representable. */
         magnitude = (uint64_t)(-(value + 1)) + 1U;
     } else {
         magnitude = (uint64_t)value;
     }
     char buffer[32];
-    const size_t len = crash_format_unsigned(buffer, sizeof buffer, magnitude, 10U, 0U);
-    crash_write(fd, buffer, len);
+    const size_t len =
+        inkwell_crash_internal_format_unsigned(buffer, sizeof buffer, magnitude, 10U, 0U);
+    inkwell_crash_internal_write(fd, buffer, len);
 }
 
 static void crash_write_unsigned(int fd, uint64_t value) {
     char buffer[32];
-    const size_t len = crash_format_unsigned(buffer, sizeof buffer, value, 10U, 0U);
-    crash_write(fd, buffer, len);
+    const size_t len =
+        inkwell_crash_internal_format_unsigned(buffer, sizeof buffer, value, 10U, 0U);
+    inkwell_crash_internal_write(fd, buffer, len);
 }
 
 /* An address, as a fixed sixteen digits so a column of them lines up and a short one is
    obviously an address rather than a count. */
-void crash_write_address(int fd, uint64_t value) {
+void inkwell_crash_internal_write_address(int fd, uint64_t value) {
     char buffer[32];
-    crash_puts(fd, "0x");
-    const size_t len = crash_format_unsigned(buffer, sizeof buffer, value, 16U, 16U);
-    crash_write(fd, buffer, len);
+    inkwell_crash_internal_puts(fd, "0x");
+    const size_t len =
+        inkwell_crash_internal_format_unsigned(buffer, sizeof buffer, value, 16U, 16U);
+    inkwell_crash_internal_write(fd, buffer, len);
 }
 
 /* ---- the report ------------------------------------------------------------------------------ */
@@ -179,9 +183,9 @@ static void crash_write_notes(int fd) {
         if (g_notes[slot][0] == '\0') {
             continue;
         }
-        crash_puts(fd, g_note_labels[slot]);
-        crash_puts(fd, g_notes[slot]);
-        crash_puts(fd, "\n");
+        inkwell_crash_internal_puts(fd, g_note_labels[slot]);
+        inkwell_crash_internal_puts(fd, g_notes[slot]);
+        inkwell_crash_internal_puts(fd, "\n");
     }
 }
 
@@ -196,15 +200,15 @@ static void crash_write_log(int fd) {
     const unsigned filled = (unsigned)g_log_filled;
     const unsigned next = (unsigned)g_log_next;
     if (filled == 0U) {
-        crash_puts(fd, g_empty_log);
+        inkwell_crash_internal_puts(fd, g_empty_log);
         return;
     }
     const unsigned count = filled < INKWELL_CRASH_LOG_LINES ? filled : INKWELL_CRASH_LOG_LINES;
     const unsigned first = filled < INKWELL_CRASH_LOG_LINES ? 0U : next;
     for (unsigned i = 0U; i < count; ++i) {
         const unsigned index = (first + i) % INKWELL_CRASH_LOG_LINES;
-        crash_puts(fd, g_log[index]);
-        crash_puts(fd, "\n");
+        inkwell_crash_internal_puts(fd, g_log[index]);
+        inkwell_crash_internal_puts(fd, "\n");
     }
 }
 
@@ -217,7 +221,8 @@ static void crash_write_log(int fd) {
  * the data to the kernel by the time it returns, so a process killed a moment later does not
  * take those pages with it.
  */
-void crash_report_write(int fd, const CrashFault *fault, CrashWriteFrames write_frames) {
+void inkwell_crash_internal_write_report(int fd, const CrashFault *fault,
+                                         CrashWriteFrames write_frames) {
     /*
      * What this says is a promise, so it says only what is true - and most of it is not this
      * layer's to promise, which is why it is printed rather than written.
@@ -236,64 +241,67 @@ void crash_report_write(int fd, const CrashFault *fault, CrashWriteFrames write_
      * sent" - the log is thirty-two lines of plain text at the end of a short file, and they
      * can look. They cannot act on an assurance that turns out to be false.
      */
-    crash_puts(fd, g_title);
-    crash_puts(fd, g_intro);
-    crash_puts(fd, g_warning);
-    crash_puts(fd, "\n");
-    crash_puts(fd, g_issues);
-    crash_puts(fd, "\n");
+    inkwell_crash_internal_puts(fd, g_title);
+    inkwell_crash_internal_puts(fd, g_intro);
+    inkwell_crash_internal_puts(fd, g_warning);
+    inkwell_crash_internal_puts(fd, "\n");
+    inkwell_crash_internal_puts(fd, g_issues);
+    inkwell_crash_internal_puts(fd, "\n");
 
-    crash_puts(fd, "signal       ");
+    inkwell_crash_internal_puts(fd, "signal       ");
     crash_write_unsigned(fd, (uint64_t)fault->signal_number);
-    crash_puts(fd, " (");
-    crash_puts(fd, fault->signal_name);
-    crash_puts(fd, ")\n");
+    inkwell_crash_internal_puts(fd, " (");
+    inkwell_crash_internal_puts(fd, fault->signal_name);
+    inkwell_crash_internal_puts(fd, ")\n");
 
     if (fault->has_info) {
-        crash_puts(fd, "code         ");
+        inkwell_crash_internal_puts(fd, "code         ");
         crash_write_signed(fd, fault->code);
-        crash_puts(fd, "\nfault addr   ");
-        crash_write_address(fd, fault->fault_address);
-        crash_puts(fd, "\n");
+        inkwell_crash_internal_puts(fd, "\nfault addr   ");
+        inkwell_crash_internal_write_address(fd, fault->fault_address);
+        inkwell_crash_internal_puts(fd, "\n");
     }
 
     /* Monotonic, so it is how long this run lasted rather than what the clock claims. On a Brick
        it is the only one of the two that means anything: there is no RTC battery, so a device
        that has not reached a network boots into 1970 and says so below. */
-    crash_puts(fd, "uptime ms    ");
+    inkwell_crash_internal_puts(fd, "uptime ms    ");
     crash_write_unsigned(fd, (uint64_t)inkwell_time_monotonic_ms());
-    crash_puts(fd, "\nwall clock   ");
+    inkwell_crash_internal_puts(fd, "\nwall clock   ");
     crash_write_unsigned(fd, (uint64_t)time(NULL));
-    crash_puts(fd, " (seconds since 1970; a device with no RTC reads small here)\n");
+    inkwell_crash_internal_puts(fd,
+                                " (seconds since 1970; a device with no RTC reads small here)\n");
 
     if (fault->load_base[0] != '\0') {
-        crash_puts(fd, "load base    ");
-        crash_puts(fd, fault->load_base);
-        crash_puts(fd, "\n");
+        inkwell_crash_internal_puts(fd, "load base    ");
+        inkwell_crash_internal_puts(fd, fault->load_base);
+        inkwell_crash_internal_puts(fd, "\n");
     }
     if (fault->build_id[0] != '\0') {
-        crash_puts(fd, "build id     ");
-        crash_puts(fd, fault->build_id);
-        crash_puts(fd, "\n");
+        inkwell_crash_internal_puts(fd, "build id     ");
+        inkwell_crash_internal_puts(fd, fault->build_id);
+        inkwell_crash_internal_puts(fd, "\n");
     }
     if (fault->image_size[0] != '\0') {
-        crash_puts(fd, "image size   ");
-        crash_puts(fd, fault->image_size);
-        crash_puts(fd, "\n");
+        inkwell_crash_internal_puts(fd, "image size   ");
+        inkwell_crash_internal_puts(fd, fault->image_size);
+        inkwell_crash_internal_puts(fd, "\n");
     }
     crash_write_notes(fd);
 
-    crash_puts(fd, "\n--- where ---------------------------------------------------------------\n");
+    inkwell_crash_internal_puts(
+        fd, "\n--- where ---------------------------------------------------------------\n");
     if (fault->have_registers) {
-        crash_puts(fd, "pc           ");
-        crash_write_address(fd, fault->pc);
-        crash_puts(fd, "\n");
+        inkwell_crash_internal_puts(fd, "pc           ");
+        inkwell_crash_internal_write_address(fd, fault->pc);
+        inkwell_crash_internal_puts(fd, "\n");
     } else {
-        crash_puts(fd, "(no registers for this build's architecture)\n");
+        inkwell_crash_internal_puts(fd, "(no registers for this build's architecture)\n");
     }
-    crash_puts(fd, g_addr2line);
+    inkwell_crash_internal_puts(fd, g_addr2line);
 
-    crash_puts(fd, "\n--- log -----------------------------------------------------------------\n");
+    inkwell_crash_internal_puts(
+        fd, "\n--- log -----------------------------------------------------------------\n");
     crash_write_log(fd);
 
     /*
@@ -301,11 +309,12 @@ void crash_report_write(int fd, const CrashFault *fault, CrashWriteFrames write_
      * already proved untrustworthy.
      */
     if (fault->have_registers) {
-        crash_puts(fd,
-                   "\n--- stack ---------------------------------------------------------------\n");
+        inkwell_crash_internal_puts(
+            fd, "\n--- stack ---------------------------------------------------------------\n");
         write_frames(fd, fault->fp);
     }
-    crash_puts(fd, "\n--- end -----------------------------------------------------------------\n");
+    inkwell_crash_internal_puts(
+        fd, "\n--- end -----------------------------------------------------------------\n");
 }
 
 /*
@@ -391,7 +400,7 @@ static void crash_publish_prose(const struct inkwell_crash_config *config) {
     }
     g_note_count = config->note_count;
 }
-int crash_report_prepare(const struct inkwell_crash_config *config) {
+int inkwell_crash_internal_prepare(const struct inkwell_crash_config *config) {
     if (config == NULL || config->dir == NULL || config->dir[0] == '\0' ||
         config->product == NULL || config->product[0] == '\0' || config->log_warning == NULL ||
         config->log_warning[0] == '\0' || config->note_count > INKWELL_CRASH_NOTE_SLOTS ||
@@ -441,12 +450,12 @@ int crash_report_prepare(const struct inkwell_crash_config *config) {
      * the disk on demand would start telling the user it had already crashed while they were
      * still using it, on a screen that is meant to be reporting the *previous* run.
      */
-    g_report_waiting = crash_backend_path_exists(g_report_path);
+    g_report_waiting = inkwell_crash_internal_path_exists(g_report_path);
 
     return 0;
 }
 
-const char *crash_report_path(void) {
+const char *inkwell_crash_internal_path(void) {
     return g_report_path;
 }
 
@@ -470,7 +479,7 @@ int inkwell_crash_discard(void) {
     if (g_report_path[0] == '\0') {
         return -EINVAL;
     }
-    if (crash_backend_unlink(g_report_path) != 0 && errno != ENOENT) {
+    if (inkwell_crash_internal_unlink(g_report_path) != 0 && errno != ENOENT) {
         return -errno;
     }
     g_report_waiting = false;

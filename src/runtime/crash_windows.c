@@ -4,15 +4,15 @@
 #include <io.h>
 #include <string.h>
 
-ptrdiff_t crash_backend_write(int fd, const char *data, size_t len) {
+ptrdiff_t inkwell_crash_internal_backend_write(int fd, const char *data, size_t len) {
     return (ptrdiff_t)_write(fd, data, (unsigned)len);
 }
 
-bool crash_backend_path_exists(const char *path) {
+bool inkwell_crash_internal_path_exists(const char *path) {
     return _access(path, 0) == 0;
 }
 
-int crash_backend_unlink(const char *path) {
+int inkwell_crash_internal_unlink(const char *path) {
     return _unlink(path);
 }
 

@@ -33,15 +33,15 @@
 #include <link.h>
 #endif
 
-ptrdiff_t crash_backend_write(int fd, const char *data, size_t len) {
+ptrdiff_t inkwell_crash_internal_backend_write(int fd, const char *data, size_t len) {
     return (ptrdiff_t)write(fd, data, len);
 }
 
-bool crash_backend_path_exists(const char *path) {
+bool inkwell_crash_internal_path_exists(const char *path) {
     return access(path, F_OK) == 0;
 }
 
-int crash_backend_unlink(const char *path) {
+int inkwell_crash_internal_unlink(const char *path) {
     return unlink(path);
 }
 
@@ -228,13 +228,14 @@ static void crash_write_frames(int fd, uint64_t fp) {
         if (return_address == 0U) {
             return;
         }
-        crash_puts(fd, " #");
+        inkwell_crash_internal_puts(fd, " #");
         char index[8];
-        const size_t len = crash_format_unsigned(index, sizeof index, depth, 10U, 2U);
-        crash_write(fd, index, len);
-        crash_puts(fd, " ");
-        crash_write_address(fd, return_address);
-        crash_puts(fd, "\n");
+        const size_t len =
+            inkwell_crash_internal_format_unsigned(index, sizeof index, depth, 10U, 2U);
+        inkwell_crash_internal_write(fd, index, len);
+        inkwell_crash_internal_puts(fd, " ");
+        inkwell_crash_internal_write_address(fd, return_address);
+        inkwell_crash_internal_puts(fd, "\n");
         previous = fp;
         fp = next;
     }
@@ -256,8 +257,9 @@ static void crash_handler(int signal_number, siginfo_t *info, void *ucontext) {
         signal(k_signals[i], SIG_DFL);
     }
 
-    if (crash_report_path()[0] != '\0') {
-        const int fd = open(crash_report_path(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (inkwell_crash_internal_path()[0] != '\0') {
+        const int fd =
+            open(inkwell_crash_internal_path(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
         if (fd >= 0) {
             CrashFault fault = {
                 .signal_number = signal_number,
@@ -270,7 +272,7 @@ static void crash_handler(int signal_number, siginfo_t *info, void *ucontext) {
                 .image_size = g_image_size,
             };
             fault.have_registers = crash_registers(ucontext, &fault.pc, &fault.fp);
-            crash_report_write(fd, &fault, crash_write_frames);
+            inkwell_crash_internal_write_report(fd, &fault, crash_write_frames);
             /* The Brick's card is mounted `sync`, so this is close to free there - and on
                anything else it is what makes the report survive a device that loses power
                between the fault and the next clean unmount. */
@@ -450,7 +452,7 @@ static void crash_capture_build_id(void) {
 
 int inkwell_crash_install(const struct inkwell_crash_config *config) {
     /* A rejected configuration leaves the previous report and handler intact. */
-    const int prepared = crash_report_prepare(config);
+    const int prepared = inkwell_crash_internal_prepare(config);
     if (prepared != 0) {
         return prepared;
     }
@@ -519,5 +521,5 @@ void inkwell_crash_write_report(int fd, int signal_number) {
         .build_id = g_build_id,
         .image_size = g_image_size,
     };
-    crash_report_write(fd, &fault, NULL);
+    inkwell_crash_internal_write_report(fd, &fault, NULL);
 }
