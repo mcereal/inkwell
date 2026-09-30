@@ -30,6 +30,8 @@ typedef void (*CrashWriteFrames)(int fd, uint64_t fp);
 ptrdiff_t inkwell_crash_internal_backend_write(int fd, const char *data, size_t len);
 bool inkwell_crash_internal_path_exists(const char *path);
 int inkwell_crash_internal_unlink(const char *path);
+/* No path means no install on POSIX, but the Windows stub has no report to discard. */
+int inkwell_crash_internal_discard_without_path(void);
 
 int inkwell_crash_internal_prepare(const struct inkwell_crash_config *config);
 const char *inkwell_crash_internal_path(void);

@@ -16,6 +16,10 @@ int inkwell_crash_internal_unlink(const char *path) {
     return _unlink(path);
 }
 
+int inkwell_crash_internal_discard_without_path(void) {
+    return 0;
+}
+
 int inkwell_crash_install(const struct inkwell_crash_config *config) {
     if (config == NULL || config->dir == NULL || config->product == NULL ||
         config->log_warning == NULL) {

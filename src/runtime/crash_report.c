@@ -477,7 +477,7 @@ bool inkwell_crash_report_waiting(void) {
 
 int inkwell_crash_discard(void) {
     if (g_report_path[0] == '\0') {
-        return -EINVAL;
+        return inkwell_crash_internal_discard_without_path();
     }
     if (inkwell_crash_internal_unlink(g_report_path) != 0 && errno != ENOENT) {
         return -errno;

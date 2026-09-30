@@ -45,6 +45,10 @@ int inkwell_crash_internal_unlink(const char *path) {
     return unlink(path);
 }
 
+int inkwell_crash_internal_discard_without_path(void) {
+    return -EINVAL;
+}
+
 /* ---- what the handler is allowed to have ----------------------------------------------------
  *
  * Everything in this block is written from ordinary context and only ever read from the signal
