@@ -89,6 +89,7 @@ add_library(inkwell STATIC
     # runtime: the one loop everything else is driven from, the signals that stop it, and the two
     # descriptors - a timer and a wake - that let something which is not I/O wait on it too
     ${INKWELL_CRASH_SOURCE}
+    src/runtime/crash_report.c
     src/runtime/loop.c
     ${INKWELL_SIGNALS_SOURCE}
     src/runtime/timer.c
