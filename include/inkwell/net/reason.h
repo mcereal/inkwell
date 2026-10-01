@@ -69,7 +69,9 @@ enum inkwell_net_reason {
     /* The TLS handshake failed because the server's certificate is not valid *yet*: this
        device's clock is behind, which on a handheld with no battery-backed clock is 1970 until
        something sets it. Split from INKWELL_NET_TLS because it is the one TLS failure whose fix
-       is on this device rather than the server. `detail` is the library's code, as for TLS. */
+       is on this device rather than the server. Only when the dates are all that is wrong: an
+       early certificate that is also untrusted or for another name is TLS. `detail` is the
+       library's code, as for TLS. */
     INKWELL_NET_CLOCK,
     INKWELL_NET_REASON_COUNT,
 };

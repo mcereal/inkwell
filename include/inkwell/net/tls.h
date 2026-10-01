@@ -185,7 +185,9 @@ const char *inkwell_tls_client_error(const struct inkwell_tls_client *tls);
 int inkwell_tls_client_error_code(const struct inkwell_tls_client *tls);
 /*
  * Which net/reason.h reason the last failure stands for: INKWELL_NET_CLOCK when the server's
- * certificate was refused for not being valid yet, INKWELL_NET_TLS for anything else.
+ * certificate was refused for not being valid yet and for nothing else, INKWELL_NET_TLS for
+ * anything else - including an early certificate that is also untrusted or for another name,
+ * which setting the clock would not fix.
  */
 enum inkwell_net_reason inkwell_tls_client_reason(const struct inkwell_tls_client *tls);
 

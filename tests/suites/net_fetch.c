@@ -944,6 +944,14 @@ INKWELL_TEST_CASE(fetch_names_a_clock_behind_the_certificate, unit) {
         failure = "and reported as the clock, with the library's code behind it";
         goto cleanup;
     }
+    /* The same early certificate for a name it does not carry: setting the clock would not make
+       it verify, so the clock is not what is reported. */
+    const struct inkwell_fetch_request stranger = {.url = "https://wrong.example.org/doc"};
+    if (!harness_fetch(&h, &stranger) || h.probe.outcome[1] != INKWELL_FETCH_TLS ||
+        h.probe.failure[1].reason != INKWELL_NET_TLS) {
+        failure = "an early certificate that is also for another name should stay TLS";
+        goto cleanup;
+    }
 
 cleanup:
     harness_stop(&h);
