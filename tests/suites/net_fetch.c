@@ -922,6 +922,48 @@ cleanup:
 }
 
 /*
+ * A certificate refused only for not being valid yet is reported as this device's clock, not as
+ * TLS. The fixture presents and trusts a certificate dated from 2100, so the name and the anchor
+ * both check out and the date is the only thing wrong - which is what a device booted at 1970
+ * sees of every real server.
+ */
+INKWELL_TEST_CASE(fetch_names_a_clock_behind_the_certificate, unit) {
+    struct fetch_harness h;
+    const char *failure = NULL;
+    https_fixture_present_unborn(true);
+    if (!harness_start(&h)) {
+        failure = "the harness did not start";
+        goto cleanup;
+    }
+    const struct inkwell_fetch_request early = {.url = "https://api.github.com/doc"};
+    if (!harness_fetch(&h, &early) || h.probe.outcome[0] != INKWELL_FETCH_TLS) {
+        failure = "a certificate not valid yet should be refused";
+        goto cleanup;
+    }
+    if (h.probe.failure[0].reason != INKWELL_NET_CLOCK || h.probe.failure[0].detail >= 0) {
+        failure = "and reported as the clock, with the library's code behind it";
+        goto cleanup;
+    }
+    /* The same early certificate for a name it does not carry: setting the clock would not make
+       it verify, so the clock is not what is reported. */
+    const struct inkwell_fetch_request stranger = {.url = "https://wrong.example.org/doc"};
+    if (!harness_fetch(&h, &stranger) || h.probe.outcome[1] != INKWELL_FETCH_TLS ||
+        h.probe.failure[1].reason != INKWELL_NET_TLS) {
+        failure = "an early certificate that is also for another name should stay TLS";
+        goto cleanup;
+    }
+
+cleanup:
+    harness_stop(&h);
+    https_fixture_present_unborn(false);
+    if (failure != NULL) {
+        record_failure(test_name, failure);
+    } else {
+        record_success(test_name);
+    }
+}
+
+/*
  * The roots the application registered are the ones a connection is actually checked against.
  *
  * Every other HTTPS case in this tree trusts the fixture through `SSL_CERT_FILE`, which is the

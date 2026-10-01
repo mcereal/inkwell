@@ -152,10 +152,10 @@ static void mqtt_fail_own(struct inkwell_mqtt_client *proxy, enum inkwell_mqtt_r
    own sentence, which is already sitting in the session and cannot be rebuilt from a number. */
 static void mqtt_fail_tls(struct inkwell_mqtt_client *proxy) {
     if (!mqtt_has_failure(proxy)) {
-        proxy->failure.net.reason = INKWELL_NET_TLS;
+        proxy->failure.net.reason = inkwell_tls_client_reason(&proxy->tls);
         proxy->failure.net.detail = inkwell_tls_client_error_code(&proxy->tls);
     }
-    mqtt_back_off(proxy, inkwell_net_reason_name(INKWELL_NET_TLS),
+    mqtt_back_off(proxy, inkwell_net_reason_name(inkwell_tls_client_reason(&proxy->tls)),
                   inkwell_tls_client_error(&proxy->tls));
 }
 

@@ -244,7 +244,8 @@ static void fetch_note(struct inkwell_fetch_conn *conn, enum inkwell_net_reason 
  */
 static void fetch_note_session(struct inkwell_fetch_conn *conn, int rc) {
     if (rc == -EPROTO) {
-        fetch_note(conn, INKWELL_NET_TLS, inkwell_tls_client_error_code(&conn->tls));
+        fetch_note(conn, inkwell_tls_client_reason(&conn->tls),
+                   inkwell_tls_client_error_code(&conn->tls));
     } else if (rc == -ENOTCONN) {
         fetch_note(conn, INKWELL_NET_CLOSED, 0);
     } else {
@@ -553,7 +554,8 @@ static void fetch_handshake(struct inkwell_fetch *fetch) {
         return;
     }
     if (rc < 0) {
-        fetch_note(conn, INKWELL_NET_TLS, inkwell_tls_client_error_code(&conn->tls));
+        fetch_note(conn, inkwell_tls_client_reason(&conn->tls),
+                   inkwell_tls_client_error_code(&conn->tls));
         fetch_fail(fetch, INKWELL_FETCH_TLS, "%s: %s", conn->url.host,
                    inkwell_tls_client_error(&conn->tls));
         return;
@@ -601,7 +603,8 @@ static void fetch_connected(struct inkwell_fetch *fetch) {
     const int started = inkwell_tls_client_start(&conn->tls, conn->socket, conn->url.host,
                                                  inkwell_tls_ca_override());
     if (started < 0) {
-        fetch_note(conn, INKWELL_NET_TLS, inkwell_tls_client_error_code(&conn->tls));
+        fetch_note(conn, inkwell_tls_client_reason(&conn->tls),
+                   inkwell_tls_client_error_code(&conn->tls));
         fetch_fail(fetch, INKWELL_FETCH_TLS, "%s: %s", conn->url.host,
                    inkwell_tls_client_error(&conn->tls));
         return;

@@ -85,6 +85,10 @@ int inkwell_tls_client_error_code(const struct inkwell_tls_client *tls) {
     return tls != NULL ? tls->error_code : 0;
 }
 
+enum inkwell_net_reason inkwell_tls_client_reason(const struct inkwell_tls_client *tls) {
+    return tls != NULL && tls->clock_behind ? INKWELL_NET_CLOCK : INKWELL_NET_TLS;
+}
+
 #else /* INKWELL_HAVE_TLS */
 
 #include <mbedtls/error.h>
@@ -213,6 +217,7 @@ static void tls_record_error(struct inkwell_tls_client *tls, int code, const cha
     }
     (void)snprintf(tls->error, sizeof tls->error, "%s: %s", what, detail);
     tls->error_code = code;
+    tls->clock_behind = false;
 }
 
 /* ------------------------------------------------------------------ the socket underneath */
@@ -437,6 +442,12 @@ int inkwell_tls_client_handshake(struct inkwell_tls_client *tls) {
     if (rc == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
         char why[128];
         const uint32_t flags = mbedtls_ssl_get_verify_result(&tls->state->ssl);
+        /* The clock only when the dates are *all* that is wrong: the result is a set of flags,
+           and a certificate that is early and also untrusted or for another name stays
+           unverified after the clock is set - naming the clock there would hide the real
+           problem behind one that fixing does not clear. */
+        const uint32_t early = MBEDTLS_X509_BADCERT_FUTURE | MBEDTLS_X509_BADCRL_FUTURE;
+        tls->clock_behind = (flags & early) != 0U && (flags & ~early) == 0U;
         if (mbedtls_x509_crt_verify_info(why, sizeof why, "", flags) > 0) {
             char *newline = strchr(why, '\n');
             if (newline != NULL) {
@@ -536,6 +547,10 @@ const char *inkwell_tls_client_error(const struct inkwell_tls_client *tls) {
 
 int inkwell_tls_client_error_code(const struct inkwell_tls_client *tls) {
     return tls != NULL ? tls->error_code : 0;
+}
+
+enum inkwell_net_reason inkwell_tls_client_reason(const struct inkwell_tls_client *tls) {
+    return tls != NULL && tls->clock_behind ? INKWELL_NET_CLOCK : INKWELL_NET_TLS;
 }
 
 #endif /* INKWELL_HAVE_TLS */

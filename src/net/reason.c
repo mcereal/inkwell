@@ -61,6 +61,8 @@ const char *inkwell_net_reason_name(enum inkwell_net_reason reason) {
         return "closed";
     case INKWELL_NET_TLS:
         return "tls";
+    case INKWELL_NET_CLOCK:
+        return "clock";
     case INKWELL_NET_REASON_COUNT:
     default:
         break;

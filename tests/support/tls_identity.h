@@ -18,3 +18,7 @@ const char *tls_identity_key_pem(void);
 /* A self-signed certificate no server presents and nothing is signed by: a trust anchor that
    does not match. */
 const char *tls_identity_decoy_pem(void);
+
+/* The server's certificate again - same key, same names - but not valid until 2100: a
+   certificate as a device with its clock behind sees one. */
+const char *tls_identity_unborn_pem(void);

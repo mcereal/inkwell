@@ -50,6 +50,25 @@ static const char k_decoy_pem[] =
     "pyMGPrJx7ztCH9CpBhXTSPQXImStbEzlEMOBg8/P0y4=\n"
     "-----END CERTIFICATE-----\n";
 
+/*
+ * The same name, key and extensions as k_cert_pem, valid from 2100 to 2126: what a server's
+ * certificate looks like to a device whose clock is behind (the Miyoo Mini boots in 1970).
+ */
+static const char k_unborn_pem[] =
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIIB+jCCAZ+gAwIBAgIUIE2EDRvebngnxhuIUqB3jx7dgG0wCgYIKoZIzj0EAwIw\n"
+    "HjEcMBoGA1UEAwwTaW5rd2VsbC10ZXN0LXNlcnZlcjAiGA8yMTAwMDEwMTAwMDAw\n"
+    "MFoYDzIxMjYxMjMxMDAwMDAwWjAeMRwwGgYDVQQDDBNpbmt3ZWxsLXRlc3Qtc2Vy\n"
+    "dmVyMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEvEinuNUJ71ZHhhABiUGkpEON\n"
+    "4mBkfemGxrkeHmXIHlqLm/9e26dT9W4izhW43qZj4GtIMg4r63ATFDnXMMEluaOB\n"
+    "tjCBszAdBgNVHQ4EFgQUd4gCF9dnAI1msd2C18jZxV6Roz8wHwYDVR0jBBgwFoAU\n"
+    "d4gCF9dnAI1msd2C18jZxV6Roz8wDwYDVR0TAQH/BAUwAwEB/zBgBgNVHREEWTBX\n"
+    "gglsb2NhbGhvc3SCCmdpdGh1Yi5jb22CDmFwaS5naXRodWIuY29tghcqLmdpdGh1\n"
+    "YnVzZXJjb250ZW50LmNvbYIPZXhhbXBsZS5pbnZhbGlkhwR/AAABMAoGCCqGSM49\n"
+    "BAMCA0kAMEYCIQCeYR+la+e+Pj55imicDwnGoNtvKdnMynsLVsXGTPhDvQIhANWF\n"
+    "NxGOq1IQdtuFS3tvBa1nXy8IfKC+ib3CPc3SImSc\n"
+    "-----END CERTIFICATE-----\n";
+
 const char *tls_identity_cert_pem(void) {
     return k_cert_pem;
 }
@@ -60,4 +79,8 @@ const char *tls_identity_key_pem(void) {
 
 const char *tls_identity_decoy_pem(void) {
     return k_decoy_pem;
+}
+
+const char *tls_identity_unborn_pem(void) {
+    return k_unborn_pem;
 }
