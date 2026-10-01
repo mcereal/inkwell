@@ -1,6 +1,7 @@
 #pragma once
 
 #include "inkwell/base/fd.h"
+#include "inkwell/net/reason.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -69,6 +70,8 @@ struct inkwell_tls_client {
     /* The library's own negative code behind `error`, or 0 - see inkwell_tls_client_error_code().
      */
     int error_code;
+    /* The last failure was a certificate not valid yet - see inkwell_tls_client_reason(). */
+    bool clock_behind;
 };
 
 /* True when this build has Mbed TLS at all. False makes every start() fail with -ENOTSUP. */
@@ -180,6 +183,11 @@ const char *inkwell_tls_client_error(const struct inkwell_tls_client *tls);
  * worth logging, never worth showing.
  */
 int inkwell_tls_client_error_code(const struct inkwell_tls_client *tls);
+/*
+ * Which net/reason.h reason the last failure stands for: INKWELL_NET_CLOCK when the server's
+ * certificate was refused for not being valid yet, INKWELL_NET_TLS for anything else.
+ */
+enum inkwell_net_reason inkwell_tls_client_reason(const struct inkwell_tls_client *tls);
 
 #ifdef __cplusplus
 }

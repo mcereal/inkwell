@@ -40,6 +40,13 @@ struct https_fixture_conn {
 };
 
 /* Blocking both ways: the child has nothing else to do while it waits. */
+/* See https_fixture_present_unborn(). Read in the child as well, which forks after it is set. */
+static bool s_present_unborn;
+
+static const char *https_fixture_presented_pem(void) {
+    return s_present_unborn ? tls_identity_unborn_pem() : tls_identity_cert_pem();
+}
+
 static int fixture_bio_send(void *ctx, const unsigned char *buf, size_t len) {
     const ssize_t written = send((int)(intptr_t)ctx, buf, len, MSG_NOSIGNAL);
     return written >= 0 ? (int)written : MBEDTLS_ERR_NET_SEND_FAILED;
@@ -278,7 +285,7 @@ static void fixture_child(int listen_fd, const char *log_path, https_fixture_han
     mbedtls_pk_init(&key);
     mbedtls_ssl_ticket_init(&ticket);
     /* A PEM parse is handed the terminator too: that is how Mbed TLS knows it is PEM. */
-    const char *const cert_pem = tls_identity_cert_pem();
+    const char *const cert_pem = https_fixture_presented_pem();
     const char *const key_pem = tls_identity_key_pem();
     if (psa_crypto_init() != PSA_SUCCESS ||
         mbedtls_x509_crt_parse(&cert, (const unsigned char *)cert_pem, strlen(cert_pem) + 1U) !=
@@ -332,7 +339,7 @@ bool https_fixture_start(struct https_fixture *fixture, https_fixture_handler ha
     if (pem == NULL) {
         return false;
     }
-    const bool written = fputs(tls_identity_cert_pem(), pem) >= 0;
+    const bool written = fputs(https_fixture_presented_pem(), pem) >= 0;
     if (fclose(pem) != 0 || !written) {
         return false;
     }
@@ -371,6 +378,7 @@ bool https_fixture_start(struct https_fixture *fixture, https_fixture_handler ha
 
 void https_fixture_stop(struct https_fixture *fixture) {
     unsetenv("SSL_CERT_FILE");
+    s_present_unborn = false;
     /* A zeroed fixture that was never started names no file, and owns no descriptor 0. */
     if (fixture->ca_path[0] == '\0') {
         return;
@@ -390,6 +398,10 @@ void https_fixture_stop(struct https_fixture *fixture) {
     if (fixture->log_path[0] != '\0') {
         (void)unlink(fixture->log_path);
     }
+}
+
+void https_fixture_present_unborn(bool unborn) {
+    s_present_unborn = unborn;
 }
 
 const char *https_fixture_cert_pem(void) {
