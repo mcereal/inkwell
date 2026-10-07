@@ -107,6 +107,34 @@ INKWELL_TEST_CASE(json_unescapes_and_truncates_strings, unit) {
 }
 
 /*
+ * Truncation stops at the first character that does not fit, and never inside one.
+ *
+ * Two ways to get it wrong. A raw multi-byte character copied a byte at a time leaves its lead
+ * byte in the last slot, which is not text. And a \\u escape that does not fit, followed by an
+ * ASCII one that does, writes the second after a gap - a string that never appeared in the
+ * document, and a key that can compare equal to one it is not.
+ */
+INKWELL_TEST_CASE(json_truncates_at_a_whole_character, unit) {
+    static const char k_document[] = "[\"ab\xc3\xa9z\", \"ab\\u00e9z\"]";
+    struct inkwell_json json;
+    inkwell_json_init(&json, k_document, 0U);
+    INKWELL_TEST_FAIL_IF(!inkwell_json_enter_array(&json), "the document is an array");
+
+    char out[4];
+    INKWELL_TEST_FAIL_IF(!inkwell_json_next_element(&json) ||
+                             !inkwell_json_read_string(&json, out, sizeof out),
+                         "the raw string should read");
+    INKWELL_TEST_FAIL_IF(strcmp(out, "ab") != 0, "a raw character should not be split");
+
+    INKWELL_TEST_FAIL_IF(!inkwell_json_next_element(&json) ||
+                             !inkwell_json_read_string(&json, out, sizeof out),
+                         "the escaped string should read");
+    INKWELL_TEST_FAIL_IF(strcmp(out, "ab") != 0, "nothing should be written after a gap");
+    INKWELL_TEST_FAIL_IF(inkwell_json_next_element(&json), "the array should end after two");
+    record_success(test_name);
+}
+
+/*
  * A member with no separator before it is not a member.
  *
  * This reader used to take a comma if it saw one and carry on if it did not, which let

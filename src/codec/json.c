@@ -95,6 +95,26 @@ static bool json_hex4(const char *from, uint32_t *out) {
 }
 
 /*
+ * Where a truncated `out` should end so that it does not end inside a character.
+ *
+ * Only the tail can be cut short: an unescaped character is copied a byte at a time, so the
+ * buffer can fill between its lead byte and its last. Walks back over the continuation bytes to
+ * the lead and drops the lot if the lead promised more than arrived.
+ */
+static size_t json_whole_characters(const char *out, size_t written) {
+    size_t lead = written;
+    while (lead > 0U && written - lead < 3U && ((uint8_t)out[lead - 1U] & 0xC0U) == 0x80U) {
+        lead--;
+    }
+    if (lead == 0U) {
+        return written;
+    }
+    const uint8_t first = (uint8_t)out[lead - 1U];
+    const size_t need = first >= 0xF0U ? 4U : first >= 0xE0U ? 3U : first >= 0xC0U ? 2U : 1U;
+    return need > 1U && written - (lead - 1U) < need ? lead - 1U : written;
+}
+
+/*
  * Reads a string into `out`, unescaping as it goes. Assumes the opening quote has been
  * consumed. `out` may be NULL, which reads the string for its length and throws it away.
  */
@@ -102,10 +122,16 @@ static bool json_read_string_body(struct inkwell_json *json, char *out, size_t o
     size_t written = 0U;
     /* Leave room for the terminator, so every append below is a plain bounds test. */
     const size_t room = (out != NULL && out_len > 0U) ? out_len - 1U : 0U;
+    /* Set by the first character that does not fit. Nothing is written after it, or a shorter
+       one further on would land after a gap and spell a string the document never held. */
+    bool full = false;
     while (json->cursor < json->end) {
         const char c = *json->cursor++;
         if (c == '"') {
             if (out != NULL && out_len > 0U) {
+                if (full) {
+                    written = json_whole_characters(out, written);
+                }
                 out[written] = '\0';
             }
             return true;
@@ -167,9 +193,11 @@ static bool json_read_string_body(struct inkwell_json *json, char *out, size_t o
                 break;
             }
         }
-        if (written + decoded_len <= room) {
+        if (!full && written + decoded_len <= room) {
             memcpy(out + written, decoded, decoded_len);
             written += decoded_len;
+        } else {
+            full = true;
         }
         /* Past the buffer the read continues without writing: the cursor has to end up after
            the string whatever the caller had room for. */
