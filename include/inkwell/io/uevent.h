@@ -70,6 +70,10 @@ struct inkwell_uevent_monitor {
     int fd;
     inkwell_uevent_callback callback;
     void *userdata;
+    /* While a callback runs, a flag on the dispatcher's stack that close sets. The callback may
+       close the monitor and free the memory it lives in, so the dispatcher must learn of the
+       close without reading the monitor again. Private; NULL otherwise. */
+    int *closed;
 };
 
 /* Opens the socket and watches it on `loop`. 0, or a negative errno with the monitor closed;
@@ -77,7 +81,8 @@ struct inkwell_uevent_monitor {
 int inkwell_uevent_monitor_open(struct inkwell_uevent_monitor *monitor, struct inkwell_loop *loop,
                                 inkwell_uevent_callback callback, void *userdata);
 
-/* Safe on a closed monitor, and from inside its own callback. */
+/* Safe on a closed monitor, and from inside its own callback - after which the callback may
+   free the monitor, or open it again. */
 void inkwell_uevent_monitor_close(struct inkwell_uevent_monitor *monitor);
 
 /*

@@ -19,10 +19,26 @@
 #define UEVENT_MESSAGE_MAX 8192
 /* A burst - coldplug, a hub full of devices - is hundreds of events at once. */
 #define UEVENT_RCVBUF (1 << 20)
+/* Messages taken per wakeup. The loop is level-triggered, so whatever is left is taken on the
+   next turn; draining a burst in one go would hold every other source off until it ended. */
+#define UEVENT_READ_BUDGET 64
+
+/* Runs the callback; nonzero when it closed the monitor, which may since have been freed or
+   opened again - either way the caller must not touch it. */
+static int deliver(struct inkwell_uevent_monitor *monitor, const struct inkwell_uevent *event) {
+    int closed = 0;
+    monitor->closed = &closed;
+    monitor->callback(event, monitor->userdata);
+    if (closed) {
+        return 1;
+    }
+    monitor->closed = NULL;
+    return 0;
+}
 
 static void receive(struct inkwell_uevent_monitor *monitor, int fd) {
     char buf[UEVENT_MESSAGE_MAX];
-    for (;;) {
+    for (int taken = 0; taken < UEVENT_READ_BUDGET; ++taken) {
         struct sockaddr_nl sender;
         struct iovec iov = {buf, sizeof buf};
         struct msghdr msg;
@@ -38,8 +54,7 @@ static void receive(struct inkwell_uevent_monitor *monitor, int fd) {
             }
             if (errno == ENOBUFS) {
                 /* The kernel dropped events while the buffer was full. */
-                monitor->callback(NULL, monitor->userdata);
-                if (monitor->loop == NULL || monitor->fd != fd) {
+                if (deliver(monitor, NULL)) {
                     return;
                 }
                 continue;
@@ -58,9 +73,8 @@ static void receive(struct inkwell_uevent_monitor *monitor, int fd) {
         if (inkwell_uevent_parse(buf, (size_t)got, &event) != 0) {
             continue;
         }
-        monitor->callback(&event, monitor->userdata);
-        if (monitor->loop == NULL || monitor->fd != fd) {
-            return; /* closed, or closed and reopened, from the callback */
+        if (deliver(monitor, &event)) {
+            return;
         }
     }
 }
@@ -100,6 +114,7 @@ int inkwell_uevent_monitor_open(struct inkwell_uevent_monitor *monitor, struct i
     monitor->fd = fd;
     monitor->callback = callback;
     monitor->userdata = userdata;
+    monitor->closed = NULL;
     const int added = inkwell_loop_add_fd(loop, fd, INKWELL_LOOP_IN, on_readable, monitor);
     if (added < 0) {
         (void)close(fd);
@@ -115,6 +130,10 @@ int inkwell_uevent_monitor_open(struct inkwell_uevent_monitor *monitor, struct i
 void inkwell_uevent_monitor_close(struct inkwell_uevent_monitor *monitor) {
     if (monitor == NULL || monitor->loop == NULL) {
         return;
+    }
+    if (monitor->closed != NULL) {
+        *monitor->closed = 1;
+        monitor->closed = NULL;
     }
     (void)inkwell_loop_remove_fd(monitor->loop, monitor->fd);
     (void)close(monitor->fd);

@@ -14,14 +14,16 @@ static bool parse_u64(const char *text, uint64_t *out) {
     if (text[0] < '0' || text[0] > '9') {
         return false;
     }
+    const int saved = errno;
     errno = 0;
     char *end = NULL;
     const unsigned long long value = strtoull(text, &end, 10);
-    if (errno != 0 || end == NULL || *end != '\0') {
-        return false;
+    const bool ok = errno == 0 && end != NULL && *end == '\0';
+    errno = saved;
+    if (ok) {
+        *out = (uint64_t)value;
     }
-    *out = (uint64_t)value;
-    return true;
+    return ok;
 }
 
 int inkwell_uevent_parse(const char *buf, size_t len, struct inkwell_uevent *out) {
@@ -58,6 +60,7 @@ int inkwell_uevent_parse(const char *buf, size_t len, struct inkwell_uevent *out
             out->devtype = value;
         } else if ((value = value_of(entry, "SEQNUM", 6)) != NULL) {
             if (!parse_u64(value, &out->seqnum)) {
+                memset(out, 0, sizeof *out);
                 return -EINVAL;
             }
         }

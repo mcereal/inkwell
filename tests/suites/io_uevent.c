@@ -172,7 +172,9 @@ INKWELL_TEST_CASE(uevent_monitor_hears_a_trigger, unit) {
     inkwell_loop_shutdown(&loop);
     INKWELL_TEST_FAIL_IF(opened != 0, "the netlink socket did not open");
     if (geteuid() != 0) {
-        INKWELL_TEST_FAIL_IF(triggered != -EACCES && triggered != -EPERM && triggered != -EROFS,
+        /* -ENOENT: a sandbox with no sysfs mounted at all. */
+        INKWELL_TEST_FAIL_IF(triggered != -EACCES && triggered != -EPERM && triggered != -EROFS &&
+                                 triggered != -ENOENT,
                              "an unprivileged trigger should be refused");
         record_success(test_name);
         return;
