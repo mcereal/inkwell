@@ -69,7 +69,8 @@ INKWELL_TEST_CASE(fd_descriptors_cross_a_socket_with_their_bytes, unit) {
 
     char bytes[8] = {0};
     struct inkwell_fd_received received;
-    const int got = inkwell_socket_recv_fds((inkwell_socket)pair[1], bytes, sizeof bytes, &received);
+    const int got =
+        inkwell_socket_recv_fds((inkwell_socket)pair[1], bytes, sizeof bytes, &received);
     INKWELL_TEST_FAIL_IF(got < 1 || bytes[0] != 'm', "the byte arrives");
     INKWELL_TEST_FAIL_IF(received.count != 2U || received.lost, "with both descriptors");
     INKWELL_TEST_FAIL_IF((fcntl(received.fds[0], F_GETFD) & FD_CLOEXEC) == 0,
