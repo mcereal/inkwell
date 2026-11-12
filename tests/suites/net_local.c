@@ -78,6 +78,11 @@ static int end_open(struct fixture *f, struct end *e, int fd) {
 
 static void on_accept(void *userdata, int fd, const struct inkwell_local_peer *peer) {
     struct fixture *f = userdata;
+    if (f->accepted) {
+        /* Another listener's liveness probe: the fixture has its one server end already. */
+        (void)inkwell_fd_close(fd);
+        return;
+    }
     f->peer = *peer;
     f->accepted = end_open(f, &f->server, fd) == 0;
     if (!f->accepted) {

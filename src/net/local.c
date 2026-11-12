@@ -174,6 +174,13 @@ int inkwell_local_listen(struct inkwell_local_listener *listener, struct inkwell
         (void)inkwell_fd_close(fd);
         return -error;
     }
+    struct stat bound;
+    if (lstat(path, &bound) != 0) {
+        const int error = errno;
+        (void)unlink(path);
+        (void)inkwell_fd_close(fd);
+        return -error;
+    }
     const int added = inkwell_loop_add_fd(loop, fd, INKWELL_LOOP_IN, on_listener_ready, listener);
     if (added < 0) {
         (void)unlink(path);
@@ -181,6 +188,8 @@ int inkwell_local_listen(struct inkwell_local_listener *listener, struct inkwell
         return added;
     }
     listener->fd = fd;
+    listener->path_dev = (uint64_t)bound.st_dev;
+    listener->path_ino = (uint64_t)bound.st_ino;
     listener->loop = loop;
     memcpy(listener->path, address.sun_path, sizeof listener->path);
     listener->path[sizeof listener->path - 1U] = '\0';
@@ -195,7 +204,13 @@ void inkwell_local_listener_close(struct inkwell_local_listener *listener) {
     }
     (void)inkwell_loop_remove_fd(listener->loop, listener->fd);
     (void)inkwell_fd_close(listener->fd);
-    (void)unlink(listener->path);
+    /* Another server may have the path by now - one that found this one unanswering and cleared
+       it - and its file is not ours to remove. */
+    struct stat st;
+    if (lstat(listener->path, &st) == 0 && S_ISSOCK(st.st_mode) &&
+        (uint64_t)st.st_dev == listener->path_dev && (uint64_t)st.st_ino == listener->path_ino) {
+        (void)unlink(listener->path);
+    }
     listener->fd = -1;
 }
 
@@ -295,11 +310,11 @@ int inkwell_local_conn_send(struct inkwell_local_conn *conn, const uint8_t *payl
     if (!inkwell_local_conn_is_open(conn)) {
         return -ENOTCONN;
     }
-    if (len > conn->stream.slot_bytes || INKWELL_FRAME_HEADER > conn->stream.slot_bytes) {
-        return -EMSGSIZE;
-    }
     if (conn->stream.slot_count - inkwell_stream_queued(&conn->stream) < 2U) {
         return -ENOSPC; /* both halves or neither: half a frame would end the framing */
+    }
+    if (len > conn->stream.slot_bytes || INKWELL_FRAME_HEADER > conn->stream.slot_bytes) {
+        return -EMSGSIZE;
     }
     uint8_t header[INKWELL_FRAME_HEADER];
     const int framed = inkwell_frame_header(header, len);
