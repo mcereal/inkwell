@@ -52,6 +52,7 @@ endif()
 
 set(INKWELL_CRASH_SOURCE src/runtime/crash.c)
 set(INKWELL_SIGNALS_SOURCE src/runtime/signals.c)
+set(INKWELL_CHILD_SOURCE src/runtime/child.c)
 set(INKWELL_WINDOWS_RUNTIME_SOURCE)
 set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_posix.c)
 set(INKWELL_RESOLVE_SOURCE src/net/resolve.c)
@@ -61,6 +62,7 @@ set(INKWELL_USB_STORAGE_SOURCE src/io/usb_storage.c)
 if(WIN32)
     set(INKWELL_CRASH_SOURCE src/runtime/crash_windows.c)
     set(INKWELL_SIGNALS_SOURCE src/runtime/signals_windows.c)
+    set(INKWELL_CHILD_SOURCE src/runtime/child_unavailable.c)
     set(INKWELL_WINDOWS_RUNTIME_SOURCE src/runtime/windows_handle.c)
     set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_windows.c)
     set(INKWELL_RESOLVE_SOURCE src/net/resolve_windows.c)
@@ -86,8 +88,10 @@ add_library(inkwell STATIC
     src/base/time.c
     src/base/version.c
     src/base/wipe.c
-    # runtime: the one loop everything else is driven from, the signals that stop it, and the two
-    # descriptors - a timer and a wake - that let something which is not I/O wait on it too
+    # runtime: the one loop everything else is driven from, the signals that stop it, the two
+    # descriptors - a timer and a wake - that let something which is not I/O wait on it too, and
+    # a child's exit as one more source
+    ${INKWELL_CHILD_SOURCE}
     ${INKWELL_CRASH_SOURCE}
     src/runtime/crash_report.c
     src/runtime/loop.c
