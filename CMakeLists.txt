@@ -251,7 +251,10 @@ if(INKWELL_WITH_TLS AND
     # that test or vendoring a second copy.
     # `tfpsacrypto` is 4.x's name for what 3.x called `mbedcrypto`.
     target_link_libraries(inkwell PUBLIC mbedtls mbedx509 tfpsacrypto)
+    # codec/signature.h: the curve arithmetic is Mbed TLS's, so its backend comes with it.
+    target_sources(inkwell PRIVATE src/codec/signature.c)
 else()
+    target_sources(inkwell PRIVATE src/codec/signature_unavailable.c)
     if(INKWELL_WITH_TLS)
         message(STATUS
             "third_party/mbedtls is missing: building inkwell without TLS, so net/tls.h refuses "
