@@ -110,6 +110,8 @@ add_library(inkwell STATIC
     src/codec/base64.c
     src/codec/esp_image.c
     src/codec/esp_rom.c
+    src/codec/fields.c
+    src/codec/frame.c
     src/codec/http.c
     src/codec/inflate.c
     src/codec/json.c
