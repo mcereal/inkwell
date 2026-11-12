@@ -46,6 +46,7 @@ set(INKWELL_TEST_SUITES
     suites/codec_uf2.c
     suites/codec_zip.c
     ${INKWELL_TEST_IO_SUITES}
+    suites/io_uevent.c
     suites/net_fetch.c
     suites/net_mqtt.c
     suites/net_reason.c
