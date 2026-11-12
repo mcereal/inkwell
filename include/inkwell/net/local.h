@@ -116,9 +116,10 @@ void inkwell_local_listener_close(struct inkwell_local_listener *listener);
 int inkwell_local_connect(const char *path);
 
 /* The memory a connection runs in. `slots` and `bytes` are the stream's queue (net/stream.h); a
-   message takes two slots, its header and its payload, so `slot_count` is twice the messages
-   that may wait. `frame` holds one arriving payload, the largest one accepted being
-   `frame_capacity`. All of it lives as long as the connection. */
+   message takes one slot, its 4-byte header and its payload together, so the largest payload
+   sent is `slot_bytes` - INKWELL_FRAME_HEADER and `slot_count` is the messages that may wait.
+   `frame` holds one arriving payload, the largest one accepted being `frame_capacity`. All of it
+   lives as long as the connection. */
 struct inkwell_local_conn_storage {
     struct inkwell_stream_slot *slots;
     size_t slot_count;
@@ -167,8 +168,8 @@ int inkwell_local_conn_open(struct inkwell_local_conn *conn, int fd, struct inkw
                             void *userdata);
 
 /*
- * Queues one payload as one frame. Both halves are queued or neither: -ENOSPC when the queue has
- * no room for two more writes, -EMSGSIZE when the payload does not fit a slot, -ENOTCONN when
+ * Queues one payload as one frame, header and payload in one slot: -ENOSPC when the queue is
+ * full, -EMSGSIZE when the payload and its header do not fit a slot, -ENOTCONN when
  * the connection is closed, -EIO on a write that failed. A failed write is not closed here - the
  * caller may be inside a callback - and the end it means reaches on_closed when the loop next
  * hears the socket.

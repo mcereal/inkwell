@@ -1,7 +1,3 @@
-#if defined(__linux__)
-#define _GNU_SOURCE /* struct ucred */
-#endif
-
 #include "inkwell/net/local.h"
 
 #include "inkwell/base/fd.h"
@@ -37,34 +33,12 @@ int inkwell_local_peer(int fd, struct inkwell_local_peer *out) {
     if (fd < 0 || out == NULL) {
         return -EINVAL;
     }
-    out->pid = out->uid = out->gid = -1;
-#if defined(__linux__)
-    struct ucred cred;
-    socklen_t len = sizeof cred;
-    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0) {
-        return -errno;
-    }
-    out->pid = cred.pid;
-    out->uid = cred.uid;
-    out->gid = cred.gid;
-    return 0;
-#elif defined(__APPLE__)
-    uid_t uid;
-    gid_t gid;
-    if (getpeereid(fd, &uid, &gid) != 0) {
-        return -errno;
-    }
-    out->uid = uid;
-    out->gid = gid;
-    pid_t pid;
-    socklen_t len = sizeof pid;
-    if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &len) == 0) {
-        out->pid = pid;
-    }
-    return 0;
-#else
-    return -ENOSYS;
-#endif
+    struct inkwell_fd_peer peer;
+    const int read = inkwell_fd_peer(fd, &peer);
+    out->pid = peer.pid;
+    out->uid = peer.uid;
+    out->gid = peer.gid;
+    return read;
 }
 
 int inkwell_local_connect(const char *path) {
@@ -310,22 +284,13 @@ int inkwell_local_conn_send(struct inkwell_local_conn *conn, const uint8_t *payl
     if (!inkwell_local_conn_is_open(conn)) {
         return -ENOTCONN;
     }
-    if (conn->stream.slot_count - inkwell_stream_queued(&conn->stream) < 2U) {
-        return -ENOSPC; /* both halves or neither: half a frame would end the framing */
-    }
-    if (len > conn->stream.slot_bytes || INKWELL_FRAME_HEADER > conn->stream.slot_bytes) {
-        return -EMSGSIZE;
-    }
     uint8_t header[INKWELL_FRAME_HEADER];
     const int framed = inkwell_frame_header(header, len);
     if (framed < 0) {
         return framed;
     }
-    int sent = inkwell_stream_send(&conn->stream, header, sizeof header, 0U);
-    if (sent == 0 && len > 0U) {
-        sent = inkwell_stream_send(&conn->stream, payload, len, 0U);
-    }
-    return sent;
+    /* Header and payload in one slot: one write, and never half a frame queued. */
+    return inkwell_stream_send_prefixed(&conn->stream, header, sizeof header, payload, len, 0U);
 }
 
 void inkwell_local_conn_close(struct inkwell_local_conn *conn) {

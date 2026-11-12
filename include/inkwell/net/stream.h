@@ -198,6 +198,14 @@ int inkwell_stream_send(struct inkwell_stream *stream, const uint8_t *data, size
                         uint32_t id);
 
 /*
+ * The same, for a write that is a prefix and a body - a frame header and its payload, say -
+ * copied into one slot so they leave in one write and are dropped or delivered together. The
+ * pair must fit a slot between them. `data` may be NULL when `len` is 0.
+ */
+int inkwell_stream_send_prefixed(struct inkwell_stream *stream, const uint8_t *prefix,
+                                 size_t prefix_len, const uint8_t *data, size_t len, uint32_t id);
+
+/*
  * Writes straight at the descriptor, outside the queue and ahead of anything in it.
  *
  * For the byte runs that are deliberately not messages - a break, a wake burst, a sequence

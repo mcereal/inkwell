@@ -145,9 +145,14 @@ INKWELL_TEST_CASE(local_frames_go_both_ways_and_the_peer_is_known, unit) {
     INKWELL_TEST_FAIL_IF(f.server.frames != 2U || f.client.frames != 2U,
                          "both frames reach the server and come back");
     INKWELL_TEST_FAIL_IF(f.client.last_len != 0U, "the empty one last, in order");
-    INKWELL_TEST_FAIL_IF(inkwell_local_conn_send(&f.client.conn, f.client.bytes, SLOT_BYTES + 1U) !=
-                             -EMSGSIZE,
-                         "a payload larger than a slot is refused");
+    static const uint8_t big[SLOT_BYTES];
+    INKWELL_TEST_FAIL_IF(
+        inkwell_local_conn_send(&f.client.conn, big, SLOT_BYTES - INKWELL_FRAME_HEADER + 1U) !=
+            -EMSGSIZE,
+        "a payload that leaves no room in its slot for the header is refused");
+    INKWELL_TEST_FAIL_IF(
+        inkwell_local_conn_send(&f.client.conn, big, SLOT_BYTES - INKWELL_FRAME_HEADER) != 0,
+        "one that fits with its header goes");
     fixture_down(&f);
     record_success(test_name);
 }

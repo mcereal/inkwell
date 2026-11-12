@@ -42,6 +42,22 @@ int inkwell_fd_socket(int domain, int type, int protocol);
 /* Sets O_NONBLOCK and FD_CLOEXEC on a descriptor somebody else made. 0 or a negative errno. */
 int inkwell_fd_set_nonblocking_cloexec(int fd);
 
+/*
+ * Who is at the other end of a connected Unix-domain socket, as the kernel recorded it at
+ * connect() time. Each system spells the question differently - SO_PEERCRED on Linux,
+ * getpeereid() and LOCAL_PEERPID on macOS - which is why it lives here rather than with the
+ * socket's user.
+ *
+ * Returns 0 with uid and gid filled, or a negative errno; a field the system cannot say is -1, as
+ * the pid can be on macOS. -ENOSYS where there is no way to ask.
+ */
+struct inkwell_fd_peer {
+    int64_t pid;
+    int64_t uid;
+    int64_t gid;
+};
+int inkwell_fd_peer(int fd, struct inkwell_fd_peer *out);
+
 /* CRT/POSIX descriptor I/O, distinct from native socket I/O on Windows. A successful read or
  * write returns a byte count; a failure returns negative errno. close returns 0 or negative
  * errno. These do not make a descriptor nonblocking. */
