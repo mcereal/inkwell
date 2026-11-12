@@ -190,8 +190,18 @@ void inkwell_local_listener_close(struct inkwell_local_listener *listener) {
 
 /* ------------------------------------------------------------------ the connection */
 
+static void conn_drop_fds(struct inkwell_local_conn *conn) {
+    while (conn->fd_count > 0U) {
+        (void)inkwell_fd_close(conn->fds[conn->fd_head]);
+        conn->fd_head = (conn->fd_head + 1U) % conn->fd_capacity;
+        conn->fd_count -= 1U;
+    }
+    conn->fd_head = 0U;
+}
+
 static void conn_finish_close(struct inkwell_local_conn *conn) {
     inkwell_stream_close(&conn->stream);
+    conn_drop_fds(conn);
     conn->close_pending = false;
     conn->failure = 0;
 }
@@ -226,6 +236,24 @@ static int conn_ready(int fd, uint32_t events, void *userdata) {
         }
     }
     return 0;
+}
+
+static void conn_fds(void *userdata, const struct inkwell_fd_received *received) {
+    struct inkwell_local_conn *conn = userdata;
+    bool overflow = received->lost;
+    for (size_t i = 0U; i < received->count; ++i) {
+        if (conn->close_pending || conn->failure != 0 || overflow ||
+            conn->fd_count == conn->fd_capacity) {
+            (void)inkwell_fd_close(received->fds[i]);
+            overflow = overflow || (!conn->close_pending && conn->failure == 0);
+            continue;
+        }
+        conn->fds[(conn->fd_head + conn->fd_count) % conn->fd_capacity] = received->fds[i];
+        conn->fd_count += 1U;
+    }
+    if (overflow && conn->failure == 0 && !conn->close_pending) {
+        conn->failure = -EMSGSIZE;
+    }
 }
 
 static int conn_frame(void *userdata, const uint8_t *payload, size_t len) {
@@ -270,6 +298,11 @@ int inkwell_local_conn_open(struct inkwell_local_conn *conn, int fd, struct inkw
     conn->on_closed = on_closed;
     conn->userdata = userdata;
     inkwell_stream_set_sink(&conn->stream, conn_bytes, NULL, conn);
+    if (storage->fds != NULL && storage->fd_capacity > 0U) {
+        conn->fds = storage->fds;
+        conn->fd_capacity = storage->fd_capacity;
+        inkwell_stream_set_fd_sink(&conn->stream, conn_fds);
+    }
     return inkwell_stream_open(&conn->stream, fd, INKWELL_STREAM_SOCKET, loop, conn_ready, conn);
 }
 
@@ -278,6 +311,24 @@ bool inkwell_local_conn_is_open(const struct inkwell_local_conn *conn) {
 }
 
 int inkwell_local_conn_send(struct inkwell_local_conn *conn, const uint8_t *payload, size_t len) {
+    return inkwell_local_conn_send_fds(conn, payload, len, NULL, 0U);
+}
+
+int inkwell_local_conn_take_fd(struct inkwell_local_conn *conn) {
+    if (conn == NULL) {
+        return -EINVAL;
+    }
+    if (conn->fd_count == 0U) {
+        return -ENOENT;
+    }
+    const int fd = conn->fds[conn->fd_head];
+    conn->fd_head = (conn->fd_head + 1U) % conn->fd_capacity;
+    conn->fd_count -= 1U;
+    return fd;
+}
+
+int inkwell_local_conn_send_fds(struct inkwell_local_conn *conn, const uint8_t *payload, size_t len,
+                                const int *fds, size_t count) {
     if (conn == NULL || (payload == NULL && len > 0U)) {
         return -EINVAL;
     }
@@ -290,7 +341,8 @@ int inkwell_local_conn_send(struct inkwell_local_conn *conn, const uint8_t *payl
         return framed;
     }
     /* Header and payload in one slot: one write, and never half a frame queued. */
-    return inkwell_stream_send_prefixed(&conn->stream, header, sizeof header, payload, len, 0U);
+    return inkwell_stream_send_prefixed_fds(&conn->stream, header, sizeof header, payload, len, fds,
+                                            count, 0U);
 }
 
 void inkwell_local_conn_close(struct inkwell_local_conn *conn) {

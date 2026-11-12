@@ -17,7 +17,10 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <stdio.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -142,7 +145,7 @@ int inkwell_fd_dup(int fd) {
     }
     const int duplicate = _dup(fd);
 #else
-    const int duplicate = dup(fd);
+    const int duplicate = fcntl(fd, F_DUPFD_CLOEXEC, 0);
 #endif
     return duplicate >= 0 ? duplicate : -errno;
 }
@@ -469,6 +472,206 @@ int inkwell_socket_pending_error(inkwell_socket socket) {
         return -errno;
     }
     return -error;
+#endif
+}
+
+int inkwell_socket_send_fds(inkwell_socket socket, const void *bytes, size_t len, const int *fds,
+                            size_t count) {
+    if (socket == INKWELL_SOCKET_INVALID || bytes == NULL || len == 0U ||
+        count > INKWELL_FD_PASS_MAX || (fds == NULL && count > 0U)) {
+        return -EINVAL;
+    }
+#if defined(_WIN32)
+    return -ENOSYS;
+#else
+    for (size_t i = 0U; i < count; ++i) {
+        if (fds[i] < 0) {
+            return -EBADF;
+        }
+    }
+    struct iovec iov = {.iov_base = (void *)(uintptr_t)bytes,
+                        .iov_len = len > INT_MAX ? INT_MAX : len};
+    union {
+        struct cmsghdr align;
+        char buf[CMSG_SPACE(sizeof(int) * INKWELL_FD_PASS_MAX)];
+    } control;
+    memset(&control, 0, sizeof control);
+    struct msghdr msg = {.msg_iov = &iov, .msg_iovlen = 1};
+    if (count > 0U) {
+        msg.msg_control = control.buf;
+        msg.msg_controllen = (socklen_t)CMSG_SPACE(sizeof(int) * count);
+        struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        cmsg->cmsg_len = (socklen_t)CMSG_LEN(sizeof(int) * count);
+        memcpy(CMSG_DATA(cmsg), fds, sizeof(int) * count);
+    }
+    const ssize_t sent = sendmsg((int)socket, &msg, MSG_NOSIGNAL);
+    return sent >= 0 ? (int)sent : -errno;
+#endif
+}
+
+int inkwell_socket_recv_fds(inkwell_socket socket, void *bytes, size_t len,
+                            struct inkwell_fd_received *received) {
+    if (socket == INKWELL_SOCKET_INVALID || (bytes == NULL && len != 0) || received == NULL) {
+        return -EINVAL;
+    }
+    memset(received, 0, sizeof *received);
+#if defined(_WIN32)
+    return -ENOSYS;
+#else
+    struct iovec iov = {.iov_base = bytes, .iov_len = len > INT_MAX ? INT_MAX : len};
+    union {
+        struct cmsghdr align;
+        char buf[CMSG_SPACE(sizeof(int) * INKWELL_FD_PASS_MAX)];
+    } control;
+    struct msghdr msg = {.msg_iov = &iov,
+                         .msg_iovlen = 1,
+                         .msg_control = control.buf,
+                         .msg_controllen = sizeof control.buf};
+#if defined(MSG_CMSG_CLOEXEC)
+    const int flags = MSG_CMSG_CLOEXEC;
+#else
+    const int flags = 0;
+#endif
+    const ssize_t got = recvmsg((int)socket, &msg, flags);
+    if (got < 0) {
+        return -errno;
+    }
+    /* One header: send_fds() sends one, and nothing here asks for credentials or any other
+       ancillary data that would add a second. (Walking them with CMSG_NXTHDR also trips
+       -Wcast-align and -Wsign-compare inside musl's macro.) */
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    if (cmsg != NULL && cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+        const size_t n = ((size_t)cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        for (size_t i = 0U; i < n; ++i) {
+            int fd;
+            memcpy(&fd, CMSG_DATA(cmsg) + i * sizeof(int), sizeof fd);
+#if !defined(MSG_CMSG_CLOEXEC)
+            (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+#endif
+            if (received->count < INKWELL_FD_PASS_MAX) {
+                received->fds[received->count++] = fd;
+            } else {
+                (void)close(fd);
+                received->lost = true;
+            }
+        }
+    }
+    if ((msg.msg_flags & MSG_CTRUNC) != 0) {
+        received->lost = true; /* the kernel closed what did not fit */
+    }
+    return (int)got;
+#endif
+}
+
+int inkwell_fd_shared_memory(size_t size) {
+    if (size == 0U) {
+        return -EINVAL;
+    }
+#if defined(_WIN32)
+    return -ENOSYS;
+#elif defined(__linux__)
+    /* Not executable, ever - memory handed to another process is data. Linux 6.3 warns about a
+       memfd made without saying so; a kernel older than that refuses the flag, and gets none. */
+#if !defined(MFD_NOEXEC_SEAL)
+#define MFD_NOEXEC_SEAL 0x0008U
+#endif
+    int fd = memfd_create("inkwell", MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL);
+    if (fd < 0 && errno == EINVAL) {
+        fd = memfd_create("inkwell", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    }
+    if (fd < 0) {
+        return -errno;
+    }
+    if (ftruncate(fd, (off_t)size) != 0 ||
+        fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL) != 0) {
+        const int error = errno;
+        (void)close(fd);
+        return -error;
+    }
+    return fd;
+#else
+    /* A name only for as long as it takes to unlink it: the descriptor is the object's identity.
+       The counter keeps two objects made in one process apart; O_EXCL keeps them apart from
+       anyone else's. */
+    static unsigned s_serial;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        char name[32];
+        (void)snprintf(name, sizeof name, "/inkwell.%ld.%u", (long)getpid(), s_serial++);
+        const int fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd < 0) {
+            if (errno == EEXIST) {
+                continue;
+            }
+            return -errno;
+        }
+        (void)shm_unlink(name);
+        if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 || ftruncate(fd, (off_t)size) != 0) {
+            const int error = errno;
+            (void)close(fd);
+            return -error;
+        }
+        return fd;
+    }
+    return -EEXIST;
+#endif
+}
+
+int inkwell_fd_shared_memory_check(int fd, size_t size) {
+    if (fd < 0 || size == 0U) {
+        return -EINVAL;
+    }
+#if defined(_WIN32)
+    return -ENOSYS;
+#else
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        return -errno;
+    }
+    if (st.st_size < 0 || (uint64_t)st.st_size < (uint64_t)size) {
+        return -EINVAL;
+    }
+#if defined(__linux__)
+    const int seals = fcntl(fd, F_GET_SEALS);
+    if (seals < 0) {
+        return -EINVAL; /* not a memfd */
+    }
+    return (seals & F_SEAL_SHRINK) != 0 ? 0 : -EPERM;
+#else
+    /* A shared-memory object's size is fixed once set; a file's is not. */
+    return S_ISREG(st.st_mode) ? -EPERM : 0;
+#endif
+#endif
+}
+
+int inkwell_fd_map(int fd, size_t size, bool writable, void **out) {
+    if (fd < 0 || size == 0U || out == NULL) {
+        return -EINVAL;
+    }
+    *out = NULL;
+#if defined(_WIN32)
+    (void)writable;
+    return -ENOSYS;
+#else
+    void *address =
+        mmap(NULL, size, writable ? PROT_READ | PROT_WRITE : PROT_READ, MAP_SHARED, fd, 0);
+    if (address == MAP_FAILED) {
+        return -errno;
+    }
+    *out = address;
+    return 0;
+#endif
+}
+
+int inkwell_fd_unmap(void *address, size_t size) {
+    if (address == NULL || size == 0U) {
+        return -EINVAL;
+    }
+#if defined(_WIN32)
+    return -ENOSYS;
+#else
+    return munmap(address, size) == 0 ? 0 : -errno;
 #endif
 }
 

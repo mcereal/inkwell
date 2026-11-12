@@ -58,6 +58,21 @@ int inkwell_local_conn_send(struct inkwell_local_conn *conn, const uint8_t *payl
     return -ENOSYS;
 }
 
+int inkwell_local_conn_send_fds(struct inkwell_local_conn *conn, const uint8_t *payload, size_t len,
+                                const int *fds, size_t count) {
+    (void)conn;
+    (void)payload;
+    (void)len;
+    (void)fds;
+    (void)count;
+    return -ENOSYS;
+}
+
+int inkwell_local_conn_take_fd(struct inkwell_local_conn *conn) {
+    (void)conn;
+    return -ENOSYS;
+}
+
 void inkwell_local_conn_close(struct inkwell_local_conn *conn) {
     (void)conn;
 }

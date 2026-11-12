@@ -68,7 +68,9 @@ int inkwell_fd_close(int fd);
  * translate line endings, and not inherited by a child on either host. A descriptor for the
  * calls above, or a negative errno. */
 int inkwell_fd_create(const char *path);
-/* Duplicate a CRT/POSIX descriptor so a test fixture and its consumer own separate lifetimes. */
+/* Duplicate a CRT/POSIX descriptor so two owners have separate lifetimes - a test fixture and its
+ * consumer, a queued send and its caller. Close-on-exec, as everything here is born; the file's
+ * status flags (O_NONBLOCK) are the original's, shared. */
 int inkwell_fd_dup(int fd);
 
 /*
@@ -116,6 +118,62 @@ int inkwell_socket_send(inkwell_socket socket, const void *bytes, size_t len);
 int inkwell_socket_recv(inkwell_socket socket, void *bytes, size_t len);
 /* 0 when connected and healthy, or a negative errno from SO_ERROR. */
 int inkwell_socket_pending_error(inkwell_socket socket);
+
+/*
+ * Descriptors across a Unix-domain socket, riding with bytes (SCM_RIGHTS).
+ *
+ * The receiver gets its own descriptors for the same open files - a memory object, a pipe, a
+ * device - which is how one process hands another something it could not open itself, or
+ * memory both can map, without a path anyone else can reach. The descriptors arrive attached to
+ * the first byte of the send that carried them, so a protocol on top knows which message they
+ * belong to: whichever one that byte starts.
+ *
+ * send_fds() is send() with up to INKWELL_FD_PASS_MAX descriptors attached; the caller keeps its
+ * own, which stay open. `len` must be at least 1 - descriptors need a byte to ride on.
+ *
+ * recv_fds() is recv() that also takes what arrived with the bytes, close-on-exec, into
+ * `received`. Descriptors beyond INKWELL_FD_PASS_MAX are not kept: the kernel closes them, and
+ * `received->lost` says so, which a protocol treats as a peer it can no longer trust to be in
+ * step. Without recv_fds() a passed descriptor is simply closed on arrival.
+ *
+ * Both return a byte count or a negative errno. -ENOSYS on Windows.
+ */
+#define INKWELL_FD_PASS_MAX 4U
+struct inkwell_fd_received {
+    int fds[INKWELL_FD_PASS_MAX];
+    size_t count;
+    bool lost;
+};
+int inkwell_socket_send_fds(inkwell_socket socket, const void *bytes, size_t len, const int *fds,
+                            size_t count);
+int inkwell_socket_recv_fds(inkwell_socket socket, void *bytes, size_t len,
+                            struct inkwell_fd_received *received);
+
+/*
+ * Memory two processes can map: an anonymous object with a descriptor and no name.
+ *
+ * The descriptor is the only way in - passed over a socket (above), it is how a producer hands a
+ * consumer a buffer to read without a copy through the kernel. On Linux it is a memfd, sealed so
+ * that it can never shrink: a reader whose mapping is cut short under it would fault on the next
+ * read, so a producer must not be able to do that to it. macOS has no memfd; there it is a POSIX
+ * shared-memory object unlinked at birth, whose size is fixed once set, which gives the same
+ * guarantee. -ENOSYS on Windows.
+ *
+ * shared_memory() makes one of `size` bytes, zeroed, close-on-exec: a descriptor or a negative
+ * errno.
+ *
+ * shared_memory_check() is what the receiving end asks of a descriptor it was handed before it
+ * maps it: that it is a memory object at least `size` bytes long that cannot shrink. (macOS
+ * rounds an object up to a whole page, so there "at least" is in pages.) 0, -EINVAL
+ * when it is smaller or not memory, -EPERM when it could still be shrunk under the reader.
+ *
+ * map() maps `size` bytes from offset 0, shared, readable and writable when asked; unmap()
+ * undoes it. 0 or a negative errno.
+ */
+int inkwell_fd_shared_memory(size_t size);
+int inkwell_fd_shared_memory_check(int fd, size_t size);
+int inkwell_fd_map(int fd, size_t size, bool writable, void **out);
+int inkwell_fd_unmap(void *address, size_t size);
 
 /* Parse a numeric IPv4/IPv6 address and attach port without doing a blocking name lookup.
  * A hostname or malformed literal returns false. This is safe before socket_open(). */

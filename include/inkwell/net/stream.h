@@ -70,6 +70,10 @@ struct inkwell_stream_slot {
     /* The caller's name for this write, handed back if it is dropped unsent. 0 means "nothing
        to report", which is what a write nobody is waiting on passes. */
     uint32_t id;
+    /* Descriptors that leave with the slot's first byte - the stream's own duplicates, closed
+       once sent or dropped. See inkwell_stream_send_prefixed_fds(). */
+    int fds[INKWELL_FD_PASS_MAX];
+    size_t fd_count;
 };
 
 /*
@@ -86,6 +90,14 @@ typedef void (*inkwell_stream_bytes_fn)(void *userdata, const uint8_t *bytes, si
  * only thing this layer can say about one is that it did not happen.
  */
 typedef void (*inkwell_stream_dropped_fn)(void *userdata, uint32_t id);
+
+/*
+ * Descriptors that arrived on a socket, handed over before the bytes they came with - so by the
+ * time a protocol sees the start of the message that carried them, they are already its. The
+ * sink owns every descriptor in `received` from here and closes what it does not keep;
+ * `received->lost` means some never made it (see inkwell_socket_recv_fds()).
+ */
+typedef void (*inkwell_stream_fds_fn)(void *userdata, const struct inkwell_fd_received *received);
 
 struct inkwell_stream {
     int fd;
@@ -107,6 +119,7 @@ struct inkwell_stream {
 
     inkwell_stream_bytes_fn on_bytes;
     inkwell_stream_dropped_fn on_dropped;
+    inkwell_stream_fds_fn on_fds;
     void *userdata;
 
     /* What this stream's log lines are filed under ("serial", "tcp"). Borrowed and never freed;
@@ -144,6 +157,14 @@ int inkwell_stream_init(struct inkwell_stream *stream, const char *tag,
  */
 void inkwell_stream_set_sink(struct inkwell_stream *stream, inkwell_stream_bytes_fn on_bytes,
                              inkwell_stream_dropped_fn on_dropped, void *userdata);
+
+/*
+ * Where descriptors that arrive on a Unix-domain socket go, with the sink's userdata. Set, the
+ * pump reads with inkwell_socket_recv_fds(); left NULL, it reads as it always has and a
+ * descriptor a peer sends is closed by the kernel on arrival - a stream that never asked for
+ * descriptors cannot be made to hold one. Survives an open/close cycle, as the sink does.
+ */
+void inkwell_stream_set_fd_sink(struct inkwell_stream *stream, inkwell_stream_fds_fn on_fds);
 
 /*
  * Adopts `fd` - which must already be open and non-blocking - and watches it for readability.
@@ -204,6 +225,17 @@ int inkwell_stream_send(struct inkwell_stream *stream, const uint8_t *data, size
  */
 int inkwell_stream_send_prefixed(struct inkwell_stream *stream, const uint8_t *prefix,
                                  size_t prefix_len, const uint8_t *data, size_t len, uint32_t id);
+
+/*
+ * The same, with up to INKWELL_FD_PASS_MAX descriptors that leave attached to the slot's first
+ * byte (inkwell_socket_send_fds()). The stream sends duplicates, so the caller's stay its own;
+ * a duplicate is closed once it has gone, or when the slot is dropped. Only on a socket stream:
+ * -ENOTSUP otherwise. Besides the errors above, -EBADF for a descriptor that is not open, and the
+ * write must not be empty.
+ */
+int inkwell_stream_send_prefixed_fds(struct inkwell_stream *stream, const uint8_t *prefix,
+                                     size_t prefix_len, const uint8_t *data, size_t len,
+                                     const int *fds, size_t fd_count, uint32_t id);
 
 /*
  * Writes straight at the descriptor, outside the queue and ahead of anything in it.
