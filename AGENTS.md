@@ -65,11 +65,20 @@ header's source by *filename*, never by path.
   `src/ble/corebluetooth.m` and `src/ble/winrt.c` keep that thread to copies and a wake. What it
   hands the loop is a copy, taken behind the stack's own queue or a lock, and a new backend that
   needs a thread of the stack's is held to the same.
-- **Only `runtime/` and `base/fd.c` say which kernel this is.** Everything else registers
-  `INKWELL_LOOP_IN`/`_OUT`, never `EPOLLIN`, and asks `runtime/timer.h`, `runtime/wake.h` and
-  `base/fd.h` for a timer, a wake, a pipe or a socket rather than calling `timerfd_create()`,
-  `eventfd()`, `pipe2()` or `SOCK_NONBLOCK` itself. Those compile on Linux and nowhere else, and
-  the macOS CI job is the thing that notices.
+- **Only `runtime/` and `base/fd.c` say which kernel the loop and its descriptors are on.**
+  Everything else registers `INKWELL_LOOP_IN`/`_OUT`, never `EPOLLIN`, and asks
+  `runtime/timer.h`, `runtime/wake.h` and `base/fd.h` for a timer, a wake, a pipe, a socket or a
+  socket's peer rather than calling `timerfd_create()`, `eventfd()`, `pipe2()`, `SOCK_NONBLOCK`
+  or `SO_PEERCRED` itself. Those compile on Linux and nowhere else, and the macOS CI job is the
+  thing that notices.
+
+  A device area is the exception, for the device's own interface and nothing more. `io/` and
+  `ble/` exist to reach what each system exposes differently - usbfs and the I/O Registry, a
+  baud-rate ioctl, BlueZ and CoreBluetooth - and that code names its kernel because the
+  difference is the subject. It still gets its loop, timers, wakes and sockets from `runtime/`
+  and `base/fd.h` like everyone else. Where a whole backend differs, it is a file of its own
+  picked in `CMakeLists.txt` (`serial_iokit.c`, `ble/winrt.c`); an `#if` inside a shared source
+  is for a difference of a few lines.
 - **A platform gap refuses; it does not disappear.** Where a system has no backend yet, the area
   compiles a `<name>_unavailable.c` beside `<name>.c` and picks it in `CMakeLists.txt`: the header
   is unchanged, every symbol links, every call reports itself unavailable. An `#ifdef _WIN32`
