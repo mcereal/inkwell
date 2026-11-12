@@ -538,10 +538,11 @@ int inkwell_socket_recv_fds(inkwell_socket socket, void *bytes, size_t len,
     if (got < 0) {
         return -errno;
     }
-    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
-            continue;
-        }
+    /* One header: send_fds() sends one, and nothing here asks for credentials or any other
+       ancillary data that would add a second. (Walking them with CMSG_NXTHDR also trips
+       -Wcast-align and -Wsign-compare inside musl's macro.) */
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    if (cmsg != NULL && cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
         const size_t n = ((size_t)cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
         for (size_t i = 0U; i < n; ++i) {
             int fd;
