@@ -58,6 +58,8 @@ set(INKWELL_BASE_PLATFORM_SOURCE src/runtime/base_posix.c)
 set(INKWELL_RESOLVE_SOURCE src/net/resolve.c)
 set(INKWELL_MQTT_SOURCE src/net/mqtt.c)
 set(INKWELL_SERIAL_SOURCE src/io/serial.c)
+# Unix-domain sockets on the loop; Windows has them, but not on the loop's socket path yet.
+set(INKWELL_LOCAL_SOURCE src/net/local.c)
 set(INKWELL_USB_STORAGE_SOURCE src/io/usb_storage.c)
 # Kernel device events are Linux's netlink; the parser beside them is plain bytes and builds
 # everywhere.
@@ -75,6 +77,7 @@ if(WIN32)
     # Serial ports are SetupAPI and overlapped COM I/O. Raw block writes still need a native
     # backend, and refuse explicitly without pulling POSIX ioctl, mount or fork into the build.
     set(INKWELL_SERIAL_SOURCE src/io/serial_windows.c)
+    set(INKWELL_LOCAL_SOURCE src/net/local_unavailable.c)
     set(INKWELL_USB_STORAGE_SOURCE src/io/usb_storage_unavailable.c)
 elseif(APPLE)
     # A Mac process has threads it never started, so the forked resolver's child may not call
@@ -124,6 +127,7 @@ add_library(inkwell STATIC
     src/codec/zip.c
     # net: one hostname, one socket, one session - all of it on the loop, none of it blocking
     src/net/fetch.c
+    ${INKWELL_LOCAL_SOURCE}
     ${INKWELL_MQTT_SOURCE}
     src/net/mqtt_address.c
     src/net/reason.c
