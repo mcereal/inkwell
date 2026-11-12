@@ -45,6 +45,7 @@ set(INKWELL_TEST_SUITES
     suites/codec_mqtt.c
     suites/codec_png.c
     suites/codec_sha256.c
+    suites/codec_signature.c
     suites/codec_uf2.c
     suites/codec_zip.c
     ${INKWELL_TEST_IO_SUITES}
