@@ -1,4 +1,4 @@
-/* _GNU_SOURCE for pipe2(), which glibc and musl both keep behind it. */
+/* _GNU_SOURCE for pipe2() and struct ucred, which glibc and musl both keep behind it. */
 #define _GNU_SOURCE
 
 #include "inkwell/base/fd.h"
@@ -18,6 +18,8 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/un.h>
 #include <unistd.h>
 #endif
 
@@ -244,6 +246,40 @@ static BOOL CALLBACK start_winsock(PINIT_ONCE once, PVOID parameter, PVOID *cont
     return TRUE;
 }
 #endif
+
+int inkwell_fd_peer(int fd, struct inkwell_fd_peer *out) {
+    if (fd < 0 || out == NULL) {
+        return -EINVAL;
+    }
+    out->pid = out->uid = out->gid = -1;
+#if defined(__linux__)
+    struct ucred cred;
+    socklen_t len = sizeof cred;
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0) {
+        return -errno;
+    }
+    out->pid = cred.pid;
+    out->uid = cred.uid;
+    out->gid = cred.gid;
+    return 0;
+#elif defined(__APPLE__)
+    uid_t uid;
+    gid_t gid;
+    if (getpeereid(fd, &uid, &gid) != 0) {
+        return -errno;
+    }
+    out->uid = uid;
+    out->gid = gid;
+    pid_t pid;
+    socklen_t len = sizeof pid;
+    if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &len) == 0) {
+        out->pid = pid;
+    }
+    return 0;
+#else
+    return -ENOSYS;
+#endif
+}
 
 int inkwell_fd_set_nonblocking_cloexec(int fd) {
 #if defined(_WIN32)

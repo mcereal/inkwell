@@ -239,6 +239,46 @@ INKWELL_TEST_CASE(stream_refuses_what_the_callers_budget_will_not_hold, unit) {
     record_success(test_name);
 }
 
+INKWELL_TEST_CASE(stream_sends_a_prefix_and_body_as_one_write, unit) {
+    /* A header and its payload share a slot, so they leave together and are never split by a
+       full queue - and the pair, not each half, is what has to fit. */
+    int fds[2];
+    INKWELL_TEST_FAIL_IF(!probe_pair(fds), "could not make a socket pair");
+
+    struct inkwell_stream_slot slots[1];
+    uint8_t queue[1 * 6];
+    struct inkwell_stream stream;
+    (void)inkwell_stream_init(&stream, "test", slots, 1U, queue, 6U);
+    (void)inkwell_stream_open(&stream, fds[0], INKWELL_STREAM_SOCKET, NULL, NULL, NULL);
+
+    const uint8_t prefix[2] = {0x00U, 0x04U};
+    const uint8_t body[4] = {1U, 2U, 3U, 4U};
+    INKWELL_TEST_FAIL_IF_CLEANUP(
+        inkwell_stream_send_prefixed(&stream, prefix, sizeof prefix, body, 5U, 0U) != -EMSGSIZE,
+        inkwell_stream_close(&stream);
+        (void)close(fds[1]), "a pair larger than a slot is refused, though each half fits");
+    INKWELL_TEST_FAIL_IF_CLEANUP(
+        inkwell_stream_send_prefixed(&stream, prefix, sizeof prefix, body, sizeof body, 0U) != 0,
+        inkwell_stream_close(&stream);
+        (void)close(fds[1]), "a pair that fits is sent");
+    INKWELL_TEST_FAIL_IF_CLEANUP(
+        inkwell_stream_send_prefixed(&stream, prefix, sizeof prefix, NULL, 0U, 0U) != 0,
+        inkwell_stream_close(&stream);
+        (void)close(fds[1]), "an empty body is allowed");
+
+    uint8_t got[16];
+    const ssize_t read_back = read(fds[1], got, sizeof got);
+    const uint8_t want[] = {0x00U, 0x04U, 1U, 2U, 3U, 4U, 0x00U, 0x04U};
+    INKWELL_TEST_FAIL_IF_CLEANUP(
+        read_back != (ssize_t)sizeof want || memcmp(got, want, sizeof want) != 0,
+        inkwell_stream_close(&stream);
+        (void)close(fds[1]), "the wire carries each prefix straight before its body");
+
+    inkwell_stream_close(&stream);
+    (void)close(fds[1]);
+    record_success(test_name);
+}
+
 INKWELL_TEST_CASE(stream_without_a_queue_still_reads, unit) {
     /* A caller that only listens passes no queue at all, which is a configuration rather than a
        mistake: it reads, and every send is refused rather than reaching a NULL. */

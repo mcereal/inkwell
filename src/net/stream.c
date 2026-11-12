@@ -152,7 +152,15 @@ int inkwell_stream_flush(struct inkwell_stream *stream) {
 
 int inkwell_stream_send(struct inkwell_stream *stream, const uint8_t *data, size_t len,
                         uint32_t id) {
-    if (stream == NULL || data == NULL) {
+    if (data == NULL) {
+        return -EINVAL;
+    }
+    return inkwell_stream_send_prefixed(stream, NULL, 0U, data, len, id);
+}
+
+int inkwell_stream_send_prefixed(struct inkwell_stream *stream, const uint8_t *prefix,
+                                 size_t prefix_len, const uint8_t *data, size_t len, uint32_t id) {
+    if (stream == NULL || (prefix == NULL && prefix_len > 0U) || (data == NULL && len > 0U)) {
         return -EINVAL;
     }
     if (!inkwell_stream_is_open(stream)) {
@@ -161,13 +169,19 @@ int inkwell_stream_send(struct inkwell_stream *stream, const uint8_t *data, size
     if (stream->slot_count == 0U || stream->queued >= stream->slot_count) {
         return -ENOSPC;
     }
-    if (len > stream->slot_bytes) {
+    if (prefix_len > stream->slot_bytes || len > stream->slot_bytes - prefix_len) {
         return -EMSGSIZE;
     }
 
     const size_t index = (stream->head + stream->queued) % stream->slot_count;
-    memcpy(slot_bytes_at(stream, index), data, len);
-    stream->slots[index].length = len;
+    uint8_t *slot = slot_bytes_at(stream, index);
+    if (prefix_len > 0U) {
+        memcpy(slot, prefix, prefix_len);
+    }
+    if (len > 0U) {
+        memcpy(slot + prefix_len, data, len);
+    }
+    stream->slots[index].length = prefix_len + len;
     stream->slots[index].sent = 0U;
     stream->slots[index].id = id;
     stream->queued += 1U;
