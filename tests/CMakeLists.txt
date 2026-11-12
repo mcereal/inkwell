@@ -36,6 +36,8 @@ set(INKWELL_TEST_SUITES
     suites/codec_base64.c
     suites/codec_esp_image.c
     suites/codec_esp_rom.c
+    suites/codec_fields.c
+    suites/codec_frame.c
     suites/codec_http.c
     suites/codec_inflate.c
     suites/codec_json.c
