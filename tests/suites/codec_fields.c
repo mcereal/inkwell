@@ -132,3 +132,28 @@ INKWELL_TEST_CASE(fields_encoding_refuses_rather_than_cuts, unit) {
     INKWELL_TEST_FAIL_IF(inkwell_fields_encoded_max(wrong, 1U) != 0U, "and has no maximum");
     record_success(test_name);
 }
+
+INKWELL_TEST_CASE(fields_decoding_touches_only_what_the_table_names, unit) {
+    /* A member between two rows that never goes on the wire keeps what the caller put there. */
+    struct mixed {
+        uint32_t id;
+        uint32_t local;
+        uint16_t port;
+    };
+    static const struct inkwell_field k_mixed[] = {
+        INKWELL_FIELD(U32, struct mixed, id),
+        INKWELL_FIELD(U16, struct mixed, port),
+    };
+    const uint8_t wire[] = {5, 0, 0, 0, 9, 0};
+    struct mixed out = {.local = 77U};
+    INKWELL_TEST_FAIL_IF(inkwell_fields_decode(k_mixed, 2U, wire, sizeof wire, &out) != 2 ||
+                             out.id != 5U || out.port != 9U || out.local != 77U,
+                         "a member the table does not name is not zeroed");
+
+    /* A bad row is refused however short the message is that would have reached it. */
+    const struct inkwell_field bad_tail[] = {INKWELL_FIELD(U32, struct mixed, id),
+                                             {INKWELL_FIELD_U32, 4U, 2U}};
+    INKWELL_TEST_FAIL_IF(inkwell_fields_decode(bad_tail, 2U, wire, 4U, &out) != -EINVAL,
+                         "a table with a bad row is refused before any field is read");
+    record_success(test_name);
+}

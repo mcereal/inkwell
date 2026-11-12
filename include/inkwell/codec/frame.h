@@ -38,7 +38,9 @@ int inkwell_frame_header(uint8_t out[INKWELL_FRAME_HEADER], size_t len);
 /*
  * One whole frame. `payload` is only valid for the call. Returning non-zero stops the feed that
  * delivered it, and feed() returns that value - which is how a callback that has closed the
- * connection the reader belongs to stops the reader touching anything afterwards.
+ * connection the reader belongs to stops the reader touching anything afterwards. The bytes of
+ * that feed after the stopping frame are dropped, not kept, so a stopped reader no longer knows
+ * where the next frame starts: stopping is for closing, not for pausing.
  */
 typedef int (*inkwell_frame_fn)(void *userdata, const uint8_t *payload, size_t len);
 

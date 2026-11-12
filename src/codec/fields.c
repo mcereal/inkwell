@@ -3,6 +3,7 @@
 #include "inkwell/base/text.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <string.h>
 
@@ -168,7 +169,7 @@ int inkwell_fields_encode(const struct inkwell_field *fields, size_t count, cons
         memcpy(out + at + 2U, member, text);
         at += 2U + text;
     }
-    return (int)at;
+    return at <= (size_t)INT_MAX ? (int)at : -EMSGSIZE;
 }
 
 /* Text that is UTF-8 all the way through and has no NUL inside it. */
@@ -192,9 +193,6 @@ static int decode_fields(const struct inkwell_field *fields, size_t count, const
     size_t at = 0U;
     for (size_t i = 0U; i < count; ++i) {
         const struct inkwell_field *field = &fields[i];
-        if (!field_valid(field)) {
-            return -EINVAL;
-        }
         if (at == len) {
             return (int)i; /* an older peer: the fields it did not know stay zero */
         }
@@ -232,14 +230,11 @@ static int decode_fields(const struct inkwell_field *fields, size_t count, const
     return (int)count; /* anything after the last field is a newer peer's, and not ours */
 }
 
-/* The end of the record: one past the furthest member any row names. */
-static size_t record_extent(const struct inkwell_field *fields, size_t count) {
-    size_t end = 0U;
+/* Every member the table names, zeroed; what lies between and beyond them is the caller's. */
+static void zero_members(const struct inkwell_field *fields, size_t count, uint8_t *base) {
     for (size_t i = 0U; i < count; ++i) {
-        const size_t member_end = (size_t)fields[i].offset + fields[i].size;
-        end = member_end > end ? member_end : end;
+        memset(base + fields[i].offset, 0, fields[i].size);
     }
-    return end;
 }
 
 int inkwell_fields_decode(const struct inkwell_field *fields, size_t count, const uint8_t *in,
@@ -247,14 +242,20 @@ int inkwell_fields_decode(const struct inkwell_field *fields, size_t count, cons
     if ((fields == NULL && count > 0U) || record == NULL || (in == NULL && len > 0U)) {
         return -EINVAL;
     }
-    /* Zeroed up to the furthest member the table knows: the caller's struct may be larger (a
-       newer layout read through an older table), and what this table does not name is not ours
-       to touch. */
-    const size_t extent = record_extent(fields, count);
-    memset(record, 0, extent);
+    /* Every row is checked before any byte of the record is written: a bad row is a bad table
+       whatever the message, not only when a message is long enough to reach it. */
+    for (size_t i = 0U; i < count; ++i) {
+        if (!field_valid(&fields[i])) {
+            return -EINVAL;
+        }
+    }
+    /* Only the members the table names are zeroed: the caller's struct may be larger (a newer
+       layout read through an older table) or hold members that never go on the wire, and what
+       this table does not name is not ours to touch. */
+    zero_members(fields, count, record);
     const int result = decode_fields(fields, count, in, len, record);
     if (result < 0) {
-        memset(record, 0, extent);
+        zero_members(fields, count, record);
     }
     return result;
 }

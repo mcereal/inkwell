@@ -80,16 +80,18 @@ struct inkwell_field {
  *
  * The size is checked here: a fixed-width type over a member of another width - a U32 row on a
  * uint16_t - has a negative array size and does not compile. A string needs room for at least
- * one byte of text and its NUL, and no more than a u16 count can say.
+ * one byte of text and its NUL, and no more than the row's u16 size can hold; a member that
+ * starts past what the row's u16 offset can say does not compile either.
  */
 #define INKWELL_FIELD(type_, record_type, member)                                                  \
     {INKWELL_FIELD_##type_, (uint16_t)offsetof(record_type, member),                               \
      (uint16_t)(sizeof(((record_type *)0)->member) +                                               \
-                0U * sizeof(char[(INKWELL_FIELD_WIDTH_##type_ == 0U                                \
-                                      ? (sizeof(((record_type *)0)->member) >= 2U &&               \
-                                         sizeof(((record_type *)0)->member) <= 65536U)             \
-                                      : sizeof(((record_type *)0)->member) ==                      \
-                                            INKWELL_FIELD_WIDTH_##type_)                           \
+                0U * sizeof(char[(offsetof(record_type, member) <= 65535U &&                       \
+                                  (INKWELL_FIELD_WIDTH_##type_ == 0U                               \
+                                       ? (sizeof(((record_type *)0)->member) >= 2U &&              \
+                                          sizeof(((record_type *)0)->member) <= 65535U)            \
+                                       : sizeof(((record_type *)0)->member) ==                     \
+                                             INKWELL_FIELD_WIDTH_##type_))                         \
                                      ? 1                                                           \
                                      : -1]))}
 
