@@ -572,7 +572,15 @@ int inkwell_fd_shared_memory(size_t size) {
 #if defined(_WIN32)
     return -ENOSYS;
 #elif defined(__linux__)
-    const int fd = memfd_create("inkwell", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    /* Not executable, ever - memory handed to another process is data. Linux 6.3 warns about a
+       memfd made without saying so; a kernel older than that refuses the flag, and gets none. */
+#if !defined(MFD_NOEXEC_SEAL)
+#define MFD_NOEXEC_SEAL 0x0008U
+#endif
+    int fd = memfd_create("inkwell", MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL);
+    if (fd < 0 && errno == EINVAL) {
+        fd = memfd_create("inkwell", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    }
     if (fd < 0) {
         return -errno;
     }
