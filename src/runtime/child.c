@@ -42,8 +42,9 @@ static void watch_drain(int fd) {
     (void)fd;
 }
 
-static void watch_retry(int fd) {
+static int watch_retry(int fd) {
     (void)fd;
+    return 0;
 }
 
 static int watch_signal(const struct inkwell_child *child, int signal) {
@@ -53,8 +54,9 @@ static int watch_signal(const struct inkwell_child *child, int signal) {
     if (errno != ENOSYS) {
         return -errno;
     }
-    /* A kernel with pidfd_open() but not this (5.1 and 5.2 had neither, so not one that got
-       this far): an unreaped child still owns its pid, so kill() reaches the same process. */
+    /* Every kernel with pidfd_open() (5.3) has this (5.1), so ENOSYS here is a filter - a seccomp
+       profile - that let one through and not the other. An unreaped child still owns its pid,
+       so kill() reaches the same process. */
     return kill(child->pid, signal) < 0 ? -errno : 0;
 }
 
@@ -104,11 +106,12 @@ static void watch_drain(int kq) {
     }
 }
 
-static void watch_retry(int kq) {
+static int watch_retry(int kq) {
     const int armed = watch_arm_retry(kq);
     if (armed < 0) {
         inkwell_log_warn("child", "re-arming an exit check failed: %s", strerror(-armed));
     }
+    return armed;
 }
 
 static int watch_signal(const struct inkwell_child *child, int signal) {
@@ -144,8 +147,14 @@ static int on_ready(int fd, uint32_t events, void *userdata) {
         got = waitpid((pid_t)child->pid, &status, WNOHANG);
     } while (got < 0 && errno == EINTR);
     if (got == 0) {
-        watch_retry(fd);
-        return 0;
+        if (watch_retry(fd) == 0) {
+            return 0;
+        }
+        /* Nothing would wake this watch again. The kernel has said the child exited, so the
+           wait that remains is the moment before its status is collectable. */
+        do {
+            got = waitpid((pid_t)child->pid, &status, 0);
+        } while (got < 0 && errno == EINTR);
     }
     const int result = got < 0 ? -errno : status;
 
