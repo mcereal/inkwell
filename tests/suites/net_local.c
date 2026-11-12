@@ -25,6 +25,10 @@ struct end {
     struct inkwell_stream_slot slots[SLOTS];
     uint8_t bytes[SLOTS * SLOT_BYTES];
     uint8_t frame[32];
+    int fds[2];
+    bool take_fds; /* open with room for two descriptors, and take one for "attach" */
+    int taken;     /* the last descriptor taken, -1 for none */
+    char taken_text[16];
     size_t frames;
     size_t last_len;
     char last[32];
@@ -51,6 +55,17 @@ static void on_frame(void *userdata, const uint8_t *payload, size_t len) {
     const size_t n = len < sizeof e->last - 1U ? len : sizeof e->last - 1U;
     memcpy(e->last, payload, n);
     e->last[n] = '\0';
+    /* Only the message the protocol says carries one: a descriptor may arrive with an earlier
+       message's bytes (Linux reads them in one go), never after its own. */
+    if (e->take_fds && len == 6U && memcmp(payload, "attach", 6U) == 0) {
+        e->taken = inkwell_local_conn_take_fd(&e->conn);
+        void *map = NULL;
+        if (e->taken >= 0 && inkwell_fd_shared_memory_check(e->taken, 4096U) == 0 &&
+            inkwell_fd_map(e->taken, 4096U, false, &map) == 0) {
+            memcpy(e->taken_text, map, sizeof e->taken_text - 1U);
+            (void)inkwell_fd_unmap(map, 4096U);
+        }
+    }
     if (e->echo) {
         (void)inkwell_local_conn_send(&e->conn, payload, len);
     }
@@ -72,6 +87,8 @@ static int end_open(struct fixture *f, struct end *e, int fd) {
         .slot_bytes = SLOT_BYTES,
         .frame = e->frame,
         .frame_capacity = sizeof e->frame,
+        .fds = e->take_fds ? e->fds : NULL,
+        .fd_capacity = e->take_fds ? 2U : 0U,
     };
     return inkwell_local_conn_open(&e->conn, fd, &f->loop, &storage, on_frame, on_closed, e);
 }
@@ -100,9 +117,12 @@ static bool accepted(const struct fixture *f) {
     return f->accepted;
 }
 
-/* A listening fixture with a client connected and both ends open. */
-static bool fixture_up(struct fixture *f) {
+/* A listening fixture with a client connected and both ends open; `take_fds` gives the server
+   room for descriptors. */
+static bool fixture_up_with(struct fixture *f, bool take_fds) {
     memset(f, 0, sizeof *f);
+    f->server.take_fds = take_fds;
+    f->server.taken = -1;
     snprintf(f->dir, sizeof f->dir, "/tmp/inkwell-local-XXXXXX");
     if (mkdtemp(f->dir) == NULL || inkwell_loop_init(&f->loop) != 0) {
         return false;
@@ -117,6 +137,10 @@ static bool fixture_up(struct fixture *f) {
     }
     spin(f, accepted);
     return f->accepted;
+}
+
+static bool fixture_up(struct fixture *f) {
+    return fixture_up_with(f, false);
 }
 
 static void fixture_down(struct fixture *f) {
@@ -234,6 +258,64 @@ INKWELL_TEST_CASE(local_a_stale_path_is_cleared_and_a_live_one_is_not, unit) {
     (void)unlink(f.path);
 
     INKWELL_TEST_FAIL_IF(inkwell_local_connect(f.path) != -ENOENT, "nothing at the path: ENOENT");
+    fixture_down(&f);
+    record_success(test_name);
+}
+
+static bool server_heard_two(const struct fixture *f) {
+    return f->server.frames >= 2U;
+}
+
+INKWELL_TEST_CASE(local_descriptors_arrive_with_their_message, unit) {
+    static struct fixture f;
+    INKWELL_TEST_FAIL_IF(!fixture_up_with(&f, true), "listen, connect and accept");
+    const int memory = inkwell_fd_shared_memory(4096U);
+    void *map = NULL;
+    INKWELL_TEST_FAIL_IF(memory < 0 || inkwell_fd_map(memory, 4096U, true, &map) != 0,
+                         "a memory object, mapped");
+    memcpy(map, "a buffer", 9U);
+    (void)inkwell_fd_unmap(map, 4096U);
+
+    INKWELL_TEST_FAIL_IF(inkwell_local_conn_send(&f.client.conn, (const uint8_t *)"first", 5U) != 0,
+                         "a message without one");
+    INKWELL_TEST_FAIL_IF(inkwell_local_conn_send_fds(&f.client.conn, (const uint8_t *)"attach", 6U,
+                                                     &memory, 1U) != 0,
+                         "then one with the memory attached");
+    spin(&f, server_heard_two);
+    INKWELL_TEST_FAIL_IF(f.server.frames != 2U || strcmp(f.server.last, "attach") != 0,
+                         "both messages arrive, in order");
+    INKWELL_TEST_FAIL_IF(f.server.taken < 0 || strcmp(f.server.taken_text, "a buffer") != 0,
+                         "and the descriptor is there to take with the one that carried it");
+    (void)close(f.server.taken);
+    INKWELL_TEST_FAIL_IF(inkwell_local_conn_take_fd(&f.server.conn) != -ENOENT,
+                         "nothing more is waiting");
+    INKWELL_TEST_FAIL_IF(inkwell_local_conn_send_fds(&f.client.conn, (const uint8_t *)"x", 1U,
+                                                     (const int[]){-1}, 1U) != -EBADF,
+                         "a descriptor that is not open is refused");
+
+    /* Three in one message, against room for two: past that, no message can be matched with its
+       descriptors, so the connection ends. */
+    const int three[3] = {memory, memory, memory};
+    f.server.take_fds = false; /* take none, so the room fills */
+    INKWELL_TEST_FAIL_IF(
+        inkwell_local_conn_send_fds(&f.client.conn, (const uint8_t *)"many", 4U, three, 3U) != 0,
+        "the client may send more than the server keeps");
+    spin(&f, server_closed);
+    INKWELL_TEST_FAIL_IF(f.server.closed_reason != -EMSGSIZE,
+                         "more descriptors than there is room for end the connection");
+    (void)close(memory);
+    fixture_down(&f);
+
+    /* A server that never asked for descriptors does not get them, and is not hurt by them. */
+    INKWELL_TEST_FAIL_IF(!fixture_up(&f), "listen, connect and accept again");
+    const int again = inkwell_fd_shared_memory(4096U);
+    INKWELL_TEST_FAIL_IF(
+        inkwell_local_conn_send_fds(&f.client.conn, (const uint8_t *)"one", 3U, &again, 1U) != 0,
+        "sent to a server with no room");
+    spin(&f, server_heard_one);
+    INKWELL_TEST_FAIL_IF(f.server.frames != 1U || f.server.closed_reason != 0,
+                         "the message arrives, the descriptor is closed, the connection stays");
+    (void)close(again);
     fixture_down(&f);
     record_success(test_name);
 }

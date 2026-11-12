@@ -16,7 +16,7 @@ set(INKWELL_TEST_SUPPORT
 )
 
 set(INKWELL_TEST_IO_SUITES suites/io_serial.c suites/io_usb_storage.c)
-set(INKWELL_TEST_POSIX_SUITES suites/net_local.c suites/runtime_child.c)
+set(INKWELL_TEST_POSIX_SUITES suites/base_fd_pass.c suites/net_local.c suites/runtime_child.c)
 if(WIN32)
     set(INKWELL_TEST_POSIX_SUITES)
     set(INKWELL_TEST_IO_SUITES suites/io_serial_windows.c suites/io_windows_unavailable.c)

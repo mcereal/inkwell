@@ -35,6 +35,12 @@ int inkwell_stream_init(struct inkwell_stream *stream, const char *tag,
     return 0;
 }
 
+void inkwell_stream_set_fd_sink(struct inkwell_stream *stream, inkwell_stream_fds_fn on_fds) {
+    if (stream != NULL) {
+        stream->on_fds = on_fds;
+    }
+}
+
 void inkwell_stream_set_sink(struct inkwell_stream *stream, inkwell_stream_bytes_fn on_bytes,
                              inkwell_stream_dropped_fn on_dropped, void *userdata) {
     if (stream == NULL) {
@@ -81,6 +87,11 @@ static uint8_t *slot_bytes_at(const struct inkwell_stream *stream, size_t index)
    otherwise only overwritten when the ring comes round to it again. */
 static void slot_wipe(struct inkwell_stream *stream, size_t index) {
     inkwell_wipe(slot_bytes_at(stream, index), stream->slot_bytes);
+    struct inkwell_stream_slot *slot = &stream->slots[index];
+    for (size_t i = 0U; i < slot->fd_count; ++i) {
+        (void)inkwell_fd_close(slot->fds[i]);
+    }
+    slot->fd_count = 0U;
 }
 
 static void stream_drop_queue(struct inkwell_stream *stream) {
@@ -122,8 +133,19 @@ int inkwell_stream_flush(struct inkwell_stream *stream) {
 
     while (stream->queued > 0U) {
         struct inkwell_stream_slot *slot = &stream->slots[stream->head];
-        const int written = stream_write(stream, slot_bytes_at(stream, stream->head) + slot->sent,
-                                         slot->length - slot->sent);
+        const uint8_t *from = slot_bytes_at(stream, stream->head) + slot->sent;
+        const size_t left = slot->length - slot->sent;
+        /* Descriptors ride the slot's first byte; once any of it is out, they have gone too. */
+        const int written =
+            slot->fd_count > 0U
+                ? inkwell_socket_send_fds(stream->socket, from, left, slot->fds, slot->fd_count)
+                : stream_write(stream, from, left);
+        if (written > 0 && slot->fd_count > 0U) {
+            for (size_t i = 0U; i < slot->fd_count; ++i) {
+                (void)inkwell_fd_close(slot->fds[i]);
+            }
+            slot->fd_count = 0U;
+        }
         if (written < 0) {
             if (written == -EAGAIN || written == -EWOULDBLOCK) {
                 break; /* the far end is not draining; INKWELL_LOOP_OUT brings us back */
@@ -160,6 +182,16 @@ int inkwell_stream_send(struct inkwell_stream *stream, const uint8_t *data, size
 
 int inkwell_stream_send_prefixed(struct inkwell_stream *stream, const uint8_t *prefix,
                                  size_t prefix_len, const uint8_t *data, size_t len, uint32_t id) {
+    return inkwell_stream_send_prefixed_fds(stream, prefix, prefix_len, data, len, NULL, 0U, id);
+}
+
+int inkwell_stream_send_prefixed_fds(struct inkwell_stream *stream, const uint8_t *prefix,
+                                     size_t prefix_len, const uint8_t *data, size_t len,
+                                     const int *fds, size_t fd_count, uint32_t id) {
+    if (fd_count > INKWELL_FD_PASS_MAX || (fds == NULL && fd_count > 0U) ||
+        (fd_count > 0U && prefix_len + len == 0U)) {
+        return -EINVAL;
+    }
     if (stream == NULL || (prefix == NULL && prefix_len > 0U) || (data == NULL && len > 0U)) {
         return -EINVAL;
     }
@@ -173,7 +205,26 @@ int inkwell_stream_send_prefixed(struct inkwell_stream *stream, const uint8_t *p
         return -EMSGSIZE;
     }
 
+    if (fd_count > 0U && stream->kind != INKWELL_STREAM_SOCKET) {
+        return -ENOTSUP;
+    }
+
     const size_t index = (stream->head + stream->queued) % stream->slot_count;
+    /* The duplicates first: a descriptor that cannot be duplicated is not open, and nothing has
+       been queued yet to undo. */
+    int copies[INKWELL_FD_PASS_MAX];
+    for (size_t i = 0U; i < fd_count; ++i) {
+        copies[i] = fds[i] < 0 ? -EBADF : inkwell_fd_dup(fds[i]);
+        if (copies[i] < 0) {
+            const int error = copies[i];
+            for (size_t j = 0U; j < i; ++j) {
+                (void)inkwell_fd_close(copies[j]);
+            }
+            return error;
+        }
+    }
+    memcpy(stream->slots[index].fds, copies, sizeof(int) * fd_count);
+    stream->slots[index].fd_count = fd_count;
     uint8_t *slot = slot_bytes_at(stream, index);
     if (prefix_len > 0U) {
         memcpy(slot, prefix, prefix_len);
@@ -213,9 +264,16 @@ int inkwell_stream_pump(struct inkwell_stream *stream) {
     size_t total = 0U;
     for (unsigned turn = 0U; turn < INKWELL_STREAM_READS_PER_TURN; ++turn) {
         uint8_t buffer[INKWELL_STREAM_READ_CHUNK];
-        const int got = stream->kind == INKWELL_STREAM_SOCKET
-                            ? inkwell_socket_recv(stream->socket, buffer, sizeof buffer)
-                            : inkwell_fd_read(stream->fd, buffer, sizeof buffer);
+        struct inkwell_fd_received received = {0};
+        const bool with_fds = stream->kind == INKWELL_STREAM_SOCKET && stream->on_fds != NULL;
+        const int got =
+            with_fds ? inkwell_socket_recv_fds(stream->socket, buffer, sizeof buffer, &received)
+            : stream->kind == INKWELL_STREAM_SOCKET
+                ? inkwell_socket_recv(stream->socket, buffer, sizeof buffer)
+                : inkwell_fd_read(stream->fd, buffer, sizeof buffer);
+        if (with_fds && (received.count > 0U || received.lost)) {
+            stream->on_fds(stream->userdata, &received); /* before the bytes they came with */
+        }
         if (got > 0) {
             total += (size_t)got;
             stream->bytes_received += (size_t)got;

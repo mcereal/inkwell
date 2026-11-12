@@ -118,8 +118,11 @@ int inkwell_local_connect(const char *path);
 /* The memory a connection runs in. `slots` and `bytes` are the stream's queue (net/stream.h); a
    message takes one slot, its 4-byte header and its payload together, so the largest payload
    sent is `slot_bytes` - INKWELL_FRAME_HEADER and `slot_count` is the messages that may wait.
-   `frame` holds one arriving payload, the largest one accepted being `frame_capacity`. All of it
-   lives as long as the connection. */
+   `frame` holds one arriving payload, the largest one accepted being `frame_capacity`.
+
+   `fds` holds descriptors that arrived and have not been taken yet, `fd_capacity` of them; NULL
+   and 0 is a connection that takes none, on which a descriptor a peer sends is closed on
+   arrival. All of it lives as long as the connection. */
 struct inkwell_local_conn_storage {
     struct inkwell_stream_slot *slots;
     size_t slot_count;
@@ -127,6 +130,8 @@ struct inkwell_local_conn_storage {
     size_t slot_bytes;
     uint8_t *frame;
     size_t frame_capacity;
+    int *fds;
+    size_t fd_capacity;
 };
 
 /* One whole payload, valid for the call. To stop hearing from the peer, close the connection
@@ -135,13 +140,20 @@ typedef void (*inkwell_local_frame_fn)(void *userdata, const uint8_t *payload, s
 
 /* The connection ended without the owner closing it: the peer hung up (-ENOTCONN), a read or
    write failed (-EIO), or the peer sent a frame larger than the capacity (-EMSGSIZE). The
-   connection is already closed when this is called, and the owner may free it here. */
+   connection is already closed when this is called, and the owner may free it here. A peer
+   that sends more descriptors than the connection has room for, or whose descriptors the
+   kernel could not deliver, is ended with -EMSGSIZE too: past that point no message can be
+   matched with its descriptors. */
 typedef void (*inkwell_local_closed_fn)(void *userdata, int reason);
 
 struct inkwell_local_conn {
     struct inkwell_stream stream;
     struct inkwell_frame_reader reader;
     struct inkwell_local_peer peer;
+    int *fds; /* arrived and not taken: a ring of fd_capacity, fd_count from fd_head */
+    size_t fd_capacity;
+    size_t fd_head;
+    size_t fd_count;
     inkwell_local_frame_fn on_frame;
     inkwell_local_closed_fn on_closed;
     void *userdata;
@@ -175,6 +187,24 @@ int inkwell_local_conn_open(struct inkwell_local_conn *conn, int fd, struct inkw
  * hears the socket.
  */
 int inkwell_local_conn_send(struct inkwell_local_conn *conn, const uint8_t *payload, size_t len);
+
+/*
+ * Descriptors with a message - the way one process hands another memory to map or a file it
+ * could not open (base/fd.h).
+ *
+ * send_fds() is send() with up to INKWELL_FD_PASS_MAX descriptors attached to the message; the
+ * caller keeps its own, since the connection sends duplicates. Besides send()'s errors, -EBADF
+ * for one that is not open.
+ *
+ * The receiving end gets them in arrival order, ahead of the message that carried them, and
+ * takes them one at a time with take_fd() - from on_frame, for the message the protocol says
+ * carries them. **How many a message carries is the protocol's to say**, as Wayland's does:
+ * this layer only keeps them in order. take_fd() returns a descriptor the caller now owns, or
+ * -ENOENT when none is waiting. Any not taken are closed with the connection.
+ */
+int inkwell_local_conn_send_fds(struct inkwell_local_conn *conn, const uint8_t *payload, size_t len,
+                                const int *fds, size_t count);
+int inkwell_local_conn_take_fd(struct inkwell_local_conn *conn);
 
 /* Closes the connection without calling on_closed: the owner asked. Safe when already closed. */
 void inkwell_local_conn_close(struct inkwell_local_conn *conn);
