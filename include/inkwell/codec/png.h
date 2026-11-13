@@ -130,6 +130,30 @@ int inkwell_png_decode_bgra(struct inkwell_png_decoder *decoder, const uint8_t *
                             uint32_t width, uint32_t height, uint8_t *pixels, size_t pixels_len,
                             uint8_t *work, size_t work_len);
 
+/* ---- writing one ------------------------------------------------------------------------------
+ *
+ * The other way: pixels a program drew, as a PNG file - a screenshot. Eight-bit RGB (the fourth
+ * byte of each pixel is dropped: a frame on a panel is opaque), each row filtered by whichever of
+ * PNG's filters leaves it smallest, then deflated (deflate.h). No allocation: the caller sizes
+ * `scratch` with inkwell_png_encode_scratch_bytes() and `out` with inkwell_png_encode_bound().
+ */
+
+/* What inkwell_png_encode_bgrx() needs as scratch for a `width` x `height` picture; 0 for one that
+   would overflow. */
+size_t inkwell_png_encode_scratch_bytes(uint32_t width, uint32_t height);
+
+/* The most bytes the file can come to; 0 for a size that would overflow. */
+size_t inkwell_png_encode_bound(uint32_t width, uint32_t height);
+
+/*
+ * `pixels` - `height` rows `stride` bytes apart, each `width` pixels of blue, green, red and one
+ * byte unread - as a PNG into `out` (`cap` bytes). `scratch` is
+ * inkwell_png_encode_scratch_bytes() of anything aligned for a uint32_t. Returns the file's
+ * length, or 0 when an argument is not usable or `out` is too small.
+ */
+size_t inkwell_png_encode_bgrx(const uint8_t *pixels, uint32_t width, uint32_t height,
+                               size_t stride, void *scratch, uint8_t *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif
