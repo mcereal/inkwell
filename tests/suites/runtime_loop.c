@@ -156,6 +156,61 @@ INKWELL_TEST_CASE(loop_readable_and_writable_is_one_callback, unit) {
     record_success(test_name);
 }
 
+/*
+ * PRI is heard on Linux, and asked for anywhere. A TCP out-of-band byte is the portable way to
+ * raise it; the reason it is in the loop is Linux's pressure triggers, which signal the same way.
+ * The source asks for PRI alone, so on Linux that is the whole of what it is told, and elsewhere
+ * it is accepted and never told.
+ */
+INKWELL_TEST_CASE(loop_hears_pri_on_linux, unit) {
+    struct inkwell_loop loop;
+    INKWELL_TEST_FAIL_IF(inkwell_loop_init(&loop) < 0, "inkwell_loop_init failed");
+    struct sockaddr_in at;
+    memset(&at, 0, sizeof at);
+    at.sin_family = AF_INET;
+    at.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t at_len = sizeof at;
+    const int listener = socket(AF_INET, SOCK_STREAM, 0);
+    const int client = socket(AF_INET, SOCK_STREAM, 0);
+    int server = -1;
+    bool ready =
+        listener >= 0 && client >= 0 && bind(listener, (struct sockaddr *)&at, sizeof at) == 0 &&
+        listen(listener, 1) == 0 && getsockname(listener, (struct sockaddr *)&at, &at_len) == 0 &&
+        connect(client, (struct sockaddr *)&at, sizeof at) == 0;
+    if (ready) {
+        server = accept(listener, NULL, NULL);
+        ready = server >= 0;
+    }
+    struct heard heard = {&loop, 0U, 0U, 0U};
+    const char byte = '!';
+    ready = ready &&
+            inkwell_loop_add_fd(&loop, server, INKWELL_LOOP_PRI, record_events, &heard) == 0 &&
+            send(client, &byte, 1, MSG_OOB) == 1;
+    if (ready) {
+        const uint64_t until = inkwell_time_monotonic_ms() + 1000U;
+        while (heard.calls == 0U && inkwell_time_monotonic_ms() < until) {
+            (void)inkwell_loop_run(&loop, 50);
+        }
+        inkwell_loop_remove_fd(&loop, server);
+    }
+    for (int i = 0; i < 3; ++i) {
+        const int fd = i == 0 ? listener : i == 1 ? client : server;
+        if (fd >= 0) {
+            close(fd);
+        }
+    }
+    inkwell_loop_shutdown(&loop);
+
+    INKWELL_TEST_FAIL_IF(!ready, "could not set the sockets up");
+#if defined(__linux__)
+    INKWELL_TEST_FAIL_IF(heard.calls != 1U || heard.events != INKWELL_LOOP_PRI,
+                         "the out-of-band byte was not heard as PRI alone");
+#else
+    INKWELL_TEST_FAIL_IF((heard.events & INKWELL_LOOP_PRI) != 0U, "PRI is Linux's");
+#endif
+    record_success(test_name);
+}
+
 /* Changing a source's mask changes what wakes it: kqueue's half of this is a diff of filters, and
    a filter left behind or not added is a source that goes deaf or never goes quiet. */
 INKWELL_TEST_CASE(loop_update_changes_what_is_heard, unit) {

@@ -20,8 +20,14 @@ extern "C" {
  *
  * ERR and HUP are reported whether or not they were asked for, as epoll reports them. Asking for
  * them is harmless and says what the callback is prepared to hear.
+ *
+ * PRI is "something exceptional": a socket's out-of-band byte, and on Linux the way the kernel
+ * signals through a file rather than with data - a pressure trigger (/proc/pressure/<resource>)
+ * that has fired, a sysfs attribute that changed. Linux only: elsewhere a source may ask for it,
+ * and still hears IN and OUT as asked, but is never told PRI.
  */
 #define INKWELL_LOOP_IN 0x001U
+#define INKWELL_LOOP_PRI 0x002U
 #define INKWELL_LOOP_OUT 0x004U
 #define INKWELL_LOOP_ERR 0x008U
 #define INKWELL_LOOP_HUP 0x010U
