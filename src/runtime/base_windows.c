@@ -1,4 +1,8 @@
+/* rand_s() is declared only for a translation unit that asks for it, before stdlib.h. */
+#define _CRT_RAND_S
 #include "../base/platform.h"
+
+#include <stdlib.h>
 
 #include <direct.h>
 #include <errno.h>
@@ -10,6 +14,21 @@
 
 uint64_t inkwell_platform_monotonic_ms(void) {
     return (uint64_t)GetTickCount64();
+}
+
+int inkwell_platform_random(void *out, size_t len) {
+    unsigned char *at = out;
+    while (len > 0U) {
+        unsigned int word = 0U;
+        if (rand_s(&word) != 0) {
+            return -EIO;
+        }
+        const size_t n = len < sizeof word ? len : sizeof word;
+        memcpy(at, &word, n);
+        at += n;
+        len -= n;
+    }
+    return 0;
 }
 
 bool inkwell_platform_utc_time(time_t epoch, struct tm *out) {

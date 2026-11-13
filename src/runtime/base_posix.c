@@ -8,6 +8,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(__linux__)
+#include <sys/random.h>
+#endif
+
 uint64_t inkwell_platform_monotonic_ms(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
@@ -15,6 +19,31 @@ uint64_t inkwell_platform_monotonic_ms(void) {
     }
     return (uint64_t)ts.tv_sec * 1000U + (uint64_t)ts.tv_nsec / 1000000U;
 }
+
+#if defined(__linux__)
+int inkwell_platform_random(void *out, size_t len) {
+    uint8_t *at = out;
+    while (len > 0U) {
+        /* At most 256 bytes are promised whole per call; ask for no more, and go round. */
+        const size_t want = len > 256U ? 256U : len;
+        const ssize_t got = getrandom(at, want, 0);
+        if (got < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -errno;
+        }
+        at += got;
+        len -= (size_t)got;
+    }
+    return 0;
+}
+#else
+int inkwell_platform_random(void *out, size_t len) {
+    arc4random_buf(out, len); /* the kernel's generator; it cannot fail */
+    return 0;
+}
+#endif
 
 bool inkwell_platform_utc_time(time_t epoch, struct tm *out) {
     return gmtime_r(&epoch, out) != NULL;

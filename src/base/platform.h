@@ -9,6 +9,8 @@
 
 /* OS services used by the base leaves. Implementations live in runtime/. */
 uint64_t inkwell_platform_monotonic_ms(void);
+/* All `len` bytes from the system's secure random source: 0 or a negative errno. */
+int inkwell_platform_random(void *out, size_t len);
 bool inkwell_platform_utc_time(time_t epoch, struct tm *out);
 int inkwell_platform_file_open_rw(const char *path);
 ssize_t inkwell_platform_file_read_at(int fd, void *buffer, size_t count, off_t offset);
