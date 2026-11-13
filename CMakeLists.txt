@@ -112,6 +112,7 @@ add_library(inkwell STATIC
     ${INKWELL_WINDOWS_RUNTIME_SOURCE}
     # codec: bytes in, bytes out. They parse; they do not know what the bytes are for.
     src/codec/base64.c
+    src/codec/deflate.c
     src/codec/esp_image.c
     src/codec/esp_rom.c
     src/codec/fields.c
@@ -123,6 +124,7 @@ add_library(inkwell STATIC
     src/codec/md5.c
     src/codec/mqtt.c
     src/codec/png.c
+    src/codec/png_encode.c
     src/codec/wuffs.c
     src/codec/sha256.c
     src/codec/uf2.c

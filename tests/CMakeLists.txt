@@ -40,6 +40,7 @@ set(INKWELL_TEST_SUITES
     suites/codec_fields.c
     suites/codec_frame.c
     suites/codec_http.c
+    suites/codec_deflate.c
     suites/codec_inflate.c
     suites/codec_json.c
     suites/codec_kdf.c
