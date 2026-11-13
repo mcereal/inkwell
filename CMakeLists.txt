@@ -92,6 +92,7 @@ add_library(inkwell STATIC
     src/base/fd.c
     src/base/file.c
     src/base/log.c
+    src/base/random.c
     src/base/record_file.c
     src/base/text.c
     src/base/time.c
@@ -118,6 +119,7 @@ add_library(inkwell STATIC
     src/codec/http.c
     src/codec/inflate.c
     src/codec/json.c
+    src/codec/kdf.c
     src/codec/md5.c
     src/codec/mqtt.c
     src/codec/png.c

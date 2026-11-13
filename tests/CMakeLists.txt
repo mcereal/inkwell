@@ -28,6 +28,7 @@ set(INKWELL_TEST_SUITES
     suites/ble_hci.c
     suites/base_file.c
     suites/base_log.c
+    suites/base_random.c
     suites/base_record_file.c
     suites/base_text.c
     suites/base_time.c
@@ -41,6 +42,7 @@ set(INKWELL_TEST_SUITES
     suites/codec_http.c
     suites/codec_inflate.c
     suites/codec_json.c
+    suites/codec_kdf.c
     suites/codec_md5.c
     suites/codec_mqtt.c
     suites/codec_png.c
