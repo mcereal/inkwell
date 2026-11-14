@@ -64,8 +64,11 @@ set(INKWELL_USB_STORAGE_SOURCE src/io/usb_storage.c)
 # Kernel device events are Linux's netlink; the parser beside them is plain bytes and builds
 # everywhere.
 set(INKWELL_UEVENT_MONITOR_SOURCE src/io/uevent_unavailable.c)
+# PCM playback is ALSA's kernel interface; the list parser beside it is plain text.
+set(INKWELL_PCM_SOURCE src/io/pcm_unavailable.c)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(INKWELL_UEVENT_MONITOR_SOURCE src/io/uevent_netlink.c)
+    set(INKWELL_PCM_SOURCE src/io/pcm_alsa.c)
 endif()
 if(WIN32)
     set(INKWELL_CRASH_SOURCE src/runtime/crash_windows.c)
@@ -141,11 +144,13 @@ add_library(inkwell STATIC
     src/net/tls.c
     src/net/zip_fetch.c
     # io: the USB serial ports the system has, a tty opened raw on the loop's terms, and the
-    # kernel's device events
+    # kernel's device events, and a PCM playback device
     ${INKWELL_SERIAL_SOURCE}
     ${INKWELL_USB_STORAGE_SOURCE}
     src/io/uevent.c
     ${INKWELL_UEVENT_MONITOR_SOURCE}
+    src/io/pcm.c
+    ${INKWELL_PCM_SOURCE}
     # ble: a Bluetooth LE central over whichever stack the system has. The backend is added
     # below, once the build knows which one that is.
     src/ble/central.c
