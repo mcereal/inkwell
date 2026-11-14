@@ -20,10 +20,11 @@ size_t inkwell_png_workbuf_bytes(uint32_t width, uint32_t height, uint32_t bytes
     if (width == 0U || height == 0U || bytes_per_pixel == 0U) {
         return 0U;
     }
-    /* width * bytes_per_pixel * height + width, in 64 bits throughout so an overflow is a
-       refusal rather than a small number that reads as a valid budget. */
+    /* (width * bytes_per_pixel + 1) * height: each row's bytes and its filter byte, as Wuffs'
+       workbuf_len has it. In 64 bits throughout so an overflow is a refusal rather than a small
+       number that reads as a valid budget. */
     const uint64_t row = (uint64_t)width * (uint64_t)bytes_per_pixel;
-    const uint64_t total = row * (uint64_t)height + (uint64_t)width;
+    const uint64_t total = (row + 1U) * (uint64_t)height;
     if (total > (uint64_t)SIZE_MAX) {
         return 0U;
     }

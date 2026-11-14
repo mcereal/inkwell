@@ -79,8 +79,10 @@ struct inkwell_png_decoder {
  * How many scratch bytes decoding a `width` x `height` image needs, at `bytes_per_pixel` of
  * *source* colour depth - which is the file's colour type, not the BGRA this hands back.
  *
- * Wuffs wants `width * bytes_per_pixel * height + width`. Measured on the pinned version at 256
- * px square:
+ * Wuffs wants `(width * bytes_per_pixel + 1) * height`: a row's bytes and its filter byte, row
+ * by row. (A square image hides the difference between `+ height` and `+ width`; a phone's
+ * screenshot, twice as tall as it is wide, does not.) Measured on the pinned version at 256 px
+ * square:
  *
  *     8-bit grey, 8-bit palette   1 byte a pixel     65,792
  *     24-bit RGB                  3 bytes a pixel   196,864
