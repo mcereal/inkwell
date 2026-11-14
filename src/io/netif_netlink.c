@@ -45,6 +45,18 @@ static void attribute(struct request *r, uint16_t type, const void *value, size_
     r->u.header.nlmsg_len = (uint32_t)(at + RTA_ALIGN(a->rta_len));
 }
 
+/* The messages in a datagram: the kernel's NLMSG_OK/NLMSG_NEXT, without their signed arithmetic
+   and the alignment cast a strict compiler warns about. */
+static bool msg_ok(const struct nlmsghdr *m, size_t left) {
+    return left >= sizeof *m && m->nlmsg_len >= sizeof *m && m->nlmsg_len <= left;
+}
+
+static const struct nlmsghdr *msg_next(const struct nlmsghdr *m, size_t *left) {
+    const size_t step = NLMSG_ALIGN((size_t)m->nlmsg_len);
+    *left = step < *left ? *left - step : 0U;
+    return (const struct nlmsghdr *)(const void *)((const uint8_t *)m + step);
+}
+
 /* The attributes after a message's fixed part: the kernel's RTA_OK/RTA_NEXT, without their signed
    length arithmetic. */
 static const struct rtattr *attr_first(const struct nlmsghdr *m, size_t fixed, size_t *left) {
@@ -91,7 +103,7 @@ static int talk(struct request *r, each_fn each, void *ctx) {
         (void)close(fd);
         return result;
     }
-    static uint8_t buf[BUFFER];
+    static _Alignas(struct nlmsghdr) uint8_t buf[BUFFER];
     for (;;) {
         struct pollfd p = {.fd = fd, .events = POLLIN};
         const int ready = poll(&p, 1, REPLY_WAIT_MS);
@@ -112,8 +124,8 @@ static int talk(struct request *r, each_fn each, void *ctx) {
         }
         bool done = false;
         size_t left = (size_t)got;
-        for (const struct nlmsghdr *m = (const struct nlmsghdr *)(const void *)buf;
-             NLMSG_OK(m, left); m = NLMSG_NEXT(m, left)) {
+        for (const struct nlmsghdr *m = (const struct nlmsghdr *)(const void *)buf; msg_ok(m, left);
+             m = msg_next(m, &left)) {
             if (m->nlmsg_seq != r->u.header.nlmsg_seq) {
                 continue;
             }
@@ -357,7 +369,7 @@ static unsigned kind_of(uint16_t type) {
 static int on_readable(int fd, uint32_t events, void *userdata) {
     (void)events;
     struct inkwell_netif_monitor *monitor = userdata;
-    static uint8_t buf[BUFFER];
+    static _Alignas(struct nlmsghdr) uint8_t buf[BUFFER];
     unsigned changed = 0U;
     for (int taken = 0; taken < READ_BUDGET; ++taken) {
         const ssize_t got = recv(fd, buf, sizeof buf, 0);
@@ -372,8 +384,8 @@ static int on_readable(int fd, uint32_t events, void *userdata) {
             break;
         }
         size_t left = (size_t)got;
-        for (const struct nlmsghdr *m = (const struct nlmsghdr *)(const void *)buf;
-             NLMSG_OK(m, left); m = NLMSG_NEXT(m, left)) {
+        for (const struct nlmsghdr *m = (const struct nlmsghdr *)(const void *)buf; msg_ok(m, left);
+             m = msg_next(m, &left)) {
             changed |= kind_of(m->nlmsg_type);
         }
     }
