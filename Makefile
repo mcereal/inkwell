@@ -3,12 +3,24 @@
 
 BUILD ?= build
 
-.PHONY: all test debug format format-check clean
+.PHONY: all venv test debug format format-check clean
 
 all: debug
 
-debug:
-	cmake -S . -B $(BUILD) -G Ninja -DCMAKE_BUILD_TYPE=Debug
+# The host tools in requirements-dev.txt - Mbed TLS's generator Python and the pinned
+# clang-format - in a venv of their own, remade when that file changes.
+VENV = $(BUILD)/venv
+VENV_STAMP = $(VENV)/.installed
+
+venv: $(VENV_STAMP)
+$(VENV_STAMP): requirements-dev.txt
+	python3 -m venv $(VENV)
+	$(VENV)/bin/pip install --quiet --disable-pip-version-check -r requirements-dev.txt
+	@touch $@
+
+debug: $(VENV_STAMP)
+	cmake -S . -B $(BUILD) -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+	  -DPython3_EXECUTABLE=$(abspath $(VENV))/bin/python3
 	cmake --build $(BUILD)
 
 # The verify step, and what CI runs: the unit suite plus the check that no layer reaches
@@ -28,13 +40,13 @@ test: debug
 # of this list - so the exclusion landed here and CI went on checking the vendored file and
 # failed. One list, two targets, and nothing to keep in step.
 FORMAT_FILES = $$(git ls-files '*.c' '*.h' '*.m' ':!:third_party/*')
-CLANG_FORMAT ?= clang-format
+CLANG_FORMAT ?= $(VENV)/bin/clang-format
 
-format:
+format: $(VENV_STAMP)
 	$(CLANG_FORMAT) -i $(FORMAT_FILES)
 
 # What CI runs: the same files, changing nothing, failing on the first that differs.
-format-check:
+format-check: $(VENV_STAMP)
 	$(CLANG_FORMAT) --dry-run --Werror $(FORMAT_FILES)
 
 clean:

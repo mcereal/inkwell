@@ -39,7 +39,9 @@ header's source by *filename*, never by path.
 
 ## Style
 
-- clang-format 18, config in `.clang-format`. `make format` before pushing; CI checks it.
+- clang-format, the exact version pinned in `requirements-dev.txt` (`make format` installs it into
+  `build/venv`); config in `.clang-format`. `make format` before pushing; CI checks it. Never format
+  with whatever `clang-format` is on `PATH` - another version lays tables out differently.
 - `inkwell_` on everything public, `INKWELL_` on macros and enum members. A symbol carries the
   prefix of whoever owns it — that is the whole point of the split, so a name that came from
   somewhere else gets renamed on the way in rather than keeping its old spelling.

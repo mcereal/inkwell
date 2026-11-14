@@ -156,11 +156,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install clang-format
-        run: sudo apt-get update && sudo apt-get install -y clang-format-18
-
       # Through the Makefile, so the file list lives in exactly one place. It used to be
       # duplicated here, and the day third_party/ was excluded from `make format` this job
-      # went on checking a 3.6 MB vendored file and failed.
+      # went on checking a 3.6 MB vendored file and failed. The formatter is the Makefile's
+      # too: the clang-format pinned in requirements-dev.txt, the same wheel a Mac formats with,
+      # where apt's clang-format-18 moved with the runner image's point release.
       - name: Check formatting
-        run: make format-check CLANG_FORMAT=clang-format-18
+        run: make format-check
