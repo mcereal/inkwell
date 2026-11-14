@@ -66,9 +66,12 @@ set(INKWELL_USB_STORAGE_SOURCE src/io/usb_storage.c)
 set(INKWELL_UEVENT_MONITOR_SOURCE src/io/uevent_unavailable.c)
 # PCM playback is ALSA's kernel interface; the list parser beside it is plain text.
 set(INKWELL_PCM_SOURCE src/io/pcm_unavailable.c)
+# Network interfaces are rtnetlink, Linux's alone.
+set(INKWELL_NETIF_SOURCE src/io/netif_unavailable.c)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(INKWELL_UEVENT_MONITOR_SOURCE src/io/uevent_netlink.c)
     set(INKWELL_PCM_SOURCE src/io/pcm_alsa.c)
+    set(INKWELL_NETIF_SOURCE src/io/netif_netlink.c)
 endif()
 if(WIN32)
     set(INKWELL_CRASH_SOURCE src/runtime/crash_windows.c)
@@ -116,6 +119,7 @@ add_library(inkwell STATIC
     # codec: bytes in, bytes out. They parse; they do not know what the bytes are for.
     src/codec/base64.c
     src/codec/deflate.c
+    src/codec/dhcp.c
     src/codec/esp_image.c
     src/codec/esp_rom.c
     src/codec/fields.c
@@ -133,6 +137,7 @@ add_library(inkwell STATIC
     src/codec/uf2.c
     src/codec/zip.c
     # net: one hostname, one socket, one session - all of it on the loop, none of it blocking
+    src/net/dhcp.c
     src/net/fetch.c
     ${INKWELL_LOCAL_SOURCE}
     ${INKWELL_MQTT_SOURCE}
@@ -151,6 +156,7 @@ add_library(inkwell STATIC
     ${INKWELL_UEVENT_MONITOR_SOURCE}
     src/io/pcm.c
     ${INKWELL_PCM_SOURCE}
+    ${INKWELL_NETIF_SOURCE}
     # ble: a Bluetooth LE central over whichever stack the system has. The backend is added
     # below, once the build knows which one that is.
     src/ble/central.c
