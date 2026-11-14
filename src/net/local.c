@@ -212,8 +212,11 @@ static int conn_ready(int fd, uint32_t events, void *userdata) {
     (void)fd;
     struct inkwell_local_conn *conn = userdata;
     conn->dispatching = true;
-    if ((events & INKWELL_LOOP_OUT) != 0U && inkwell_stream_flush(&conn->stream) < 0) {
-        conn->failure = -EIO;
+    if ((events & INKWELL_LOOP_OUT) != 0U) {
+        const int flushed = inkwell_stream_flush(&conn->stream);
+        if (flushed < 0) {
+            conn->failure = flushed == -ENOTCONN ? -ENOTCONN : -EIO;
+        }
     }
     if (conn->failure == 0 && !conn->close_pending &&
         (events & (INKWELL_LOOP_IN | INKWELL_LOOP_HUP | INKWELL_LOOP_ERR)) != 0U) {
