@@ -99,6 +99,25 @@ struct inkwell_png_decoder {
 size_t inkwell_png_workbuf_bytes(uint32_t width, uint32_t height, uint32_t bytes_per_pixel);
 
 /*
+ * What a PNG says of itself before it is decoded: its size, and how deep its pixels are - the
+ * `bytes_per_pixel` inkwell_png_workbuf_bytes() wants, rounded up to whole bytes (1 for a palette
+ * or grey of 8 bits or fewer, 8 for sixteen-bit RGBA). Read from the signature and the IHDR chunk
+ * alone, so a caller sizes its two buffers - or declines a picture too big to show - before
+ * spending anything on it.
+ */
+struct inkwell_png_info {
+    uint32_t width;
+    uint32_t height;
+    uint32_t bytes_per_pixel;
+};
+
+/*
+ * 0 with `info` filled, -EILSEQ for bytes that are not a PNG or whose header is not one the
+ * format allows (a size of 0, an unknown colour type or depth), -EINVAL for NULL arguments.
+ */
+int inkwell_png_info(const uint8_t *encoded, size_t len, struct inkwell_png_info *info);
+
+/*
  * Decodes `encoded` into `pixels` as INKWELL_PNG_PIXEL_BYTES-per-pixel BGRA.
  *
  * The image must be exactly `width` x `height`; a PNG of another size is refused rather than

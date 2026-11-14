@@ -438,3 +438,45 @@ INKWELL_TEST_CASE(png_holds_a_bounded_amount_of_memory, unit) {
     fixture_free(fx);
     record_success(test_name);
 }
+
+/*
+ * What a file says of itself before it is decoded: the fixtures' own size and depth (a palette is
+ * one byte a pixel, truecolour three or four), and a header a caller must not size buffers from.
+ */
+INKWELL_TEST_CASE(png_info_reads_the_header_alone, unit) {
+    struct inkwell_png_info info;
+    struct fixture *const fx = fixture_load(PALETTE_PNG);
+    INKWELL_TEST_FAIL_IF(fx == NULL, "the palette fixture loads");
+    INKWELL_TEST_FAIL_IF_CLEANUP(inkwell_png_info(fx->encoded, fx->encoded_len, &info) != 0 ||
+                                     info.width != FIXTURE_SIDE || info.height != FIXTURE_SIDE ||
+                                     info.bytes_per_pixel != 1U,
+                                 fixture_free(fx), "a palette file: its size, a byte a pixel");
+    /* Only the first 33 bytes are read: the rest of the file need not be there yet. */
+    INKWELL_TEST_FAIL_IF_CLEANUP(inkwell_png_info(fx->encoded, 33U, &info) != 0, fixture_free(fx),
+                                 "the header alone is enough");
+    INKWELL_TEST_FAIL_IF_CLEANUP(inkwell_png_info(fx->encoded, 20U, &info) != -EILSEQ,
+                                 fixture_free(fx), "but not less");
+    uint8_t broken[33];
+    memcpy(broken, fx->encoded, sizeof broken);
+    broken[25] = 5U; /* no such colour type */
+    INKWELL_TEST_FAIL_IF_CLEANUP(inkwell_png_info(broken, sizeof broken, &info) != -EILSEQ,
+                                 fixture_free(fx), "an unknown colour type");
+    memcpy(broken, fx->encoded, sizeof broken);
+    memset(broken + 16, 0, 4U); /* a width of 0 */
+    INKWELL_TEST_FAIL_IF_CLEANUP(inkwell_png_info(broken, sizeof broken, &info) != -EILSEQ,
+                                 fixture_free(fx), "a width of 0");
+    fixture_free(fx);
+
+    struct fixture *const tc = fixture_load(TRUECOLOUR_PNG);
+    INKWELL_TEST_FAIL_IF(tc == NULL, "the truecolour fixture loads");
+    INKWELL_TEST_FAIL_IF_CLEANUP(inkwell_png_info(tc->encoded, tc->encoded_len, &info) != 0 ||
+                                     info.width != FIXTURE_SIDE ||
+                                     (info.bytes_per_pixel != 3U && info.bytes_per_pixel != 4U),
+                                 fixture_free(tc), "a truecolour file: three or four bytes");
+    fixture_free(tc);
+    static const uint8_t k_rubbish[40] = {1U, 2U, 3U};
+    INKWELL_TEST_FAIL_IF(inkwell_png_info(k_rubbish, sizeof k_rubbish, &info) != -EILSEQ,
+                         "not a PNG");
+    INKWELL_TEST_FAIL_IF(inkwell_png_info(NULL, 0U, &info) != -EINVAL, "nothing");
+    record_success(test_name);
+}
