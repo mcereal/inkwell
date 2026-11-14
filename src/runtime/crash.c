@@ -266,7 +266,7 @@ static void crash_handler(int signal_number, siginfo_t *info, void *ucontext) {
             open(inkwell_crash_internal_path(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
         if (fd >= 0) {
             CrashFault fault = {
-                .signal_number = signal_number,
+                .signal_number = (uint64_t)signal_number,
                 .signal_name = crash_signal_name(signal_number),
                 .has_info = info != NULL,
                 .code = info != NULL ? (int64_t)info->si_code : 0,
@@ -519,7 +519,7 @@ int inkwell_crash_install(const struct inkwell_crash_config *config) {
 
 void inkwell_crash_write_report(int fd, int signal_number) {
     const CrashFault fault = {
-        .signal_number = signal_number,
+        .signal_number = (uint64_t)signal_number,
         .signal_name = crash_signal_name(signal_number),
         .load_base = g_load_base,
         .build_id = g_build_id,
