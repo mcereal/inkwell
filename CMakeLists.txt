@@ -142,6 +142,7 @@ add_library(inkwell STATIC
     ${INKWELL_LOCAL_SOURCE}
     ${INKWELL_MQTT_SOURCE}
     src/net/mqtt_address.c
+    src/net/probe.c
     src/net/reason.c
     ${INKWELL_RESOLVE_SOURCE}
     src/net/stream.c
