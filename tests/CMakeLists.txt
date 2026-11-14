@@ -41,6 +41,7 @@ set(INKWELL_TEST_SUITES
     suites/codec_frame.c
     suites/codec_http.c
     suites/codec_deflate.c
+    suites/codec_dhcp.c
     suites/codec_inflate.c
     suites/codec_json.c
     suites/codec_kdf.c
@@ -54,6 +55,8 @@ set(INKWELL_TEST_SUITES
     ${INKWELL_TEST_IO_SUITES}
     suites/io_uevent.c
     suites/io_pcm.c
+    suites/io_netif.c
+    suites/net_dhcp.c
     suites/net_fetch.c
     suites/net_mqtt.c
     suites/net_reason.c
