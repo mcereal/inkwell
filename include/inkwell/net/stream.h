@@ -205,7 +205,8 @@ bool inkwell_stream_is_open(const struct inkwell_stream *stream);
 int inkwell_stream_pump(struct inkwell_stream *stream);
 
 /* Writes as much of the queue as the descriptor will take. Returns 0, -ENOTCONN when the stream
-   is closed, or -EIO on a failed write, which is fatal in the same way. */
+   is closed or the far end has gone (EPIPE, ECONNRESET - quietly, as pump()'s EOF is), or -EIO
+   on any other failed write, which is fatal in the same way. */
 int inkwell_stream_flush(struct inkwell_stream *stream);
 
 /*

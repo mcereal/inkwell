@@ -154,7 +154,13 @@ int inkwell_stream_flush(struct inkwell_stream *stream) {
                 continue;
             }
             /* EPIPE lands here rather than as a dead process, which is what MSG_NOSIGNAL above
-               bought: the far end went away and the owner gets to say so in its own words. */
+               bought. It, and ECONNRESET, are the far end having gone: the write side's EOF, and
+               the same -ENOTCONN pump() gives for it. Not a warning - a peer exiting is ordinary
+               (a server writing to a client that has just quit), and the owner says what it
+               means in its own words. */
+            if (written == -EPIPE || written == -ECONNRESET) {
+                return -ENOTCONN;
+            }
             inkwell_log_warn(stream->tag, "write failed: %s", strerror(-written));
             return -EIO;
         }

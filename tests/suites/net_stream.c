@@ -2,6 +2,7 @@
 
 #include "framework/inkwell_test.h"
 
+#include "inkwell/base/log.h"
 #include "inkwell/net/stream.h"
 
 #include <errno.h>
@@ -333,6 +334,41 @@ INKWELL_TEST_CASE(stream_reports_a_far_end_that_went_away, unit) {
     INKWELL_TEST_FAIL_IF(inkwell_stream_is_open(&stream), "close should close it");
     /* Idempotent: a second close is what a teardown path does after a failed open. */
     inkwell_stream_close(&stream);
+    record_success(test_name);
+}
+
+/* The write side of the same thing: a send to a far end that has closed is -ENOTCONN, as its EOF
+   is to pump(), and says nothing in the log - a server writing to a client that has just quit is
+   ordinary, and a warning for each one is noise. */
+static unsigned g_stream_logged;
+static void stream_count_log(const char *line) {
+    (void)line;
+    g_stream_logged++;
+}
+
+INKWELL_TEST_CASE(stream_send_to_a_far_end_that_went_away_is_enotconn, unit) {
+    int fds[2];
+    INKWELL_TEST_FAIL_IF(!probe_pair(fds), "could not make a socket pair");
+    struct inkwell_stream_slot slots[2];
+    uint8_t queue[2 * 8];
+    struct inkwell_stream stream;
+    INKWELL_TEST_FAIL_IF_CLEANUP(inkwell_stream_init(&stream, "test", slots, 2U, queue, 8U) != 0,
+                                 (void)close(fds[0]);
+                                 (void)close(fds[1]), "init failed");
+    INKWELL_TEST_FAIL_IF_CLEANUP(
+        inkwell_stream_open_socket(&stream, (inkwell_socket)fds[0], NULL, NULL, NULL) != 0,
+        (void)close(fds[0]);
+        (void)close(fds[1]), "open failed");
+    (void)close(fds[1]);
+
+    g_stream_logged = 0U;
+    inkwell_log_set_sink(stream_count_log);
+    const uint8_t payload[] = {1U, 2U, 3U};
+    const int sent = inkwell_stream_send(&stream, payload, sizeof payload, 0U);
+    inkwell_log_set_sink(NULL);
+    inkwell_stream_close(&stream);
+    INKWELL_TEST_FAIL_IF(sent != -ENOTCONN, "a send to a closed far end is -ENOTCONN");
+    INKWELL_TEST_FAIL_IF(g_stream_logged != 0U, "and is not logged");
     record_success(test_name);
 }
 
