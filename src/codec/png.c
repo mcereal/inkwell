@@ -3,6 +3,7 @@
 #include "inkwell_wuffs.h"
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -96,5 +97,53 @@ int inkwell_png_decode_bgra(struct inkwell_png_decoder *decoder_state, const uin
     if (!wuffs_base__status__is_ok(&status)) {
         return -EILSEQ;
     }
+    return 0;
+}
+
+static uint32_t be32(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+int inkwell_png_info(const uint8_t *encoded, size_t len, struct inkwell_png_info *info) {
+    static const uint8_t k_signature[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+    if (encoded == NULL || info == NULL) {
+        return -EINVAL;
+    }
+    /* The signature, then IHDR first of all chunks: its length (13), its type, then width,
+       height, bit depth and colour type. */
+    if (len < 8U + 8U + 13U || memcmp(encoded, k_signature, sizeof k_signature) != 0 ||
+        be32(encoded + 8) != 13U || memcmp(encoded + 12, "IHDR", 4U) != 0) {
+        return -EILSEQ;
+    }
+    const uint32_t width = be32(encoded + 16);
+    const uint32_t height = be32(encoded + 20);
+    const uint32_t depth = encoded[24];
+    uint32_t channels = 0U;
+    switch (encoded[25]) {
+    case 0: /* grey */
+    case 3: /* palette */
+        channels = 1U;
+        break;
+    case 2: /* RGB */
+        channels = 3U;
+        break;
+    case 4: /* grey and alpha */
+        channels = 2U;
+        break;
+    case 6: /* RGBA */
+        channels = 4U;
+        break;
+    default:
+        return -EILSEQ;
+    }
+    const bool depth_ok = depth == 8U || depth == 16U ||
+                          ((depth == 1U || depth == 2U || depth == 4U) && channels == 1U);
+    /* PNG caps each side at 2^31 - 1. */
+    if (width == 0U || height == 0U || width > 0x7fffffffU || height > 0x7fffffffU || !depth_ok) {
+        return -EILSEQ;
+    }
+    info->width = width;
+    info->height = height;
+    info->bytes_per_pixel = depth == 16U ? channels * 2U : channels;
     return 0;
 }
