@@ -480,3 +480,41 @@ INKWELL_TEST_CASE(png_info_reads_the_header_alone, unit) {
     INKWELL_TEST_FAIL_IF(inkwell_png_info(NULL, 0U, &info) != -EINVAL, "nothing");
     record_success(test_name);
 }
+
+/*
+ * A picture taller than it is wide - a phone's screenshot - decodes into the scratch
+ * inkwell_png_workbuf_bytes() says it needs. The scratch is a row's bytes and its filter byte for
+ * every row, so it grows with the height; a sum that added the width instead came up short by
+ * exactly the difference, which a square fixture cannot show.
+ */
+INKWELL_TEST_CASE(png_workbuf_fits_a_tall_picture, unit) {
+    enum { W = 8, H = 300 };
+    static uint8_t pixels[W * H * 4];
+    for (size_t i = 0U; i < sizeof pixels; ++i) {
+        pixels[i] = (uint8_t)(i * 7U);
+    }
+    void *scratch = malloc(inkwell_png_encode_scratch_bytes(W, H));
+    const size_t cap = inkwell_png_encode_bound(W, H);
+    uint8_t *png = malloc(cap);
+    INKWELL_TEST_FAIL_IF(scratch == NULL || png == NULL, "room to encode");
+    const size_t len = inkwell_png_encode_bgrx(pixels, W, H, W * 4U, scratch, png, cap);
+    free(scratch);
+    INKWELL_TEST_FAIL_IF(len == 0U, "encoded");
+    struct inkwell_png_info info;
+    INKWELL_TEST_FAIL_IF(inkwell_png_info(png, len, &info) != 0 || info.height != H, "its header");
+    const size_t work_len =
+        inkwell_png_workbuf_bytes(info.width, info.height, info.bytes_per_pixel);
+    INKWELL_TEST_FAIL_IF(work_len != (W * info.bytes_per_pixel + 1U) * H,
+                         "a row and its filter byte, each row");
+    uint8_t *work = malloc(work_len);
+    static uint8_t out[W * H * 4];
+    const int r =
+        inkwell_png_decode_bgra(&g_decoder, png, len, W, H, out, sizeof out, work, work_len);
+    free(work);
+    free(png);
+    INKWELL_TEST_FAIL_IF(r != 0, "decodes in exactly that much");
+    INKWELL_TEST_FAIL_IF(out[0] != pixels[0] ||
+                             out[(W * H - 1) * 4 + 2] != pixels[(W * H - 1) * 4 + 2],
+                         "and reads back");
+    record_success(test_name);
+}
