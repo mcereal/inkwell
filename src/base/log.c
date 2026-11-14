@@ -84,6 +84,8 @@ static void format_timestamp(char *buffer, size_t buffer_len) {
  */
 /* The longest line a sink is handed. A log line is a sentence, not a payload. */
 #define INKWELL_LOG_SINK_LINE_MAX 256U
+/* The longest line stderr gets in a single write; a longer one is streamed in pieces. */
+#define INKWELL_LOG_LINE_MAX 1024U
 
 static void (*g_sink)(const char *line);
 
@@ -150,6 +152,41 @@ void inkwell_log_message_v(enum inkwell_log_level level, const char *component, 
     va_copy(captured, args);
     log_capture(timestamp, level, component, fmt, captured);
     va_end(captured);
+
+    /*
+     * The line goes out in one write. stderr is unbuffered, so each fprintf() below used to be a
+     * write() of its own - five a line - and a reader that takes a write as a record saw five
+     * records: the kernel log, which is where a service's stderr goes on inkos, showed
+     * "[INFO]", "(session)", ":" and the message as separate entries. A pipe shared by several
+     * writers interleaved the pieces. A line too long for the buffer is the one exception, and
+     * streams out as it always did rather than being cut.
+     */
+    char line[INKWELL_LOG_LINE_MAX];
+    int used =
+        snprintf(line, sizeof line, "%s [%s]", timestamp, inkwell_log_level_to_string(level));
+    size_t offset = used > 0 && (size_t)used < sizeof line ? (size_t)used : sizeof line;
+    if (offset < sizeof line && component != NULL && component[0] != '\0') {
+        used = snprintf(line + offset, sizeof line - offset, " (%s)", component);
+        offset =
+            used >= 0 && (size_t)used < sizeof line - offset ? offset + (size_t)used : sizeof line;
+    }
+    if (offset + 2U < sizeof line) {
+        line[offset++] = ':';
+        line[offset++] = ' ';
+        va_list message;
+        va_copy(message, args);
+        used = vsnprintf(line + offset, sizeof line - offset, fmt, message);
+        va_end(message);
+        /* Room for the message, and for the newline it may not have brought with it. */
+        if (used >= 0 && (size_t)used + 1U < sizeof line - offset) {
+            offset += (size_t)used;
+            if (offset == 0U || line[offset - 1U] != '\n') {
+                line[offset++] = '\n';
+            }
+            (void)fwrite(line, 1U, offset, stderr);
+            return;
+        }
+    }
 
     fprintf(stderr, "%s [%s]", timestamp, inkwell_log_level_to_string(level));
     if (component != NULL && component[0] != '\0') {

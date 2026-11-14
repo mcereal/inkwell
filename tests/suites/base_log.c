@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -455,5 +456,62 @@ INKWELL_TEST_CASE(log_sink_line_is_a_prefix_of_the_full_line_wherever_it_is_cut,
     inkwell_log_set_sink(NULL);
     inkwell_log_set_level(saved_level);
     INKWELL_TEST_FAIL_IF(failure != NULL, failure);
+    record_success(test_name);
+}
+
+/* Every datagram waiting on `fd`, counted, with the first kept in `first`. */
+static unsigned log_datagrams(int fd, char *first, size_t first_size) {
+    unsigned count = 0U;
+    char buffer[2048];
+    for (;;) {
+        const ssize_t got = recv(fd, buffer, sizeof buffer - 1U, MSG_DONTWAIT);
+        if (got < 0) {
+            return count;
+        }
+        buffer[got] = '\0';
+        if (count++ == 0U) {
+            snprintf(first, first_size, "%s", buffer);
+        }
+    }
+}
+
+/* A line is one write. The kernel log takes each write to /dev/kmsg as a record of its own, and
+   a service's stderr is the kernel log on inkos, so a line written in pieces was a line split
+   into "[INFO]", "(component)", ":" and the message. A datagram socket keeps write boundaries
+   the same way, and stands in for it. */
+INKWELL_TEST_CASE(log_line_reaches_stderr_in_one_write, unit) {
+    int pair[2];
+    INKWELL_TEST_FAIL_IF(socketpair(AF_UNIX, SOCK_DGRAM, 0, pair) != 0, "no socketpair");
+    fflush(stderr);
+    const int saved_stderr = dup(STDERR_FILENO);
+    INKWELL_TEST_FAIL_IF(saved_stderr < 0 || dup2(pair[1], STDERR_FILENO) < 0,
+                         "could not redirect stderr");
+    const enum inkwell_log_level saved_level = inkwell_log_get_level();
+    inkwell_log_set_level(INKWELL_LOG_LEVEL_INFO);
+
+    char first[2048] = "";
+    inkwell_log_info("session", "serving at %s", "/run/inkos/bus/session");
+    const unsigned with_component = log_datagrams(pair[0], first, sizeof first);
+    char bare[2048] = "";
+    inkwell_log_info(NULL, "%s\n", "already ends in a newline");
+    const unsigned without_component = log_datagrams(pair[0], bare, sizeof bare);
+
+    fflush(stderr);
+    (void)dup2(saved_stderr, STDERR_FILENO);
+    close(saved_stderr);
+    close(pair[0]);
+    close(pair[1]);
+    inkwell_log_set_level(saved_level);
+
+    INKWELL_TEST_FAIL_IF(with_component != 1U, "a line with a component took more than one write");
+    INKWELL_TEST_FAIL_IF(strstr(first, "[INFO] (session): serving at /run/inkos/bus/session\n") ==
+                             NULL,
+                         "the one write was not the whole line");
+    INKWELL_TEST_FAIL_IF(without_component != 1U, "a line without a component took more than one");
+    static const char bare_tail[] = ": already ends in a newline\n";
+    const size_t bare_len = strlen(bare);
+    INKWELL_TEST_FAIL_IF(bare_len < sizeof bare_tail - 1U ||
+                             strcmp(bare + bare_len - (sizeof bare_tail - 1U), bare_tail) != 0,
+                         "a message's own newline was doubled or lost");
     record_success(test_name);
 }
