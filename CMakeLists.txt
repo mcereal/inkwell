@@ -244,7 +244,12 @@ if(INKWELL_WITH_TLS AND
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls-config/inkwell_psa_crypto_config.h
             CACHE FILEPATH "" FORCE)
 
+        # Mbed TLS declares cmake_minimum_required(3.5.1) while saying it needs 3.10.2, and CMake 4
+        # warns on every configure that compatibility below 3.10 is going away. Raise the floor
+        # for its directory only, which is what its own comment asks for.
+        set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
         add_subdirectory(third_party/mbedtls EXCLUDE_FROM_ALL)
+        unset(CMAKE_POLICY_VERSION_MINIMUM)
     endif()
 
     target_compile_definitions(inkwell PUBLIC INKWELL_HAVE_TLS)

@@ -1,0 +1,11 @@
+# Host tools for this repo, installed into build/venv by `make venv` (the targets that need them
+# make it first). jinja2 and jsonschema are what Mbed TLS generates its sources with.
+#
+# clang-format is pinned to the patch release because its output *is* the format check: two
+# "clang-format 18"s (Ubuntu 24.04's 18.1.3 and 26.04's 18.1.8) lay the same table out
+# differently, and Homebrew's is whatever is newest. This wheel is the same formatter on macOS and
+# Linux, so `make format` on a laptop and `make format-check` in CI agree by construction. Bumping
+# it is one line here plus one `make format` commit.
+jinja2
+jsonschema
+clang-format==23.1.5

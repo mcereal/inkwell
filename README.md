@@ -108,13 +108,14 @@ shape of the stack, in the same way a new area is.
 
 ### Building it
 
-On macOS the Mbed TLS generator wants a Python with `jinja2` and `jsonschema`; point CMake at one
-with `-DPython3_EXECUTABLE=...` if the one on `PATH` does not have them.
+The Mbed TLS generator wants a Python with `jinja2` and `jsonschema`. `make` builds one into
+`build/venv` from `requirements-dev.txt` and points CMake at it; a plain `cmake` configure needs
+`-DPython3_EXECUTABLE=...` naming such a Python if the one on `PATH` does not have them.
 
 ```bash
 make test        # Debug build + ctest - the default verify step, and what CI runs
 make debug       # build only
-make format      # clang-format all tracked .c/.h (needs clang-format 18)
+make format      # clang-format all tracked .c/.h, with the version requirements-dev.txt pins
 ```
 
 `make test` runs the unit suite and `scripts/check-layers.py`. Run it before every push.

@@ -563,7 +563,16 @@ static void probe_stop(struct proxy_probe *probe) {
     inkwell_loop_shutdown(&probe->loop);
 }
 
-/* Connects and gets as far as READY, which almost every case needs before it starts. */
+/*
+ * Connects and gets as far as READY, which almost every case needs before it starts.
+ *
+ * The budget is turns, and a turn is up to 5 ms of real time, so it is also a wall-clock budget:
+ * 100 turns was half a second, which a busy macOS runner has been seen to spend before the
+ * CONNECT arrived. 500 is still 5 s of the proxy's clock, under its 10 s connect deadline, and
+ * costs nothing when the machine is quick - the loop stops as soon as the condition holds.
+ */
+#define PROBE_CONNECT_TURNS 500U
+
 static bool probe_connect(struct proxy_probe *probe) {
     struct inkwell_mqtt_client_config config;
     probe_config(&config, probe->broker.port);
@@ -573,11 +582,12 @@ static bool probe_connect(struct proxy_probe *probe) {
     }
     struct inkwell_mqtt_header header;
     const uint8_t *body = NULL;
-    if (!probe_until_packet(probe, &header, &body, 100U) || header.type != INKWELL_MQTT_CONNECT) {
+    if (!probe_until_packet(probe, &header, &body, PROBE_CONNECT_TURNS) ||
+        header.type != INKWELL_MQTT_CONNECT) {
         return false;
     }
     broker_connack(&probe->broker, INKWELL_MQTT_CONNACK_ACCEPTED);
-    return probe_until_state(probe, INKWELL_MQTT_CLIENT_READY, 100U);
+    return probe_until_state(probe, INKWELL_MQTT_CLIENT_READY, PROBE_CONNECT_TURNS);
 }
 
 /* ------------------------------------------------------------------ getting connected */
