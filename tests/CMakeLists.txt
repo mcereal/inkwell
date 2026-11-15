@@ -58,6 +58,8 @@ set(INKWELL_TEST_SUITES
     suites/io_uevent.c
     suites/io_pcm.c
     suites/io_netif.c
+    suites/io_block.c
+    suites/io_dm.c
     suites/net_dhcp.c
     suites/net_fetch.c
     suites/net_mqtt.c

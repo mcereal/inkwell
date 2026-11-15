@@ -68,10 +68,16 @@ set(INKWELL_UEVENT_MONITOR_SOURCE src/io/uevent_unavailable.c)
 set(INKWELL_PCM_SOURCE src/io/pcm_unavailable.c)
 # Network interfaces are rtnetlink, Linux's alone.
 set(INKWELL_NETIF_SOURCE src/io/netif_unavailable.c)
+# The device mapper is Linux's ioctls; dm-verity's table line beside them is plain text.
+set(INKWELL_DM_SOURCE src/io/dm_unavailable.c)
+# Partitions by name are read from a sysfs tree, which any POSIX system can be handed; Windows has
+# no such tree.
+set(INKWELL_BLOCK_SOURCE src/io/block_sysfs.c)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(INKWELL_UEVENT_MONITOR_SOURCE src/io/uevent_netlink.c)
     set(INKWELL_PCM_SOURCE src/io/pcm_alsa.c)
     set(INKWELL_NETIF_SOURCE src/io/netif_netlink.c)
+    set(INKWELL_DM_SOURCE src/io/dm_linux.c)
 endif()
 if(WIN32)
     set(INKWELL_CRASH_SOURCE src/runtime/crash_windows.c)
@@ -85,6 +91,7 @@ if(WIN32)
     set(INKWELL_SERIAL_SOURCE src/io/serial_windows.c)
     set(INKWELL_LOCAL_SOURCE src/net/local_unavailable.c)
     set(INKWELL_USB_STORAGE_SOURCE src/io/usb_storage_unavailable.c)
+    set(INKWELL_BLOCK_SOURCE src/io/block_unavailable.c)
 elseif(APPLE)
     # A Mac process has threads it never started, so the forked resolver's child may not call
     # getaddrinfo(); this one asks mDNSResponder over a socket instead. See resolve_apple.c.
@@ -151,7 +158,8 @@ add_library(inkwell STATIC
     src/net/tls.c
     src/net/zip_fetch.c
     # io: the USB serial ports the system has, a tty opened raw on the loop's terms, and the
-    # kernel's device events, and a PCM playback device
+    # kernel's device events, and a PCM playback device, and block devices: partitions by name,
+    # and the device mapper over them
     ${INKWELL_SERIAL_SOURCE}
     ${INKWELL_USB_STORAGE_SOURCE}
     src/io/uevent.c
@@ -159,6 +167,10 @@ add_library(inkwell STATIC
     src/io/pcm.c
     ${INKWELL_PCM_SOURCE}
     ${INKWELL_NETIF_SOURCE}
+    src/io/block.c
+    ${INKWELL_BLOCK_SOURCE}
+    src/io/dm.c
+    ${INKWELL_DM_SOURCE}
     # ble: a Bluetooth LE central over whichever stack the system has. The backend is added
     # below, once the build knows which one that is.
     src/ble/central.c
