@@ -68,7 +68,8 @@ static int lay_out(struct dm_ioctl *io, const struct inkwell_dm_target *targets,
         spec->sector_start = t->start;
         spec->length = t->sectors;
         snprintf(spec->target_type, sizeof spec->target_type, "%s", t->type);
-        memcpy(g_buf + at + sizeof *spec, t->params, params);
+        /* The parameter string follows its spec. */
+        memcpy(spec + 1, t->params, params);
         spec->next = (uint32_t)len;
         at += len;
     }
