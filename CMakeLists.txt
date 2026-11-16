@@ -203,6 +203,14 @@ if(WIN32)
 endif()
 add_library(inkwell::inkwell ALIAS inkwell)
 
+# How many sources a loop holds (runtime/loop.h). PUBLIC: struct inkwell_loop's size follows it,
+# so whatever links inkwell must see the same number.
+set(INKWELL_LOOP_MAX_SOURCES 32 CACHE STRING "Sources one inkwell loop holds (at most 64 on Windows)")
+if(NOT INKWELL_LOOP_MAX_SOURCES MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR "INKWELL_LOOP_MAX_SOURCES must be a positive number")
+endif()
+target_compile_definitions(inkwell PUBLIC INKWELL_LOOP_MAX_SOURCES=${INKWELL_LOOP_MAX_SOURCES})
+
 # _POSIX_C_SOURCE for signalfd, timerfd, eventfd, clock_gettime and the rest of the loop's
 # vocabulary. PUBLIC because a consumer that includes runtime/loop.h and then calls epoll
 # needs the same declarations visible.

@@ -34,7 +34,18 @@ extern "C" {
 
 typedef int (*inkwell_loop_callback)(int fd, uint32_t events, void *userdata);
 
+/*
+ * How many sources one loop holds, its own wake among them: a fixed array, so a loop never
+ * allocates. 32 unless the build
+ * says otherwise - the INKWELL_LOOP_MAX_SOURCES cache variable, which CMake puts on the inkwell
+ * target as a PUBLIC definition, so the library and every program that links it agree on the
+ * struct. A server that is one source per client (a display server, a bus) needs more than 32;
+ * a microcontroller fewer. On Windows the wait is WaitForMultipleObjects(), so at most
+ * MAXIMUM_WAIT_OBJECTS (64), which loop.c asserts.
+ */
+#ifndef INKWELL_LOOP_MAX_SOURCES
 #define INKWELL_LOOP_MAX_SOURCES 32
+#endif
 
 struct inkwell_loop_source {
     int fd;

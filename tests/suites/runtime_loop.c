@@ -446,3 +446,45 @@ INKWELL_TEST_CASE(loop_watches_native_socket_with_token, unit) {
                          "socket callback should receive its registration token");
     record_success(test_name);
 }
+
+static int never_called(int fd, uint32_t events, void *userdata) {
+    (void)fd;
+    (void)events;
+    (void)userdata;
+    return 0;
+}
+
+/* A loop holds INKWELL_LOOP_MAX_SOURCES sources - as many as the build asked for, its own wake
+   among them - and says it is full past that, rather than losing one. */
+INKWELL_TEST_CASE(loop_holds_as_many_sources_as_built_for, unit) {
+    struct inkwell_loop loop;
+    INKWELL_TEST_FAIL_IF(inkwell_loop_init(&loop) < 0, "inkwell_loop_init failed");
+    static int fds[INKWELL_LOOP_MAX_SOURCES + 1][2];
+    int added = 0;
+    int last = 0;
+    for (int i = 0; i <= INKWELL_LOOP_MAX_SOURCES; ++i) {
+        if (pipe(fds[i]) < 0) {
+            fds[i][0] = fds[i][1] = -1;
+            break;
+        }
+        last = inkwell_loop_add_fd(&loop, fds[i][0], INKWELL_LOOP_IN, never_called, NULL);
+        if (last != 0) {
+            break;
+        }
+        ++added;
+    }
+    for (int i = 0; i <= INKWELL_LOOP_MAX_SOURCES; ++i) {
+        if (i < added) {
+            (void)inkwell_loop_remove_fd(&loop, fds[i][0]);
+        }
+        if (fds[i][0] > 0) {
+            close(fds[i][0]);
+            close(fds[i][1]);
+        }
+    }
+    inkwell_loop_shutdown(&loop);
+    INKWELL_TEST_FAIL_IF(added != INKWELL_LOOP_MAX_SOURCES - 1,
+                         "every source it was built for, but the one its wake takes");
+    INKWELL_TEST_FAIL_IF(last != -ENOSPC, "and full past them");
+    record_success(test_name);
+}

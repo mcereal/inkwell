@@ -38,6 +38,8 @@
  * INKWELL_LOOP_MAX_SOURCES is below that.
  */
 #if defined(_WIN32)
+_Static_assert(INKWELL_LOOP_MAX_SOURCES <= MAXIMUM_WAIT_OBJECTS,
+               "WaitForMultipleObjects() waits on at most MAXIMUM_WAIT_OBJECTS handles");
 #elif defined(__linux__)
 #include <sys/epoll.h>
 
